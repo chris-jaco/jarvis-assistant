@@ -1,14 +1,43 @@
 import { OAuth2Client } from 'google-auth-library';
 import type { Credentials } from 'google-auth-library';
-import { mkdir, readFile, rename, writeFile, lstat } from 'node:fs/promises';
+import { mkdir, rename, open, lstat, unlink } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
+import { constants } from 'node:fs';
+import { TokenFileSecurity } from './token-security.js';
 import { randomUUID } from 'node:crypto';
 import { ToolError } from '../types.js';
 export interface GoogleConfig { clientId?: string; clientSecret?: string; tokenPath: string; redirectUri: string }
-export async function saveTokens(path: string, tokens: Credentials): Promise<void> {
-  const dir = dirname(resolve(path)); await mkdir(dir, { recursive: true, mode: 0o700 });
+export async function saveTokens(path: string, tokens: Credentials, security = new TokenFileSecurity()): Promise<void> {
+  path = resolve(path);
+  const dir = dirname(path);
+  const created = await mkdir(dir, { recursive: true, mode: 0o700 });
+  await security.validate(dir, await lstat(dir), true, created !== undefined);
+  try { await security.validate(path, await lstat(path)); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
   const temporary = `${path}.${randomUUID()}.tmp`;
-  await writeFile(temporary, JSON.stringify(tokens), { mode: 0o600, flag: 'wx' }); await rename(temporary, path);
+  let handle;
+  try {
+    // Create empty first. Verify its inherited ACL/mode before writing secrets.
+    handle = await open(temporary, 'wx', 0o600);
+    await security.validate(temporary, await handle.stat());
+    await handle.writeFile(JSON.stringify(tokens));
+    await handle.sync();
+    await handle.close(); handle = undefined;
+    await rename(temporary, path);
+  } finally {
+    await handle?.close();
+    await unlink(temporary).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });
+  }
+}
+export async function readTokens(path: string, security = new TokenFileSecurity()): Promise<Credentials> {
+  path = resolve(path);
+  await security.validate(dirname(path), await lstat(dirname(path)), true);
+  await security.validate(path, await lstat(path));
+  const handle = await open(path, constants.O_RDONLY | (security.platform === 'win32' ? 0 : constants.O_NOFOLLOW));
+  try {
+    await security.validate(path, await handle.stat());
+    return JSON.parse(await handle.readFile('utf8')) as Credentials;
+  } finally { await handle.close(); }
 }
 export class GoogleAuth {
   private loading?: Promise<OAuth2Client>;
@@ -24,9 +53,7 @@ export class GoogleAuth {
   }
   private async load(): Promise<OAuth2Client> {
     if (!this.config.clientId || !this.config.clientSecret) throw new ToolError('UNCONFIGURED');
-    const info = await lstat(this.config.tokenPath);
-    if (!info.isFile() || (info.mode & 0o077) !== 0) throw new ToolError('UNCONFIGURED');
-    const credentials = JSON.parse(await readFile(this.config.tokenPath, 'utf8')) as Credentials;
+    const credentials = await readTokens(this.config.tokenPath);
     if (!credentials.refresh_token) throw new ToolError('UNCONFIGURED');
     const client = new OAuth2Client(this.config.clientId, this.config.clientSecret, this.config.redirectUri);
     client.setCredentials(credentials);
