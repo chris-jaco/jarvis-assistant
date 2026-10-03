@@ -25,6 +25,16 @@ const provider = new OpenAIVoiceProvider({
     play.disabled = !active;
     renderMetrics();
   },
+  tools(rows, pending) {
+    element('tool-activity').replaceChildren(...rows.slice(-8).map(row => {
+      const item = document.createElement('li');
+      item.textContent = `${row.toolId} · ${row.status === 'pending' ? 'esperando confirmación' : row.status === 'success' ? '✓' : row.status} ${row.durationMs === undefined ? '' : `${row.durationMs} ms`}${row.errorCategory ? ` · ${row.errorCategory}` : ''}`;
+      return item;
+    }));
+    element('tool-confirmation').textContent = pending?.summary ?? '';
+    element<HTMLButtonElement>('tool-approve').disabled = !pending;
+    element<HTMLButtonElement>('tool-reject').disabled = !pending;
+  },
   transcript(entries) {
     transcript.replaceChildren(...entries.map(entry => {
       const row = document.createElement('li');
@@ -47,3 +57,6 @@ play.addEventListener('click', () => {
 });
 window.addEventListener('pagehide', () => provider.disconnect());
 renderMetrics();
+
+element('tool-approve').addEventListener('click', () => provider.confirmTool(true));
+element('tool-reject').addEventListener('click', () => provider.confirmTool(false));

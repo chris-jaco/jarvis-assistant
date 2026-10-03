@@ -1,4 +1,4 @@
-import { JARVIS_INSTRUCTIONS, REALTIME_MODEL } from '../core/personality.js';
+import { JARVIS_INSTRUCTIONS, REALTIME_MODEL, JARVIS_VOICE, TURN_EAGERNESS } from '../core/personality.js';
 export class TokenError extends Error {
   constructor(public readonly status: number, message: string) { super(message); }
 }
@@ -15,8 +15,8 @@ export async function createClientSecret(apiKey: string | undefined, request: ty
         output_modalities: ['audio'],
         audio: {
           input: { transcription: { model: 'gpt-4o-mini-transcribe', language: 'es' },
-            turn_detection: { type: 'semantic_vad', eagerness: 'medium', create_response: true, interrupt_response: true } },
-          output: { voice: 'marin' }
+            turn_detection: { type: 'semantic_vad', eagerness: TURN_EAGERNESS, create_response: true, interrupt_response: true } },
+          output: { voice: JARVIS_VOICE }
         }
       } })
     });

@@ -1,6 +1,6 @@
 {
   "name": "jarvis-assistant",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,10 +11,14 @@
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck && vite build && tsc -p tsconfig.server.json",
     "start": "node --env-file-if-exists=.env dist/server/server/index.js",
-    "test": "tsx --test src/server/*.test.ts"
+    "test": "tsx --test src/server/*.test.ts src/tools/*.test.ts",
+    "google:authorize": "tsx src/server/google-authorize.ts"
   },
   "dependencies": {
+    "@js-temporal/polyfill": "0.5.1",
+    "@openai/agents-core": "0.18.0",
     "@openai/agents-realtime": "^0.18.0",
+    "google-auth-library": "11.1.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

@@ -1,5 +1,14 @@
 {
   "extends": "./tsconfig.json",
-  "compilerOptions": {"noEmit": false, "outDir": "dist/server", "rootDir": "src"},
-  "include": ["src/server/index.ts", "src/server/token.ts", "src/core/personality.ts"]
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist/server",
+    "rootDir": "src"
+  },
+  "include": [
+    "src/server/index.ts",
+    "src/server/token.ts",
+    "src/core/personality.ts",
+    "src/server/google-authorize.ts"
+  ]
 }

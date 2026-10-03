@@ -1,11 +1,13 @@
 import { OpenAIRealtimeWebRTC, RealtimeAgent, RealtimeSession } from '@openai/agents-realtime';
-import { JARVIS_INSTRUCTIONS, REALTIME_MODEL } from '../core/personality.js';
+import { JARVIS_INSTRUCTIONS, REALTIME_MODEL, JARVIS_VOICE, TURN_EAGERNESS } from '../core/personality.js';
 import type { VoiceProvider, ProviderObserver, TranscriptEntry } from '../core/provider.js';
+import { VoiceToolBridge } from './tools.js';
 import { SessionMetrics } from '../telemetry/session.js';
 
 class ClientError extends Error {}
 export class OpenAIVoiceProvider implements VoiceProvider {
   private session?: RealtimeSession;
+  private tools?: VoiceToolBridge;
   private stream?: MediaStream;
   private abort?: AbortController;
   private generation = 0;
@@ -44,13 +46,17 @@ export class OpenAIVoiceProvider implements VoiceProvider {
         throw new ClientError('No se recibió un token efímero válido.');
       }
       if (!current()) return;
+      const bridge = new VoiceToolBridge((rows, pending) => { if (current()) this.observer.tools?.(rows, pending); }, message => { if (current()) this.session?.sendMessage(message); });
+      this.tools = bridge;
+      const toolConfig = await bridge.initialize();
+      if (!current()) { bridge.close(); return; }
       const transport = new OpenAIRealtimeWebRTC({ mediaStream: stream, audioElement: this.audio });
-      const session = new RealtimeSession(new RealtimeAgent({ name: 'JARVIS', instructions: JARVIS_INSTRUCTIONS }), {
+      const session = new RealtimeSession(new RealtimeAgent({ name: 'JARVIS', instructions: `${JARVIS_INSTRUCTIONS}\n${toolConfig.context}`, tools: toolConfig.tools }), {
         model: REALTIME_MODEL, transport, tracingDisabled: true,
         config: { outputModalities: ['audio'], audio: {
           input: { transcription: { model: 'gpt-4o-mini-transcribe', language: 'es' },
-            turnDetection: { type: 'semantic_vad', eagerness: 'medium', createResponse: true, interruptResponse: true } },
-          output: { voice: 'marin' }
+            turnDetection: { type: 'semantic_vad', eagerness: TURN_EAGERNESS, createResponse: true, interruptResponse: true } },
+          output: { voice: JARVIS_VOICE }
         } }
       });
       this.session = session;
@@ -62,7 +68,11 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       session.on('transport_event', event => {
         if (!current()) return;
         switch (event.type) {
+          case 'conversation.item.input_audio_transcription.completed':
+            if ('item_id' in event && 'transcript' in event) void bridge.transcript(String(event.item_id), String(event.transcript)).catch(() => undefined);
+            break;
           case 'input_audio_buffer.speech_started':
+            if ('item_id' in event) bridge.speechStarted(String(event.item_id));
             this.metrics.detectedTurns++;
             if (speaking) this.metrics.interruptions++;
             speaking = false;
@@ -72,7 +82,9 @@ export class OpenAIVoiceProvider implements VoiceProvider {
           // Playback events reflect actual WebRTC audio buffering, not response generation.
           case 'output_audio_buffer.started': speaking = true; this.observer.state('speaking'); break;
           case 'output_audio_buffer.stopped':
-          case 'output_audio_buffer.cleared': speaking = false; this.observer.state('connected'); break;
+          case 'output_audio_buffer.cleared':
+            if (event.type === 'output_audio_buffer.stopped') bridge.playbackFinished();
+            speaking = false; this.observer.state('connected'); break;
           case 'conversation.item.input_audio_transcription.failed':
             this.observer.state(speaking ? 'speaking' : 'connected', 'No se pudo transcribir este turno. Puedes seguir hablando.'); break;
         }
@@ -110,6 +122,8 @@ export class OpenAIVoiceProvider implements VoiceProvider {
   disconnect(): void {
     ++this.generation;
     this.active = false;
+    this.tools?.close(); this.tools = undefined;
+    this.observer.tools?.([], null);
     this.abort?.abort();
     this.abort = undefined;
     const session = this.session;
@@ -124,6 +138,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       this.observer.state('disconnected');
     }
   }
+  confirmTool(approved: boolean): void { void this.tools?.decide(approved); }
   interrupt(): void {
     try { this.session?.interrupt(); } catch { this.fail('No se pudo interrumpir la respuesta. Vuelve a conectar.'); }
   }

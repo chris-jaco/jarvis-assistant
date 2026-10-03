@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
+import { createToolsHandler } from './tools.js';
 import { createClientSecret, TokenError } from './token.js';
 try { process.loadEnvFile('.env'); } catch (error) {
   if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -9,8 +10,10 @@ const production = process.argv[1]?.endsWith('.js') ?? false;
 const vite = production ? undefined : await (await import('vite')).createServer({ server: { middlewareMode: true }, appType: 'spa' });
 const root = resolve('dist/client');
 const mime: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
+const tools = createToolsHandler();
 let tokenPending = false;
 const server = createServer(async (req, res) => {
+  if (await tools.handle(req, res)) return;
   const path = req.url?.split('?')[0];
   if (path === '/api/realtime/token') {
     res.setHeader('Content-Type', 'application/json');
@@ -43,7 +46,9 @@ const server = createServer(async (req, res) => {
 });
 const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? '127.0.0.1';
+if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be an integer from 1 to 65535.');
+if (!host.trim()) throw new Error('HOST must not be empty.');
 server.listen(port, host, () => console.log(`JARVIS: http://${host}:${port}`));
-async function shutdown(): Promise<void> { server.close(); await vite?.close(); }
+async function shutdown(): Promise<void> { tools.close(); server.close(); await vite?.close(); }
 process.on('SIGTERM', () => { void shutdown(); });
 process.on('SIGINT', () => { void shutdown(); });

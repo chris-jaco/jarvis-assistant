@@ -6,3 +6,6 @@ dist/
 artifacts/
 .npm-cache/
 *.log
+
+.local/
+*google-tokens*.json
