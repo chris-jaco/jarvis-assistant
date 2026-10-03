@@ -57,7 +57,9 @@ export class ToolExecutor {
       if (!parsed.success) throw new ToolError('INVALID_INPUT');
       const input = tool.prepare ? await this.bounded(tool, signal => tool.prepare!(parsed.data, signal)) : parsed.data;
       if (this.closed || revision !== this.revision) throw new ToolError('EXPIRED');
-      if (requiresConfirmation(tool)) {
+      row.confirmationRequired = requiresConfirmation(tool, input);
+      row.confirmation = row.confirmationRequired ? 'waiting' : 'not_required';
+      if (row.confirmationRequired) {
         this.invalidate('rejected');
         const pending = { id: randomUUID(), tool, input, expiresAt: this.now() + this.confirmationMs, row };
         this.pending = pending; row.status = 'pending';

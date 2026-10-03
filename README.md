@@ -1,4 +1,4 @@
-# JARVIS V0.2 — Universal Tool Foundation
+# JARVIS V0.2.1 — Universal Tool Foundation
 
 Asistente personal por voz: TypeScript strict, Node HTTP nativo, UI mínima sin framework, OpenAI Realtime y WebRTC. V0.2 añade herramientas sin reemplazar la arquitectura V0.1. El tag `v0.1.0` es la referencia conocida y no se modifica. Trabajar en `v0.2-tools`; no se publica ni mezcla automáticamente en `main`.
 
@@ -32,7 +32,7 @@ No hay lint configurado. El lockfile fija dependencias. `npm start` sirve `dist/
 | `PORT`, `HOST` | 3000 y 127.0.0.1 por defecto; puerto válido y host de escucha. |
 | `USER_TIMEZONE` | Zona IANA explícita, ejemplo Europe/Madrid; se valida al iniciar. |
 | `OPENAI_SEARCH_MODEL` | Modelo Responses con web_search; gpt-4.1 por defecto, configurable. |
-| `TOOL_CONFIRM_WRITES` | true por defecto; false permite WRITE sin confirmación. SENSITIVE siempre confirma. |
+| `TOOL_CONFIRM_WRITES` | true por defecto; false permite WRITE sin confirmación. SENSITIVE siempre confirma. Las invitaciones y actualizaciones a asistentes exigen confirmación explícita aunque TOOL_CONFIRM_WRITES=false; confirmWhen permite a un adapter exigirla según la mutación ya preparada. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Cliente OAuth privado del backend; opcionales. |
 | `GOOGLE_REDIRECT_URI` | Callback local http://127.0.0.1:3001/oauth/callback. |
 | `GOOGLE_CALENDAR_ID` | primary por defecto; selecciona un calendario que puedas gestionar. |
@@ -68,7 +68,7 @@ READ no confirma. WRITE confirma por defecto y se configura por herramienta (`co
 
 La preparación de una mutación resuelve el evento y su versión sin cambiar estado externo. Guarda un snapshot privado con ID/etag, argumentos, resumen visible, identificador aleatorio y expiración de 60 segundos. Solo existe una confirmación pendiente por sesión. El backend consume el identificador antes de cualquier await; decisiones repetidas/concurrentes no ejecutan dos veces. Caducar, rechazar, desconectar, cerrar sesión, iniciar otra herramienta o cambiar la solicitud invalida la confirmación. Las sesiones duran 30 minutos y admiten 100 invocaciones como máximo; reconecta después del límite. Una sesión por navegador; una nueva conexión invalida la anterior.
 
-El tool devuelve pending y JARVIS debe leer la pregunta summary y esperar. Después de terminar esa pregunta, di «Sí», «Sí, confirmo» o «Confirmo»; «No» o «Cancela» rechaza. Solo se acepta aprobación de un nuevo item de voz iniciado después de finalizar la reproducción y ligado al ID pendiente; una transcripción antigua no puede aprobar. Espera a terminar la pregunta para confirmar por voz. Interrumpir la pregunta con un «Sí» anticipado cancela sin ejecutar; «No» puede rechazar incluso antes del final. Una frase distinta cancela la solicitud en vez de interpretarla mediante otro LLM. También puedes usar Confirmar/Cancelar en la UI. Si una transcripción falla, usa los botones o deja caducar la solicitud. Nunca hay un tool que permita al modelo otorgarse aprobación.
+El tool devuelve pending y JARVIS debe leer la pregunta summary y esperar. Después de terminar esa pregunta, di «Sí», «Sí, confirma», «Confirmar», «Adelante», «Hazlo», «Sí, hazlo», «Sí, confirmo» o «Confirmo»; «No», «Cancela», «Cancelar» o «No lo hagas» rechaza. Solo se acepta aprobación de un nuevo item de voz iniciado después de un par started/stopped con el mismo response_id y ligado a la acción pendiente; cleared/interrupción no arma aprobación. La generación response.done no equivale al fin de reproducción. Realtime puede pedir otra herramienta antes de llegar la transcripción final del «Sí»: mientras haya confirmación pendiente el puente devuelve la acción congelada y bloquea la nueva ejecución, sin reemplazarla ni borrar su captura de voz. La captura conserva el ID pendiente y si el turno empezó tras la pregunta; una transcripción antigua no puede aprobar. Espera a terminar la pregunta para confirmar por voz. Interrumpir la pregunta con un «Sí» anticipado cancela sin ejecutar; «No» puede rechazar incluso antes del final. Una frase distinta cancela la solicitud en vez de interpretarla mediante otro LLM. También puedes usar Confirmar/Cancelar en la UI. Si una transcripción falla, usa los botones o deja caducar la solicitud. Nunca hay un tool que permita al modelo otorgarse aprobación.
 
 El SDK 0.18.0 ofrece `needsApproval`, `tool_approval_requested`, `session.approve` y `session.reject`, pero la guía Realtime indica que el agente no procesa nuevos pedidos mientras espera aprobación nativa. V0.2 usa la pequeña capa backend para permitir el siguiente turno de voz y mantener autoridad/estado del lado servidor. No se usa sticky approval ni aprobación por nombre de herramienta. La voz usa transcripción, no autenticación biométrica: acepta solo un entorno local y supervisado. Si no se oye la pregunta completa, se interrumpe o la respuesta no se reconoce, usa los botones para revisar el resumen exacto.
 
@@ -95,7 +95,7 @@ Herramientas:
 | calendar.updateEvent | WRITE | Renombrar/mover un evento con horario completo. |
 | calendar.deleteEvent | SENSITIVE | Eliminar una ocurrencia/evento tras confirmación obligatoria. |
 
-Fechas locales se convierten con Temporal en USER_TIMEZONE; offsets explícitos representan instantes. Se rechazan horas inexistentes/ambiguas en cambios DST y rangos invertidos. El agente recibe timezone y reloj al conectar. Para «mañana», construye desde el calendario local, no sumando siempre 24 h. Si falta duración, JARVIS pregunta. Un nombre requiere rango de búsqueda; varias coincidencias producen AMBIGUOUS y no mutan nada. Puede listar el rango y pedir al usuario escoger un ID. No se eligen silenciosamente eventos. Máximo 100 resultados; listas truncadas fallan explícitamente. No se gestionan series completas, asistentes, notificaciones ni movimientos de eventos de día completo en V0.2. Las mutaciones usan sendUpdates=none; prueba inicialmente con un calendario privado de pruebas.
+Fechas locales se convierten con Temporal en USER_TIMEZONE; offsets explícitos representan instantes. Se rechazan horas inexistentes/ambiguas en cambios DST y rangos invertidos. El agente recibe timezone y reloj al conectar. Para «mañana», construye desde el calendario local, no sumando siempre 24 h. Si falta duración, JARVIS pregunta. Un nombre requiere rango de búsqueda; varias coincidencias producen AMBIGUOUS y no mutan nada. Puede listar el rango y pedir al usuario escoger un ID. No se eligen silenciosamente eventos. Máximo 100 resultados; listas truncadas fallan explícitamente. No se gestionan series completas ni movimientos de eventos de día completo. Crear/actualizar reuniones con asistentes usa sendUpdates=all solo después de aprobación; las mutaciones sin asistentes y eliminación conservan sendUpdates=none; prueba inicialmente con un calendario privado de pruebas.
 
 Autorización inicial, en tu máquina local:
 
@@ -108,6 +108,15 @@ Autorización inicial, en tu máquina local:
 7. Para revocar, retira acceso en tu cuenta Google y elimina el token file privado. No registres su contenido. Si faltan credenciales, archivo o autorización, Calendar devuelve UNCONFIGURED sin impedir conversación/búsqueda.
 
 El callback valida state aleatorio, consume una sola respuesta y usa PKCE S256. El OAuth completo necesita tu cuenta; no fue ejecutado con credenciales reales en cloud. Un callback de loopback requiere tu navegador local, no simplemente abrirlo desde una máquina distinta.
+
+
+### Asistentes e invitaciones (V0.2.1)
+
+Create acepta `attendees: ["sofia@example.com", "juan@example.com"]`: trim, minúsculas, validación de email, máximo 50 y deduplicación. Update permite cambios solo de asistentes sin mover horario, además de título/horario; si mueve debe enviar inicio y fin juntos. `attendeeMode: "add"` es el default y conserva asistentes existentes y RSVP; `"replace"`/`"remove"` requieren una solicitud explícita. replace con [] retira todos; remove retira los emails indicados. El cuerpo preparado y el resumen incluyen destinatarios finales y cambios antes de confirmar, y conservan ID/etag. Preparación solo lee, nunca invita. Un evento cambiado después de preparar falla If-Match sin retry automático. Una lista parcial de asistentes falla cerrada.
+
+Mover/renombrar una reunión con asistentes también requiere aprobación para sus actualizaciones externas. Actualizaciones que no cambian asistentes omiten el campo del PATCH para conservarlos. Calendar detalles devuelve emails para revisión; no se añaden a telemetría. Un nombre como «Sofía» no resuelve un contacto: JARVIS debe pedir email explícito, nunca adivinarlo. Un adapter de contactos futuro podría proporcionar esos mismos emails validados; no está implementado. La entrega de correo depende de Google y preferencias del destinatario, no está garantizada por una respuesta HTTP exitosa. Eliminación conserva su política previa de notificaciones.
+
+Aceptación local adicional: crea una reunión privada de prueba con tu email de pruebas, rechaza y comprueba que no existe ni invita; repite y confirma con «Sí, confirma» tras el final de la pregunta. Comprueba un solo evento y una invitación tras aprobación. Añade un segundo email con update sin cambiar la hora, comprueba que mantiene el primero y sus RSVP, y verifica «No lo hagas». Un nombre sin email debe generar una pregunta, no invitación. Prueba todos los afirmativos, frase ambigua, expiración de 60 s, cambio de solicitud, botones y barge-in. No uses destinatarios de terceros sin su consentimiento para tus pruebas.
 
 ## MCP y futuras integraciones
 

@@ -67,12 +67,9 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       });
       session.on('transport_event', event => {
         if (!current()) return;
+        void bridge.transportEvent(event).catch(() => undefined);
         switch (event.type) {
-          case 'conversation.item.input_audio_transcription.completed':
-            if ('item_id' in event && 'transcript' in event) void bridge.transcript(String(event.item_id), String(event.transcript)).catch(() => undefined);
-            break;
           case 'input_audio_buffer.speech_started':
-            if ('item_id' in event) bridge.speechStarted(String(event.item_id));
             this.metrics.detectedTurns++;
             if (speaking) this.metrics.interruptions++;
             speaking = false;
@@ -83,7 +80,6 @@ export class OpenAIVoiceProvider implements VoiceProvider {
           case 'output_audio_buffer.started': speaking = true; this.observer.state('speaking'); break;
           case 'output_audio_buffer.stopped':
           case 'output_audio_buffer.cleared':
-            if (event.type === 'output_audio_buffer.stopped') bridge.playbackFinished();
             speaking = false; this.observer.state('connected'); break;
           case 'conversation.item.input_audio_transcription.failed':
             this.observer.state(speaking ? 'speaking' : 'connected', 'No se pudo transcribir este turno. Puedes seguir hablando.'); break;

@@ -18,11 +18,17 @@ export class GoogleCalendarTransport implements CalendarTransport {
   }
 }
 interface EventTime { dateTime?: string; date?: string; timeZone?: string }
-interface CalendarEvent { id: string; summary?: string; start?: EventTime; end?: EventTime; etag?: string; status?: string; recurringEventId?: string; recurrence?: string[]; description?: string }
+interface CalendarAttendee { email: string; displayName?: string; responseStatus?: string; optional?: boolean; additionalGuests?: number; comment?: string }
+interface CalendarEvent { id: string; attendees?: CalendarAttendee[]; attendeesOmitted?: boolean; summary?: string; start?: EventTime; end?: EventTime; etag?: string; status?: string; recurringEventId?: string; recurrence?: string[]; description?: string }
 const dateRange = { start: z.string().min(10).max(40), end: z.string().min(10).max(40) };
 const targetSchema = z.object({ eventId: z.string().max(1024).optional(), query: z.string().min(1).max(200).optional(), start: z.string().max(40).optional(), end: z.string().max(40).optional() }).strict();
 type Target = z.infer<typeof targetSchema>;
-interface Prepared { event?: CalendarEvent; body?: Record<string, unknown>; etag?: string; summary: string }
+const emails = z.array(z.string().trim().toLowerCase().email().max(254)).max(50);
+const createSchema = z.object({ title: z.string().min(1).max(200), ...dateRange, attendees: emails.optional() }).strict();
+const updateSchema = z.object({ target: targetSchema, title: z.string().min(1).max(200).optional(), start: dateRange.start.optional(), end: dateRange.end.optional(), attendees: emails.optional(), attendeeMode: z.enum(['add', 'replace', 'remove']).optional() }).strict();
+function uniqueEmails(input: string[]): string[] { return [...new Set(input)]; }
+function attendeeSummary(attendees: CalendarAttendee[]): string { return ` Asistentes finales: ${attendees.length ? attendees.map(a => a.email).join(', ') : 'ninguno'}. Se enviarán actualizaciones de invitación.`; }
+interface Prepared { sendUpdates?: 'all' | 'none'; event?: CalendarEvent; body?: Record<string, unknown>; etag?: string; summary: string }
 export class CalendarAdapter implements ToolAdapter {
   readonly integration = 'google-calendar'; readonly transport = 'api' as const;
   readonly timezone: string;
@@ -56,13 +62,14 @@ export class CalendarAdapter implements ToolAdapter {
   tools(): ToolDefinition[] {
     const definition = (id: string, description: string, permission: Permission, schema: z.ZodType, execute: ToolDefinition['execute'], prepare?: ToolDefinition['prepare']): ToolDefinition => ({
       id, name: id, description, integration: this.integration, capability: id.split('.')[1]!, permission, confirm: this.confirmWrites, schema, execute, prepare,
+      confirmWhen: raw => (raw as Prepared | undefined)?.sendUpdates === 'all',
       summarize: raw => (raw as Prepared).summary });
     return [
       definition('calendar.listEvents', 'Lista eventos de un rango explícito. Para próximos eventos usa ahora y una fecha fin cercana. Fechas locales se interpretan en USER_TIMEZONE.', 'READ', z.object(dateRange).strict(), async (raw, signal) => {
         const p = raw as { start: string; end: string }; return { events: (await this.list(p.start, p.end, signal)).map(e => this.view(e)), timezone: this.timezone };
       }),
       definition('calendar.getEvent', 'Consulta un evento por ID o búsqueda con rango. Ante ambigüedad pide elegir; nunca adivines.', 'READ', z.object({ target: targetSchema }).strict(), async (raw, signal) => {
-        const event = await this.resolve((raw as { target: Target }).target, signal); return { ...this.view(event), description: event.description?.slice(0, 1000) };
+        const event = await this.resolve((raw as { target: Target }).target, signal); return { ...this.view(event), attendees: event.attendees?.map(a => ({ email: a.email })), description: event.description?.slice(0, 1000) };
       }),
       definition('calendar.availability', 'Comprueba huecos libres dentro del rango, no solo títulos de eventos.', 'READ', z.object(dateRange).strict(), async (raw, signal) => {
         const p = raw as { start: string; end: string }; const bounds = range(p.start, p.end, this.timezone);
@@ -77,14 +84,47 @@ export class CalendarAdapter implements ToolAdapter {
         if (cursor < hi) free.push({ start: new Date(cursor).toISOString(), end: new Date(hi).toISOString() });
         return { free, timezone: this.timezone };
       }),
-      definition('calendar.createEvent', 'Crea un evento con título y comienzo/fin explícitos. Pide duración si falta; no adivines asistentes ni calendario.', 'WRITE', z.object({ title: z.string().min(1).max(200), ...dateRange }).strict(),
-        async (raw, signal) => { const p = raw as Prepared; return this.view(await this.api.request('POST', `${this.base}/events?sendUpdates=none`, p.body, signal) as CalendarEvent); },
-        async (raw, signal) => { await this.api.ready?.(signal); const p = raw as { title: string; start: string; end: string }; const b = range(p.start, p.end, this.timezone);
-          return { body: { id: randomUUID().replaceAll('-', ''), summary: p.title, start: { dateTime: b.timeMin, timeZone: this.timezone }, end: { dateTime: b.timeMax, timeZone: this.timezone } }, summary: `¿Confirmas crear «${p.title}» de ${p.start} a ${p.end} (${this.timezone})?` } satisfies Prepared; }),
-      definition('calendar.updateEvent', 'Mueve/renombra un único evento. Requiere inicio y fin nuevos; para varias coincidencias pide elegir. No edita series completas.', 'WRITE', z.object({ target: targetSchema, title: z.string().min(1).max(200).optional(), ...dateRange }).strict(),
-        async (raw, signal) => { const p = raw as Prepared; return this.view(await this.api.request('PATCH', `${this.base}/events/${encodeURIComponent(p.event!.id)}?sendUpdates=none`, p.body, signal, p.etag) as CalendarEvent); },
-        async (raw, signal) => { const p = raw as { target: Target; title?: string; start: string; end: string }; const event = await this.resolve(p.target, signal); if (event.recurrence?.length || !event.etag || !event.start?.dateTime) throw new ToolError('CONFLICT'); const b = range(p.start, p.end, this.timezone);
-          return { event, etag: event.etag, body: { ...(p.title ? { summary: p.title } : {}), start: { dateTime: b.timeMin, timeZone: this.timezone }, end: { dateTime: b.timeMax, timeZone: this.timezone } }, summary: `¿Confirmas mover «${event.summary ?? '(sin título)'}» (${event.start.dateTime}) a ${p.start}–${p.end} (${this.timezone})? Solo esta ocurrencia.` } satisfies Prepared; }),
+      definition('calendar.createEvent', 'Crea un evento con título y comienzo/fin explícitos. Asistentes opcionales son emails explícitos, nunca nombres adivinados. Las invitaciones requieren confirmación.', 'WRITE', createSchema,
+        async (raw, signal) => { const p = raw as Prepared; return this.view(await this.api.request('POST', `${this.base}/events?sendUpdates=${p.sendUpdates}`, p.body, signal) as CalendarEvent); },
+        async (raw, signal) => {
+          await this.api.ready?.(signal); const p = raw as z.infer<typeof createSchema>; const b = range(p.start, p.end, this.timezone);
+          const attendees = uniqueEmails(p.attendees ?? []).map(email => ({ email }));
+          return { sendUpdates: attendees.length ? 'all' : 'none', body: { id: randomUUID().replaceAll('-', ''), summary: p.title, start: { dateTime: b.timeMin, timeZone: this.timezone }, end: { dateTime: b.timeMax, timeZone: this.timezone }, ...(attendees.length ? { attendees } : {}) },
+            summary: `¿Confirmas crear «${p.title}» de ${p.start} a ${p.end} (${this.timezone})?${attendees.length ? attendeeSummary(attendees) : ''}` } satisfies Prepared;
+        }),
+      definition('calendar.updateEvent', 'Actualiza un evento único: título, horario completo o asistentes. Emails explícitos obligatorios. attendeeMode add conserva asistentes; replace/remove solo por petición explícita. No edita series completas.', 'WRITE', updateSchema,
+        async (raw, signal) => { const p = raw as Prepared; return this.view(await this.api.request('PATCH', `${this.base}/events/${encodeURIComponent(p.event!.id)}?sendUpdates=${p.sendUpdates}`, p.body, signal, p.etag) as CalendarEvent); },
+        async (raw, signal) => {
+          const p = raw as z.infer<typeof updateSchema>;
+          if ((p.start === undefined) !== (p.end === undefined) || (p.attendeeMode && !p.attendees) || (p.title === undefined && p.start === undefined && p.attendees === undefined)) throw new ToolError('INVALID_INPUT');
+          const event = structuredClone(await this.resolve(p.target, signal));
+          if (event.recurrence?.length || !event.etag || !event.start?.dateTime || event.attendeesOmitted) throw new ToolError('CONFLICT');
+          const body: Record<string, unknown> = { ...(p.title !== undefined ? { summary: p.title } : {}) };
+          const changes: string[] = [];
+          if (p.title !== undefined) changes.push(`título «${p.title}»`);
+          if (p.start && p.end) {
+            const b = range(p.start, p.end, this.timezone);
+            body.start = { dateTime: b.timeMin, timeZone: this.timezone }; body.end = { dateTime: b.timeMax, timeZone: this.timezone };
+            changes.push(`horario ${p.start}–${p.end}`);
+          }
+          const existing = (event.attendees ?? []).map(a => ({ email: a.email.trim().toLowerCase(),
+            ...(a.displayName !== undefined ? { displayName: a.displayName } : {}),
+            ...(a.responseStatus !== undefined ? { responseStatus: a.responseStatus } : {}),
+            ...(a.optional !== undefined ? { optional: a.optional } : {}),
+            ...(a.additionalGuests !== undefined ? { additionalGuests: a.additionalGuests } : {}),
+            ...(a.comment !== undefined ? { comment: a.comment } : {}) }));
+          let attendees = existing;
+          if (p.attendees !== undefined) {
+            const requested = uniqueEmails(p.attendees); const mode = p.attendeeMode ?? 'add';
+            const retained = mode === 'replace' ? existing.filter(a => requested.includes(a.email)) : mode === 'remove' ? existing.filter(a => !requested.includes(a.email)) : existing;
+            const merged = new Map(retained.map(a => [a.email, a]));
+            if (mode !== 'remove') for (const email of requested) if (!merged.has(email)) merged.set(email, { email });
+            attendees = [...merged.values()]; body.attendees = attendees;
+            changes.push(`asistentes ${mode}: ${requested.join(', ') || 'ninguno'}`);
+          }
+          const sendUpdates = existing.length || attendees.length ? 'all' : 'none';
+          return { event, etag: event.etag, body, sendUpdates, summary: `¿Confirmas actualizar «${event.summary ?? '(sin título)'}» (${event.start.dateTime}, ${this.timezone}): ${changes.join('; ')}? Solo esta ocurrencia.${sendUpdates === 'all' ? attendeeSummary(attendees) : ''}` } satisfies Prepared;
+        }),
       definition('calendar.deleteEvent', 'Elimina un único evento/ocurrencia. Siempre requiere confirmación explícita. Nunca borra una serie completa.', 'SENSITIVE', z.object({ target: targetSchema }).strict(),
         async (raw, signal) => { const p = raw as Prepared; await this.api.request('DELETE', `${this.base}/events/${encodeURIComponent(p.event!.id)}?sendUpdates=none`, undefined, signal, p.etag); return { deleted: true }; },
         async (raw, signal) => { const event = await this.resolve((raw as { target: Target }).target, signal); if (event.recurrence?.length || !event.etag || (!event.start?.dateTime && !event.start?.date)) throw new ToolError('CONFLICT');

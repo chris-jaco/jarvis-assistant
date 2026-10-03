@@ -3,7 +3,7 @@ export type Permission = 'READ' | 'WRITE' | 'SENSITIVE';
 export type Transport = 'hosted' | 'mcp' | 'api' | 'function' | 'local';
 export interface ToolDefinition {
   id: string; name: string; description: string; integration: string; capability: string;
-  permission: Permission; confirm?: boolean; schema: z.ZodType; timeoutMs?: number;
+  permission: Permission; confirm?: boolean; confirmWhen?(prepared: unknown): boolean; schema: z.ZodType; timeoutMs?: number;
   prepare?(input: unknown, signal: AbortSignal): Promise<unknown>;
   summarize?(input: unknown): string;
   execute(input: unknown, signal: AbortSignal): Promise<unknown>;
