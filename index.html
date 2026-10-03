@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="es">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>JARVIS V0.1</title></head>
+<body>
+<main>
+  <h1>JARVIS <small>V0.1</small></h1>
+  <p>Asistente por voz · OpenAI Realtime</p>
+  <p>Estado: <strong id="state" role="status">disconnected</strong></p>
+  <p id="message" role="status">Conecta y permite el acceso al micrófono.</p>
+  <div class="controls">
+    <button id="connect">Conectar</button><button id="disconnect" disabled>Desconectar</button>
+    <button id="interrupt" disabled>Interrumpir</button><button id="play" disabled>Activar audio</button>
+  </div>
+  <p>Habla de forma natural. Puedes interrumpir a JARVIS hablando mientras responde.</p>
+  <p>La conversación se envía a OpenAI. El contexto dura esta sesión; al reconectar comienza una nueva.</p>
+  <h2>Transcripción</h2><ol id="transcript" aria-label="Transcripción de la conversación"></ol>
+  <p id="metrics"></p><audio id="audio" autoplay></audio>
+</main>
+<script type="module" src="/src/client/main.ts"></script>
+</body></html>

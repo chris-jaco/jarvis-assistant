@@ -1,0 +1,12 @@
+:root { font-family: system-ui, sans-serif; color: #e4e8ed; background: #111820; color-scheme: dark; }
+main { max-width: 720px; margin: 3rem auto; padding: 0 1rem; }
+h1 small { font-size: 1rem; color: #a8b6c5; }
+p { line-height: 1.5; }
+.controls { display: flex; flex-wrap: wrap; gap: .6rem; }
+button { padding: .7rem 1rem; border: 1px solid #8293a8; border-radius: .4rem; cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+button:focus-visible { outline: 3px solid #82c7ff; outline-offset: 3px; }
+ol { padding-left: 1.5rem; }
+li { padding: .6rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+#message { min-height: 3rem; }
+#metrics { font-size: .85rem; color: #a8b6c5; }
