@@ -10,7 +10,7 @@ const production = process.argv[1]?.endsWith('.js') ?? false;
 const vite = production ? undefined : await (await import('vite')).createServer({ server: { middlewareMode: true }, appType: 'spa' });
 const root = resolve('dist/client');
 const mime: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
-const tools = createToolsHandler();
+const tools = createToolsHandler(process.env, { development: !production });
 let tokenPending = false;
 const server = createServer(async (req, res) => {
   if (await tools.handle(req, res)) return;

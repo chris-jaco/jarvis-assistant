@@ -196,3 +196,50 @@ Consulta del 3 octubre 2026; versiones instaladas @openai/agents-realtime y @ope
 - [Google Calendar API oficial discovery](https://github.com/googleapis/google-api-nodejs-client/blob/main/discovery/calendar-v3.json) para events/freeBusy/scopes/parámetros y [google-auth-library oficial OAuth](https://github.com/googleapis/google-auth-library-nodejs#oauth2). Sitios developers.google.com bloqueados por proxy; estas fuentes oficiales fueron accesibles.
 
 Las pruebas cloud validan entorno/código y HTTP. No establecen llamadas reales a OpenAI/Google ni micrófono, audio, semantic VAD o barge-in: completa el plan manual para validar esos comportamientos con tus credenciales y navegador.
+
+### Collecting a safe live confirmation trace (development only)
+
+A live Windows confirmation failure remains under investigation. This diagnostic
+patch intentionally preserves confirmation behavior: it does not claim to fix the
+failure. The cancellation message comes from the matching-speech fallback in
+`VoiceToolBridge.transcript`. An affirmative can reach that fallback when its
+speech-start capture was not approvable. The missing evidence is the actual
+playback/start/clear event order that made that capture ineligible.
+
+In Windows PowerShell, from the repository directory, run:
+
+```powershell
+npm install
+$env:JARVIS_CONFIRMATION_TRACE = "true"
+npm run dev
+```
+
+On Linux/macOS use `JARVIS_CONFIRMATION_TRACE=true npm run dev`.
+Open the browser developer tools **Console**, enable **Preserve log**, filter for
+`[JARVIS confirmation]`, and connect/reconnect JARVIS. Reproduce the correction
+followed by a new confirmation prompt and **“Sí, confirmo.”** once. Copy the
+filtered console lines from `bridge.initialize` through the cancellation or
+decision, plus terminal lines with the same prefix. Return those lines and the
+browser/version and OS; do not copy the normal conversation transcript, network
+payloads, `.env`, or OAuth files. Console entries are JSON strings so copying
+lines preserves their event order and original snapshots.
+
+The trace records only allowlisted event types/reasons, opaque identifier hashes,
+armed state, capture eligibility and affirmative/negative/unrelated classification.
+It includes raw transport arrival order for playback, speech, transcript, response
+and function-call events; bridge transitions, blocked repeated tools, `/cancel`
+and `/decision`; and server executor preparation/invalidation/decision/close.
+Identifiers are correlation hints, not authentication values; hashes may collide.
+No transcript text, audio, tool arguments/results, attendee details, credentials,
+cookies or tokens are logged. No diagnostic trace is persisted by JARVIS.
+
+Tracing defaults off and requires both explicit opt-in and the development server.
+`npm start` never enables it, even if the environment variable is true. Stop the
+server, then disable it with `Remove-Item Env:JARVIS_CONFIRMATION_TRACE` in
+PowerShell (or `unset JARVIS_CONFIRMATION_TRACE` on Linux/macOS), and restart.
+If enabled in `.env`, change that entry to `false` instead.
+
+The diagnostic tests deliberately probe missing playback IDs and cleared playback
+and verify the logging distinguishes them. They are **not** evidence that either
+sequence occurred in the reported live failure. A production lifecycle fix and
+its failing-before/passing-after regression require the captured live trace.

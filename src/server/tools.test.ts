@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createToolsHandler } from './tools.js';
-async function fixture() {
-  const runtime = createToolsHandler({ USER_TIMEZONE: 'Europe/Madrid' });
+async function fixture(development = false, enabled = false) {
+  const traces: unknown[] = [];
+  const runtime = createToolsHandler({ USER_TIMEZONE: 'Europe/Madrid', JARVIS_CONFIRMATION_TRACE: String(enabled) }, { development, sink: entry => traces.push(entry) });
   const server = createServer(async (req, res) => { if (!await runtime.handle(req, res)) { res.writeHead(404); res.end(); } });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-  return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close: async () => { runtime.close(); await new Promise<void>(resolve => server.close(() => resolve())); } };
+  return { traces, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close: async () => { runtime.close(); await new Promise<void>(resolve => server.close(() => resolve())); } };
 }
 test('HTTP tool sessions require ownership, reject cross-origin/non-JSON/oversize requests and close cleanly', async () => {
   const f = await fixture();
@@ -25,4 +26,17 @@ test('HTTP tool sessions require ownership, reject cross-origin/non-JSON/oversiz
     await fetch(`${f.url}/api/tools/session`, { method: 'DELETE', headers: { Cookie: cookie } });
     assert.equal((await fetch(`${f.url}/api/tools/activity`, { headers: { Cookie: cookie } })).status, 401);
   } finally { await f.close(); }
+});
+
+test('confirmation diagnostics require development mode AND explicit opt-in, including server logs', async () => {
+  for (const [development, enabled] of [[false, false], [false, true], [true, false], [true, true]]) {
+    const f = await fixture(development, enabled); try {
+      const created = await fetch(`${f.url}/api/tools/session`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      assert.equal((await created.json() as { confirmationTrace: boolean }).confirmationTrace, development && enabled);
+      const cookie = created.headers.get('set-cookie')!.split(';')[0]!;
+      await fetch(`${f.url}/api/tools/cancel`, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: '{}' });
+      assert.equal(f.traces.length > 0, development && enabled);
+      assert.ok(!JSON.stringify(f.traces).includes(cookie));
+    } finally { await f.close(); }
+  }
 });

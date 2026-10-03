@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { confirmationTracer } from '../diagnostics/confirmation.js';
+import type { TraceSink } from '../diagnostics/confirmation.js';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { ToolRegistry } from '../tools/registry.js';
@@ -25,7 +27,9 @@ async function body(req: IncomingMessage): Promise<unknown> {
   for await (const chunk of req) { bytes += chunk.length; if (bytes > 16_384) throw new Error(); chunks.push(Buffer.from(chunk)); }
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
-export function createToolsHandler(env: NodeJS.ProcessEnv = process.env) {
+export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnostics: { development?: boolean; sink?: TraceSink } = {}) {
+  const confirmationTrace = diagnostics.development === true && env.JARVIS_CONFIRMATION_TRACE === 'true';
+  const trace = confirmationTracer(confirmationTrace, diagnostics.sink);
   const { registry, timezone } = createToolRuntime(env);
   const sessions = new Map<string, { executor: ToolExecutor; expiresAt: number; busy: boolean }>();
   const lifetime = 30 * 60_000;
@@ -45,9 +49,9 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env) {
       if (previousId) { sessions.get(previousId)?.executor.close(); sessions.delete(previousId); }
       if (sessions.size >= 10) { send(429, { error: 'Demasiadas sesiones.' }); return true; }
       const id = randomBytes(32).toString('hex');
-      sessions.set(id, { executor: new ToolExecutor(registry), expiresAt: Date.now() + lifetime, busy: false });
+      sessions.set(id, { executor: new ToolExecutor(registry, Date.now, 60_000, undefined, trace), expiresAt: Date.now() + lifetime, busy: false });
       res.setHeader('Set-Cookie', `jarvis_session=${id}; HttpOnly; SameSite=Strict; Path=/api/tools; Max-Age=1800${origin?.startsWith('https:') ? '; Secure' : ''}`);
-      send(200, { tools: registry.descriptors(), timezone, now: new Date().toISOString() }); return true;
+      send(200, { tools: registry.descriptors(), timezone, now: new Date().toISOString(), confirmationTrace }); return true;
     }
     const id = /(?:^|;\s*)jarvis_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
     const session = id ? sessions.get(id) : undefined;
@@ -60,10 +64,10 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env) {
     try {
       const input = await body(req);
       if (path === '/api/tools/invoke') {
-        const p = invocation.parse(input); send(200, await session.executor.invoke(p.invocationId, p.toolId, p.input));
+        const p = invocation.parse(input); trace({ event: 'server POST /invoke', reason: 'request' }); send(200, await session.executor.invoke(p.invocationId, p.toolId, p.input));
       } else if (path === '/api/tools/decision') {
-        const p = decision.parse(input); send(200, await session.executor.decide(p.confirmationId, p.approved));
-      } else if (path === '/api/tools/cancel') { session.executor.invalidate(); send(200, { cancelled: true }); }
+        const p = decision.parse(input); trace({ event: 'server POST /decision', reason: p.approved ? 'approved' : 'rejected', pendingId: p.confirmationId }); send(200, await session.executor.decide(p.confirmationId, p.approved));
+      } else if (path === '/api/tools/cancel') { trace({ event: 'server POST /cancel', reason: 'request' }); session.executor.invalidate(); send(200, { cancelled: true }); }
       else send(404, { error: 'Ruta desconocida.' });
     } catch { send(400, { error: 'Solicitud inválida.' }); }
     finally { session.busy = false; }

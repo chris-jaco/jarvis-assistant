@@ -1,3 +1,4 @@
+import type { TraceSink } from '../diagnostics/confirmation.js';
 import { randomUUID } from 'node:crypto';
 import { requiresConfirmation } from './permissions.js';
 import { ToolTelemetry } from './telemetry.js';
@@ -23,7 +24,7 @@ export class ToolExecutor {
   private controllers = new Set<AbortController>();
   private closed = false;
   private revision = 0;
-  constructor(private readonly registry: ToolRegistry, private readonly now = Date.now, private readonly confirmationMs = 60_000, readonly telemetry = new ToolTelemetry()) {}
+  constructor(private readonly registry: ToolRegistry, private readonly now = Date.now, private readonly confirmationMs = 60_000, readonly telemetry = new ToolTelemetry(), private readonly trace: TraceSink = () => {}) {}
   invoke(id: string, toolId: string, input: unknown): Promise<ToolResult> {
     const fingerprint = JSON.stringify([toolId, input]);
     const previous = this.calls.get(id);
@@ -62,6 +63,7 @@ export class ToolExecutor {
       if (row.confirmationRequired) {
         this.invalidate('rejected');
         const pending = { id: randomUUID(), tool, input, expiresAt: this.now() + this.confirmationMs, row };
+        this.trace({ event: 'executor.prepare', reason: 'prepared', pendingId: pending.id });
         this.pending = pending; row.status = 'pending';
         return { status: 'pending', confirmationId: pending.id, summary: tool.summarize?.(input) ?? `¿Confirmas ${tool.name}?`, expiresAt: pending.expiresAt };
       }
@@ -75,6 +77,7 @@ export class ToolExecutor {
   }
   async decide(id: string, approved: boolean): Promise<ToolResult> {
     const pending = this.pending;
+    this.trace({ event: 'executor.decision', reason: approved ? 'approved' : 'rejected', pendingId: id });
     if (!pending || pending.id !== id || this.closed) return safeError(new ToolError('EXPIRED'));
     this.pending = undefined; // Consume before awaiting: concurrent/replayed decisions cannot execute twice.
     if (pending.expiresAt <= this.now()) { pending.row.confirmation = 'expired'; return this.finishError(pending.row, new ToolError('EXPIRED')); }
@@ -96,8 +99,9 @@ export class ToolExecutor {
     this.end(row); return result;
   }
   invalidate(reason: 'rejected' | 'expired' = 'rejected'): void {
+    this.trace({ event: 'executor.invalidate', reason, pendingId: this.pending?.id });
     ++this.revision;
     if (this.pending) { this.pending.row.confirmation = reason; this.finishError(this.pending.row, new ToolError(reason === 'expired' ? 'EXPIRED' : 'REJECTED')); this.pending = undefined; }
   }
-  close(): void { this.closed = true; this.invalidate(); for (const controller of this.controllers) controller.abort(); }
+  close(): void { this.trace({ event: 'executor.close', reason: 'session_closed', pendingId: this.pending?.id }); this.closed = true; this.invalidate(); for (const controller of this.controllers) controller.abort(); }
 }
