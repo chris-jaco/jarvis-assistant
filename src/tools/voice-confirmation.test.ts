@@ -6,34 +6,36 @@ import { VoiceToolBridge } from '../provider/tools.js';
 import type { ConfirmationTrace } from '../diagnostics/confirmation.js';
 import { ToolRegistry } from './registry.js';
 import { ToolExecutor } from './execution.js';
-async function fixture(traceEnabled = false) {
+async function fixture(traceEnabled = false, prepareInitially = true) {
   const traces: ConfirmationTrace[] = [];
   const original = globalThis.fetch; let now = Date.now(); let executions = 0; let invocations = 0;
   const registry = new ToolRegistry();
   registry.register({ id: 'calendar.deleteEvent', name: 'Delete', description: 'Delete', integration: 'test', capability: 'delete', permission: 'SENSITIVE', schema: z.object({}), execute: async () => { executions++; return { deleted: true }; } });
   const executor = new ToolExecutor(registry, () => now);
+  let cancellations = 0;
   const decisions: boolean[] = []; const messages: string[] = [];
   globalThis.fetch = async (url, options) => {
     const path = String(url).split('/').pop(); const body = options?.body ? JSON.parse(String(options.body)) : {};
     if (path === 'session') return Response.json({ confirmationTrace: traceEnabled, tools: registry.descriptors(), timezone: 'Europe/Madrid', now: new Date(now).toISOString() });
     if (path === 'invoke') { invocations++; return Response.json(await executor.invoke(body.invocationId, body.toolId, body.input)); }
     if (path === 'activity') return Response.json({ activity: executor.telemetry.snapshot(), pending: executor.pendingState() });
-    if (path === 'cancel') { executor.invalidate(); return Response.json({ cancelled: true }); }
+    if (path === 'cancel') { cancellations++; executor.invalidate(); return Response.json({ cancelled: true }); }
     if (path === 'decision') { decisions.push(body.approved); return Response.json(await executor.decide(body.confirmationId, body.approved)); }
     throw new Error('Unexpected path');
   };
   const bridge = new VoiceToolBridge(() => {}, message => messages.push(message), entry => traces.push(entry));
   const config = await bridge.initialize();
   const invoke = () => config.tools[0]!.invoke(new RunContext(), JSON.stringify({ inputJson: '{}' }));
-  await invoke();
+  if (prepareInitially) await invoke();
   const event = (type: string, fields: Record<string, unknown> = {}) => bridge.transportEvent({ type, ...fields });
-  const prompt = async () => { await event('output_audio_buffer.started', { response_id: 'prompt' }); await event('output_audio_buffer.stopped', { response_id: 'prompt' }); };
+  let promptSequence = 0;
+  const prompt = async () => { const response_id = `prompt-${++promptSequence}`; await event('output_audio_buffer.started', { response_id }); await event('output_audio_buffer.stopped', { response_id }); };
   const speech = (item = 'new') => event('input_audio_buffer.speech_started', { item_id: item });
   const transcript = (text: string, item = 'new') => event('conversation.item.input_audio_transcription.completed', { item_id: item, transcript: text });
-  return { traces, bridge, executor, decisions, messages, invoke, event, prompt, speech, transcript, executions: () => executions, invocations: () => invocations, expire: () => { now += 60_001; }, close: () => { bridge.close(); executor.close(); globalThis.fetch = original; } };
+  return { traces, bridge, executor, decisions, messages, invoke, event, prompt, speech, transcript, cancellations: () => cancellations, executions: () => executions, invocations: () => invocations, expire: () => { now += 60_001; }, close: () => { bridge.close(); executor.close(); globalThis.fetch = original; } };
 }
 test('speech started before prompt completion cannot confirm, even when transcript arrives after completion', async () => {
-  const f = await fixture(); try { await f.event('output_audio_buffer.started', { response_id: 'prompt' }); await f.speech(); await f.event('output_audio_buffer.stopped', { response_id: 'prompt' }); await f.speech(); await f.transcript('Sí'); assert.equal(f.executions(), 0); assert.equal(f.bridge.pending, null); } finally { f.close(); }
+  const f = await fixture(); try { await f.event('output_audio_buffer.started', { response_id: 'prompt' }); await f.speech(); await f.event('output_audio_buffer.stopped', { response_id: 'prompt' }); await f.speech(); await f.transcript('Sí'); assert.equal(f.executions(), 0); assert.ok(f.bridge.pending); assert.equal(f.cancellations(), 0); } finally { f.close(); }
 });
 for (const phrase of ['sí', 'sí, confirma', 'confirmar', 'adelante', 'hazlo', 'sí, hazlo']) {
   test(`new post-prompt utterance '${phrase}' executes once, even if Realtime repeats a tool before transcription`, async () => {
@@ -79,7 +81,7 @@ test('UI confirmation works without speech/playback and is consumed exactly once
   const f = await fixture(); try { await Promise.all([f.bridge.decide(true), f.bridge.decide(true)]); assert.equal(f.executions(), 1); assert.deepEqual(f.decisions, [true]); } finally { f.close(); }
 });
 
-test('diagnostics identify affirmative cancellation with missing playback ID without exposing transcript or inputs', async () => {
+test('diagnostics identify ineligible affirmative with missing playback ID without cancelling or exposing private data', async () => {
   const f = await fixture(true); try {
     await f.prompt(); await f.speech('correction'); await f.transcript('Change the private attendee address', 'correction');
     const oldId = f.traces.find(entry => entry.event === 'tool.result')!.pendingId;
@@ -99,7 +101,7 @@ test('diagnostics identify affirmative cancellation with missing playback ID wit
     assert.ok(f.traces.some(entry => entry.reason === 'blocked_while_pending'));
     assert.ok(f.traces.some(entry => entry.reason === 'affirmative_but_ineligible'));
     assert.notEqual(classification.pendingId, oldId);
-    assert.equal(f.executions(), 0); assert.deepEqual(f.decisions, []);
+    assert.equal(f.executions(), 0); assert.deepEqual(f.decisions, []); assert.equal(f.cancellations(), 1); assert.ok(f.bridge.pending);
     const output = JSON.stringify(f.traces);
     for (const value of [newId, 'Sí, confirmo', 'private attendee', 'DO_NOT_LOG_EVENT', 'DO_NOT_LOG_RESPONSE', 'acknowledgment']) assert.ok(!output.includes(value));
   } finally { f.close(); }
@@ -107,11 +109,109 @@ test('diagnostics identify affirmative cancellation with missing playback ID wit
 test('diagnostics observe cleared audio and captured eligibility separately; disabled tracing emits nothing', async () => {
   for (const enabled of [true, false]) {
     const f = await fixture(enabled); try {
-      await f.prompt(); await f.event('output_audio_buffer.cleared'); await f.speech(); await f.transcript('Sí, confirmo.');
+      await f.event('output_audio_buffer.started', { response_id: 'prompt' }); await f.event('output_audio_buffer.cleared'); await f.event('output_audio_buffer.stopped', { response_id: 'prompt' }); await f.speech(); await f.transcript('Sí, confirmo.');
       if (enabled) {
-        assert.ok(f.traces.some(entry => entry.event === 'playback.clear' && entry.armed === false));
+        assert.ok(f.traces.some(entry => entry.event === 'playback.clear' && entry.reason === 'prompt_interrupted' && entry.armed === false));
         assert.ok(f.traces.some(entry => entry.event === 'speech.capture' && entry.capturedApprovable === false));
       } else assert.deepEqual(f.traces, []);
     } finally { f.close(); }
   }
+});
+
+// Replay the ordering from both clean live failures: the tool-calling response
+// already started audio; the post-tool prompt has created/items/done/stopped,
+// with NO output_audio_buffer.started for that prompt's response ID.
+async function livePrompt(f: Awaited<ReturnType<typeof fixture>>, id = 'prompt-live') {
+  await f.event('response.created', { response: { id } });
+  await f.event('response.output_item.added', { response_id: id, item: { id: `${id}-item`, type: 'message', role: 'assistant' } });
+  await f.event('conversation.item.added', { item: { id: `${id}-item`, type: 'message', role: 'assistant' } });
+  await f.event('response.output_item.done', { response_id: id, item: { id: `${id}-item` } });
+  await f.event('response.done', { response: { id, status: 'completed' } });
+  await f.event('output_audio_buffer.stopped', { response_id: id });
+}
+test('live trace: post-tool prompt stops without a matching buffer start; matching affirmative approves exactly once', async () => {
+  const f = await fixture(true, false); try {
+    await f.event('response.created', { response: { id: 'calling-response' } });
+    await f.event('output_audio_buffer.started', { response_id: 'calling-response' });
+    const preparing = f.invoke();
+    await f.event('response.done', { response: { id: 'calling-response', status: 'completed' } });
+    await preparing;
+    const frozen = f.bridge.pending!.confirmationId;
+    await livePrompt(f);
+    await f.speech('affirmative-live');
+    await f.event('input_audio_buffer.speech_stopped', { item_id: 'affirmative-live' });
+    await f.event('conversation.item.added', { item: { id: 'affirmative-live' } });
+    await f.event('response.created', { response: { id: 'acknowledgment-live' } });
+    await f.event('response.output_item.added', { response_id: 'acknowledgment-live', item: { id: 'ack-item' } });
+    await f.event('conversation.item.added', { item: { id: 'ack-item' } });
+    // Also retain the existing repeated-tool race protection.
+    await f.invoke();
+    assert.equal(f.bridge.pending!.confirmationId, frozen); assert.equal(f.invocations(), 1);
+    await f.transcript('Sí, confirmo.', 'affirmative-live'); await f.transcript('Sí, confirmo.', 'affirmative-live');
+    assert.equal(f.cancellations(), 0); assert.deepEqual(f.decisions, [true]); assert.equal(f.executions(), 1);
+    const classification = f.traces.find(entry => entry.event === 'transcript.classify' && entry.classification === 'affirmative')!;
+    assert.equal(classification.pendingId, classification.capturedId); assert.equal(classification.capturedApprovable, true);
+    assert.equal(f.executor.telemetry.snapshot()[0]!.confirmation, 'granted');
+    assert.ok(f.executor.telemetry.snapshot().every(row => row.errorCategory !== 'REJECTED'));
+  } finally { f.close(); }
+});
+test('legitimate correction clears old confirmation, explicitly informs model, and new live prompt can be approved', async () => {
+  const f = await fixture(); try {
+    const old = f.bridge.pending!.confirmationId;
+    await livePrompt(f, 'old-prompt'); await f.speech('correction'); await f.transcript('Cambia la hora', 'correction');
+    assert.equal(f.cancellations(), 1); assert.equal(f.executor.pendingState(), null);
+    assert.ok(f.messages.some(message => message.includes(old) && message.includes('ya no está pendiente') && message.includes('NUEVA confirmación')));
+    await f.invoke(); assert.notEqual(f.bridge.pending!.confirmationId, old);
+    await livePrompt(f, 'corrected-prompt'); await f.speech('approved'); await f.transcript('Sí, confirmo.', 'approved');
+    assert.equal(f.cancellations(), 1); assert.deepEqual(f.decisions, [true]); assert.equal(f.executions(), 1);
+    assert.equal(f.executor.telemetry.snapshot()[1]!.confirmation, 'granted');
+  } finally { f.close(); }
+});
+test('response.done alone never arms; delayed pre-stop affirmative remains ineligible but does not cancel', async () => {
+  const f = await fixture(); try {
+    await f.event('response.created', { response: { id: 'prompt' } });
+    await f.event('response.done', { response: { id: 'prompt', status: 'completed' } });
+    await f.speech('early'); await f.event('output_audio_buffer.stopped', { response_id: 'prompt' });
+    await f.event('response.created', { response: { id: 'ack' } });
+    await f.transcript('Sí, confirmo.', 'early');
+    assert.equal(f.executions(), 0); assert.equal(f.cancellations(), 0); assert.ok(f.bridge.pending);
+    await f.speech('eligible'); await f.transcript('Sí, confirmo.', 'eligible');
+    assert.equal(f.executions(), 1); assert.deepEqual(f.decisions, [true]);
+  } finally { f.close(); }
+});
+test('stale stop, interrupted and failed post-tool prompt cannot arm even without buffer start', async () => {
+  for (const reason of ['clear', 'failed', 'cancelled', 'incomplete', 'stale-stop']) {
+    const f = await fixture(); try {
+      await f.event('response.created', { response: { id: 'prompt' } });
+      if (reason === 'clear') await f.event('output_audio_buffer.cleared', { response_id: 'prompt' });
+      if (['failed', 'cancelled', 'incomplete'].includes(reason)) await f.event('response.done', { response: { id: 'prompt', status: reason } });
+      await f.event('output_audio_buffer.stopped', { response_id: reason === 'stale-stop' ? 'old' : 'prompt' });
+      await f.speech(); await f.transcript('Sí, confirmo.');
+      assert.equal(f.executions(), 0); assert.equal(f.cancellations(), 0); assert.ok(f.bridge.pending);
+    } finally { f.close(); }
+  }
+});
+test('acknowledgment playback/clear and response.done cannot replace a completed confirmation prompt', async () => {
+  const f = await fixture(); try {
+    await livePrompt(f); await f.speech();
+    await f.event('response.created', { response: { id: 'ack' } });
+    await f.event('output_audio_buffer.started', { response_id: 'ack' });
+    await f.event('output_audio_buffer.cleared', { response_id: 'ack' });
+    await f.event('response.done', { response: { id: 'ack', status: 'cancelled' } });
+    await f.invoke(); await f.transcript('Sí, confirmo.');
+    assert.equal(f.executions(), 1); assert.deepEqual(f.decisions, [true]); assert.equal(f.cancellations(), 0);
+  } finally { f.close(); }
+});
+
+test('previous action response cannot arm a newly prepared confirmation', async () => {
+  const f = await fixture(true, false); try {
+    await f.event('response.created', { response: { id: 'before-preparation' } });
+    await f.invoke();
+    await f.event('output_audio_buffer.started', { response_id: 'before-preparation' });
+    await f.event('output_audio_buffer.stopped', { response_id: 'before-preparation' });
+    await f.speech('old-audio'); await f.transcript('Sí, confirmo.', 'old-audio');
+    assert.equal(f.executions(), 0); assert.equal(f.cancellations(), 0);
+    await livePrompt(f, 'new-prompt'); await f.speech('new-audio'); await f.transcript('Sí, confirmo.', 'new-audio');
+    assert.equal(f.executions(), 1);
+  } finally { f.close(); }
 });

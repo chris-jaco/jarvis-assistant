@@ -16,7 +16,8 @@ export async function toolRequest(path: string, data?: unknown, method = 'POST')
 export class VoiceToolBridge {
   pending: PendingConfirmation | null = null;
   private armed = false;
-  private promptPlayback?: { confirmationId: string; responseId: string };
+  private promptPlayback?: { confirmationId: string; responseId: string; interrupted: boolean };
+  private observedResponses = new Set<string>();
   private captured = new Map<string, { id: string; approvable: boolean }>();
   private closed = false;
   private polling?: ReturnType<typeof setInterval>;
@@ -52,12 +53,23 @@ export class VoiceToolBridge {
           } catch { return { status: 'error', message: 'La herramienta no respondió. No asumas que la acción se realizó; comprueba su estado antes de repetirla.' }; }
         } })) };
   }
+  private registerPromptResponse(responseId: string): void {
+    // A WebRTC output buffer may continue across responses: its stopped response
+    // need not have a matching started event. Bind the post-tool response itself.
+    // Once bound, acknowledgments/repeated tools cannot replace this prompt.
+    const alreadyObserved = this.observedResponses.has(responseId);
+    this.observedResponses.add(responseId);
+    if (!alreadyObserved && this.pending && responseId && !this.promptPlayback && !this.armed) {
+      this.promptPlayback = { confirmationId: this.pending.confirmationId, responseId, interrupted: false };
+      this.diagnostic('prompt.register', 'post_tool_response', { responseId });
+    }
+  }
   playbackStarted(responseId: string): void {
-    if (this.pending && responseId) this.promptPlayback = { confirmationId: this.pending.confirmationId, responseId };
+    this.registerPromptResponse(responseId);
     this.diagnostic('playback.start', this.pending ? 'prompt_playing' : 'no_pending', { responseId });
   }
   playbackFinished(responseId: string): void {
-    if (this.pending && this.promptPlayback?.confirmationId === this.pending.confirmationId && this.promptPlayback.responseId === responseId) this.armed = true;
+    if (this.pending && this.promptPlayback?.confirmationId === this.pending.confirmationId && this.promptPlayback.responseId === responseId && !this.promptPlayback.interrupted) this.armed = true;
     this.diagnostic('playback.finish', this.armed ? 'awaiting_confirmation' : 'not_armed', { responseId });
   }
   async transportEvent(event: { type: string; [key: string]: unknown }): Promise<void> {
@@ -70,6 +82,21 @@ export class VoiceToolBridge {
         itemId: typeof event.item_id === 'string' ? event.item_id : typeof item?.id === 'string' ? item.id : undefined });
     }
     switch (event.type) {
+      case 'response.created': {
+        const response = event.response as { id?: unknown } | undefined;
+        if (typeof response?.id === 'string') this.registerPromptResponse(response.id);
+        break;
+      }
+      case 'response.done': {
+        const response = event.response as { id?: unknown; status?: unknown } | undefined;
+        if (this.promptPlayback && response?.id === this.promptPlayback.responseId &&
+          ['cancelled', 'failed', 'incomplete'].includes(String(response.status))) {
+          this.promptPlayback.interrupted = true; this.armed = false;
+          this.diagnostic('prompt.incomplete', 'generation_not_completed');
+        }
+        // Generation completion alone is never proof of completed playback.
+        break;
+      }
       case 'output_audio_buffer.started':
         if (typeof event.response_id === 'string') this.playbackStarted(event.response_id);
         else this.diagnostic('playback.start', 'missing_response_id');
@@ -78,7 +105,15 @@ export class VoiceToolBridge {
         if (typeof event.response_id === 'string') this.playbackFinished(event.response_id);
         else this.diagnostic('playback.finish', 'missing_response_id');
         break;
-      case 'output_audio_buffer.cleared': this.armed = false; this.promptPlayback = undefined; this.diagnostic('playback.clear', 'disarmed'); break;
+      case 'output_audio_buffer.cleared': {
+        // Clearing a later acknowledgment does not undo a completed prompt.
+        const prompt = this.promptPlayback;
+        if (!this.armed && prompt && (typeof event.response_id !== 'string' || event.response_id === prompt.responseId)) {
+          prompt.interrupted = true;
+          this.diagnostic('playback.clear', 'prompt_interrupted');
+        } else this.diagnostic('playback.clear', 'not_active_prompt');
+        break;
+      }
       case 'input_audio_buffer.speech_started':
         if (typeof event.item_id === 'string') this.speechStarted(event.item_id);
         break;
@@ -100,12 +135,24 @@ export class VoiceToolBridge {
     const rejected = ['no', 'cancela', 'cancelar', 'no lo hagas', 'no cancelalo', 'cancel'].includes(normalized);
     this.diagnostic('transcript.classify', capture?.id === this.pending.confirmationId ? 'matching_capture' : 'missing_or_stale_capture', { itemId, capturedId: capture?.id, capturedApprovable: capture?.approvable, classification: approved ? 'affirmative' : rejected ? 'negative' : 'unrelated' });
     if (rejected && capture?.id === this.pending.confirmationId) { await this.decide(false); return; }
-    if (approved && capture?.approvable && capture.id === this.pending.confirmationId) { await this.decide(true); return; }
+    if (approved) {
+      if (capture?.approvable && capture.id === this.pending.confirmationId) await this.decide(true);
+      else this.diagnostic('transcript.ignore', 'affirmative_but_ineligible', { itemId, capturedId: capture?.id, capturedApprovable: capture?.approvable });
+      // An early/stale affirmative is not a request change and cannot execute.
+      return;
+    }
     // Do not let delayed transcripts or an unrelated utterance approve an action.
     if (capture?.id === this.pending.confirmationId) {
-      this.diagnostic('POST /cancel', approved ? 'affirmative_but_ineligible' : 'unrelated_matching_capture', { itemId, capturedId: capture.id, capturedApprovable: capture.approvable });
-      this.pending = null; this.armed = false;
-      await toolRequest('cancel', {}).catch(() => undefined); this.notify('La confirmación se canceló porque el usuario cambió de solicitud.'); await this.refresh();
+      this.diagnostic('POST /cancel', 'unrelated_matching_capture', { itemId, capturedId: capture.id, capturedApprovable: capture.approvable });
+      const cancelledId = this.pending.confirmationId;
+      this.pending = null; this.armed = false; this.promptPlayback = undefined; this.captured.clear();
+      try {
+        await toolRequest('cancel', {});
+        if (!this.closed) this.notify(`Resultado del backend: la confirmación ${cancelledId} se canceló porque el usuario cambió de solicitud. Esa acción ya no está pendiente y no se ejecutó. Puedes preparar inmediatamente una NUEVA confirmación con la solicitud corregida; no esperes su rechazo ni su caducidad.`);
+      } catch {
+        if (!this.closed) this.notify('No se pudo verificar la cancelación. No asumas que la acción se ejecutó ni repitas una escritura sin comprobar su estado.');
+      }
+      await this.refresh();
     }
   }
   async decide(approved: boolean): Promise<void> {
@@ -126,5 +173,5 @@ export class VoiceToolBridge {
       this.activity(data.activity, this.pending);
     } catch { /* Polling never breaks voice playback. Tool requests report failures. */ }
   }
-  close(): void { this.diagnostic('bridge.close', 'session_closed'); this.closed = true; clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE').catch(() => undefined); }
+  close(): void { this.diagnostic('bridge.close', 'session_closed'); this.closed = true; this.observedResponses.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE').catch(() => undefined); }
 }

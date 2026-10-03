@@ -199,12 +199,21 @@ Las pruebas cloud validan entorno/código y HTTP. No establecen llamadas reales 
 
 ### Collecting a safe live confirmation trace (development only)
 
-A live Windows confirmation failure remains under investigation. This diagnostic
-patch intentionally preserves confirmation behavior: it does not claim to fix the
-failure. The cancellation message comes from the matching-speech fallback in
-`VoiceToolBridge.transcript`. An affirmative can reach that fallback when its
-speech-start capture was not approvable. The missing evidence is the actual
-playback/start/clear event order that made that capture ineligible.
+The live Windows trace established that post-tool confirmation responses can finish
+playback without a matching `output_audio_buffer.started` for that response. The
+buffer had already started for the preceding tool-calling response. The bridge now
+binds the first fresh post-tool `response.created` to the frozen confirmation and
+arms only on that response's `output_audio_buffer.stopped`. `response.done` alone
+does not arm. Previously observed response IDs cannot arm a new action.
+
+Speech eligibility is frozen at `speech_started`: an early/stale affirmative never
+executes, even if its transcript arrives after playback ends. It is ignored rather
+than misclassified as a request change. An interrupted/failed prompt remains
+ineligible; use a newly prepared action or the explicit UI decision in that case.
+A completed prompt cannot be replaced/disarmed by later acknowledgments or
+repeated tool calls. Unrelated speech cancels; negative speech rejects. Backend
+cancellation feedback identifies the cancelled action and explicitly releases the
+model to prepare the corrected request immediately.
 
 In Windows PowerShell, from the repository directory, run:
 
@@ -239,7 +248,13 @@ server, then disable it with `Remove-Item Env:JARVIS_CONFIRMATION_TRACE` in
 PowerShell (or `unset JARVIS_CONFIRMATION_TRACE` on Linux/macOS), and restart.
 If enabled in `.env`, change that entry to `false` instead.
 
-The diagnostic tests deliberately probe missing playback IDs and cleared playback
-and verify the logging distinguishes them. They are **not** evidence that either
-sequence occurred in the reported live failure. A production lifecycle fix and
-its failing-before/passing-after regression require the captured live trace.
+The regression replays the supplied live order: prior response audio start, frozen
+action preparation, a fresh prompt response/items/generation completion, playback
+stop without a matching start, new speech, an intermediate acknowledgment response,
+and final affirmative transcript. It verifies one decision, one mutation, no
+cancel and no REJECTED telemetry. Separate tests cover corrections followed by new
+confirmations, pre-prompt speech, interruption, stale playback IDs, failures,
+acknowledgments and repeated calls. Diagnostics remain available for local retests.
+Automatic Realtime turn responses remain enabled to preserve V0.1 voice behavior;
+the model may still produce a short acknowledgment before the backend result.
+That acknowledgment cannot approve or replace the frozen action.
