@@ -45,3 +45,9 @@ test('validated tool safeguards remain in the full agent instructions', () => {
     'Si falla o caduca, no afirmes éxito'
   ]) assert.ok(JARVIS_INSTRUCTIONS.includes(instruction), instruction);
 });
+
+test('Gmail acknowledgment waits for authoritative send success, not user approval or a saved draft', () => {
+  for (const instruction of ['pending y awaiting_execution NO son éxito', 'espera en silencio el resultado del backend', 'status success con data.sent true', 'sent false tampoco es un envío', 'comunica que no se envió', 'nunca reintentes automáticamente']) {
+    assert.ok(JARVIS_INSTRUCTIONS.includes(instruction), instruction);
+  }
+});

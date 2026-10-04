@@ -235,3 +235,75 @@ test('reply to our own Sent message targets original recipients and preserves se
   const parsed = await simpleParser(decodeData((f.api.mutations()[0]!.body as { raw: string }).raw, 12 * 1024 * 1024));
   assert.equal(parsed.from!.value[0]!.address, ownerA.email); assert.equal((Array.isArray(parsed.to) ? parsed.to[0] : parsed.to)!.value[0]!.address, 'recipient@example.test'); assert.equal(parsed.inReplyTo, '<source@example.test>');
 });
+
+for (const phrase of ['Sí', 'sí, confirma', 'confirmar', 'adelante', 'hazlo', 'sí, hazlo', 'sí, sí, te confirmo', 'Sí, sí, te confirmo. Envíaselo, por favor.', 'Sí, envíaselo', 'Sí, envíalo', 'sí, te confirmo, envíaselo por favor', 'confirmo', 'señor confirmo', 'No, mandalo a otra dirección', 'Sí, pero cambiá el asunto', 'Esperá, agregá a Juan en copia', 'Mandalo desde la otra cuenta', 'No lo envíes', 'Sí, envíalo a otra dirección', 'Sí, agregá un adjunto', 'Qué tengo mañana']) {
+  test(`live Gmail confirmation lifecycle: ${phrase}`, async () => {
+    const original = globalThis.fetch; const f = fixture(); const decisions: boolean[] = []; const notices: string[] = [];
+    const affirmative = !['No, mandalo a otra dirección', 'Sí, pero cambiá el asunto', 'Esperá, agregá a Juan en copia', 'Mandalo desde la otra cuenta', 'No lo envíes', 'Sí, envíalo a otra dirección', 'Sí, agregá un adjunto', 'Qué tengo mañana'].includes(phrase);
+    let invokes = 0; let cancellations = 0;
+    let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+    globalThis.fetch = async (url, options) => {
+      const route = String(url).split('/').pop(); const input = options?.body ? JSON.parse(String(options.body)) : {};
+      if (route === 'session') return Response.json({ tools: f.registry.descriptors(), timezone: 'Europe/Madrid', now: new Date().toISOString() });
+      if (route === 'invoke') { invokes++; return Response.json(await f.executor.invoke(input.invocationId, input.toolId, input.input)); }
+      if (route === 'activity') return Response.json({ activity: f.executor.telemetry.snapshot(), pending: f.executor.pendingState() });
+      if (route === 'cancel') { cancellations++; f.executor.invalidate(); return Response.json({ cancelled: true }); }
+      if (route === 'decision') { decisions.push(input.approved); if (input.approved) await gate; return Response.json(await f.executor.decide(input.confirmationId, input.approved)); }
+      throw new Error('Unexpected route');
+    };
+    const bridge = new VoiceToolBridge(() => {}, message => notices.push(message));
+    try {
+      const config = await bridge.initialize(); const sdkTool = config.tools.find(t => t.name === 'gmail_send')!;
+      const invoke = () => sdkTool.invoke(new RunContext(), JSON.stringify({ inputJson: JSON.stringify(outgoing) }));
+      await invoke(); const frozen = bridge.pending!.confirmationId;
+      await bridge.transportEvent({ type: 'response.created', response: { id: 'prompt' } });
+      // Real WebRTC ordering: stopped can arrive without a started event.
+      await bridge.transportEvent({ type: 'output_audio_buffer.stopped', response_id: 'prompt' });
+      await bridge.transportEvent({ type: 'input_audio_buffer.speech_started', item_id: 'confirmation' });
+      await bridge.transportEvent({ type: 'response.created', response: { id: 'acknowledgment' } });
+      await invoke(); assert.equal(invokes, 1); assert.equal(bridge.pending!.confirmationId, frozen);
+      const completion = bridge.transportEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'confirmation', transcript: phrase });
+      if (affirmative) {
+        assert.deepEqual(decisions, [true]); assert.equal(cancellations, 0);
+        assert.equal(notices.length, 0); assert.equal(f.api.mutations().length, 0);
+        const awaiting = await invoke(); assert.ok(JSON.stringify(awaiting).includes('awaiting_execution')); assert.equal(invokes, 1);
+        release(); await completion;
+        assert.equal(f.api.mutations().length, 1); assert.equal(f.api.mutations()[0]!.accountId, A);
+        assert.equal(notices.length, 1); assert.ok(notices[0]!.includes('"status":"success"')); assert.ok(notices[0]!.includes('"sent":true'));
+        assert.ok(!notices.some(n => n.includes('cambió de solicitud')));
+        await bridge.transcript('confirmation', phrase); assert.equal(f.api.mutations().length, 1);
+      } else { await completion; assert.equal(f.api.mutations().length, 0); assert.ok(!decisions.includes(true)); assert.equal(bridge.pending, null); }
+    } finally { release(); bridge.close(); f.executor.close(); globalThis.fetch = original; }
+  });
+}
+
+for (const mode of ['early', 'stale', 'expired', 'failed']) {
+  test(`natural Gmail confirmation remains fail-safe: ${mode}`, async () => {
+    const original = globalThis.fetch; const f = fixture(); const notices: string[] = [];
+    globalThis.fetch = async (url, options) => {
+      const route = String(url).split('/').pop(); const input = options?.body ? JSON.parse(String(options.body)) : {};
+      if (route === 'session') return Response.json({ tools: f.registry.descriptors(), timezone: 'Europe/Madrid', now: new Date().toISOString() });
+      if (route === 'invoke') return Response.json(await f.executor.invoke(input.invocationId, input.toolId, input.input));
+      if (route === 'activity') return Response.json({ activity: f.executor.telemetry.snapshot(), pending: f.executor.pendingState() });
+      if (route === 'decision') return Response.json(await f.executor.decide(input.confirmationId, input.approved));
+      throw new Error('Unexpected route');
+    };
+    const bridge = new VoiceToolBridge(() => {}, n => notices.push(n));
+    try {
+      const config = await bridge.initialize(); const sdkTool = config.tools.find(t => t.name === 'gmail_send')!;
+      await sdkTool.invoke(new RunContext(), JSON.stringify({ inputJson: JSON.stringify(outgoing) }));
+      bridge.playbackStarted('prompt');
+      if (mode === 'early') bridge.speechStarted('speech');
+      bridge.playbackFinished('prompt');
+      if (mode !== 'early' && mode !== 'stale') bridge.speechStarted('speech');
+      if (mode === 'expired') f.expire();
+      if (mode === 'failed') f.api.sendFailure = true;
+      await bridge.transcript('speech', 'Sí, sí, te confirmo. Envíaselo, por favor.');
+      assert.ok(!notices.some(n => n.includes('"status":"success"')));
+      if (mode === 'failed') {
+        assert.equal(f.api.mutations().length, 1); assert.equal(notices.length, 1); assert.ok(notices[0]!.includes('"status":"error"'));
+        await bridge.transcript('speech', 'confirmo'); assert.equal(f.api.mutations().length, 1);
+      } else assert.equal(f.api.mutations().length, 0);
+    } finally { bridge.close(); f.executor.close(); globalThis.fetch = original; }
+  });
+}

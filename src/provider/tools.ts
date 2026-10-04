@@ -16,6 +16,7 @@ export async function toolRequest(path: string, data?: unknown, method = 'POST')
 export class VoiceToolBridge {
   pending: PendingConfirmation | null = null;
   private armed = false;
+  private decisionInFlight = false;
   private promptPlayback?: { confirmationId: string; responseId: string; interrupted: boolean };
   private observedResponses = new Set<string>();
   private captured = new Map<string, { id: string; approvable: boolean }>();
@@ -41,6 +42,7 @@ export class VoiceToolBridge {
           if (this.closed) return { status: 'error', message: 'Sesión cerrada.' };
           // Realtime may request another tool before asynchronous user transcription.
           // Never let the model replace/execute a frozen action while it awaits a decision.
+          if (this.decisionInFlight) return { status: 'awaiting_execution', message: 'La decisión está en procesamiento. Espera el resultado del backend; todavía no hay éxito confirmado. No repitas la acción.' };
           if (this.pending) { this.diagnostic('tool.invoke', 'blocked_while_pending'); return { status: 'pending', ...this.pending }; }
           let input: unknown; try { input = JSON.parse(inputJson); } catch { return { status: 'error', message: 'JSON inválido.' }; }
           try {
@@ -131,8 +133,12 @@ export class VoiceToolBridge {
     if (!this.pending || this.closed) { this.diagnostic('transcript.classify', 'no_pending_or_closed', { itemId }); return; }
     const capture = this.captured.get(itemId); this.captured.delete(itemId);
     const normalized = text.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '').replace(/[\p{P}\p{S}]/gu, ' ').replace(/\s+/g, ' ').trim();
-    const approved = ['si', 'si confirma', 'confirma', 'confirmar', 'si confirmo', 'confirmo', 'adelante', 'hazlo', 'si hazlo', 'yes'].includes(normalized);
-    const rejected = ['no', 'cancela', 'cancelar', 'no lo hagas', 'no cancelalo', 'cancel'].includes(normalized);
+    // Match the WHOLE utterance: only bounded affirmative words and anaphoric
+    // action restatements are allowed. Corrections, recipients, accounts, subject,
+    // body or attachment changes leave unmatched words and must invalidate.
+    // 'senor confirmo' is a narrow speech-transcription alias, not a prefix.
+    const approved = ['si', 'si confirma', 'confirma', 'confirmar', 'si confirmo', 'confirmo', 'adelante', 'hazlo', 'si hazlo', 'yes', 'senor confirmo'].includes(normalized) || /^si(?: si){0,2}(?: (?:te )?confirmo)?(?: (?:hazlo|envialo|enviaselo))?(?: por favor)?$/.test(normalized);
+    const rejected = ['no', 'cancela', 'cancelar', 'no lo hagas', 'no cancelalo', 'cancel', 'no lo envies'].includes(normalized);
     this.diagnostic('transcript.classify', capture?.id === this.pending.confirmationId ? 'matching_capture' : 'missing_or_stale_capture', { itemId, capturedId: capture?.id, capturedApprovable: capture?.approvable, classification: approved ? 'affirmative' : rejected ? 'negative' : 'unrelated' });
     if (rejected && capture?.id === this.pending.confirmationId) { await this.decide(false); return; }
     if (approved) {
@@ -158,11 +164,15 @@ export class VoiceToolBridge {
   async decide(approved: boolean): Promise<void> {
     const pending = this.pending; if (!pending || this.closed) return;
     this.diagnostic('POST /decision', approved ? 'approved' : 'rejected');
+    // Clear speech captures immediately, but keep model invocations blocked until
+    // the authoritative decision result (not the user's yes) has been received.
+    this.decisionInFlight = true;
     this.pending = null; this.armed = false; this.promptPlayback = undefined; this.captured.clear();
     try { const result = await toolRequest('decision', { confirmationId: pending.confirmationId, approved });
       if (!this.closed) this.notify(`Resultado del backend para la confirmación ${pending.confirmationId}: ${JSON.stringify(result)}. Comunica el resultado brevemente; no repitas la acción.`);
     } catch { if (!this.closed) this.notify('No se pudo confirmar la acción. No asumas éxito ni repitas una escritura sin comprobar su estado.'); }
     await this.refresh();
+    this.decisionInFlight = false;
   }
   private async refresh(): Promise<void> {
     if (this.closed) return;
