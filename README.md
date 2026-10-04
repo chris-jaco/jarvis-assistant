@@ -118,6 +118,34 @@ Mover/renombrar una reunión con asistentes también requiere aprobación para s
 
 Aceptación local adicional: crea una reunión privada de prueba con tu email de pruebas, rechaza y comprueba que no existe ni invita; repite y confirma con «Sí, confirma» tras el final de la pregunta. Comprueba un solo evento y una invitación tras aprobación. Añade un segundo email con update sin cambiar la hora, comprueba que mantiene el primero y sus RSVP, y verifica «No lo hagas». Un nombre sin email debe generar una pregunta, no invitación. Prueba todos los afirmativos, frase ambigua, expiración de 60 s, cambio de solicitud, botones y barge-in. No uses destinatarios de terceros sin su consentimiento para tus pruebas.
 
+## Perfil de voz V0.2.2 (para aceptación local)
+
+La voz Realtime pasa de `marin` a `cedar`. Toda la configuración sigue en
+`src/core/personality.ts`: `JARVIS_VOICE`, `JARVIS_SPEAKING_STYLE` y el bloque
+validado `JARVIS_TOOL_INSTRUCTIONS` forman las instrucciones del agente. Se
+mantienen `gpt-realtime-2.1`, WebRTC, VAD semántico `medium`, interrupciones y el
+flujo de confirmación V0.2.1.
+
+El perfil pide una voz masculina con español nativo, acento rioplatense/argentino
+ligero y voseo natural; adapta el idioma si Christian cambia de idioma o lo pide.
+La entrega es directa, tranquila y amable: respuesta primero, normalmente una o
+dos frases, sin muletillas repetidas ni narración de pasos obvios. Confirmaciones y
+resultados simples son concisos, pero conservan los datos necesarios para aprobar
+la acción, las aclaraciones y la información de seguridad. No se añade ninguna
+espera ni se cambian parámetros de red, generación o transcripción.
+
+El acento, el timbre percibido y el ritmo se orientan mediante instrucciones;
+no existe aquí un selector independiente de acento argentino. La pronunciación y
+el voseo pueden variar entre respuestas y requieren escucha real. Las pruebas
+verifican configuración e instrucciones, no la calidad acústica.
+
+Aceptación local: reconecta para abrir una sesión nueva con `cedar`; probá
+«Hola Jarvis, ¿me escuchás?», una pregunta sencilla, una explicación larga pedida
+explícitamente y un cambio de idioma. Después probá crear y cancelar una reunión
+de prueba, confirmar con «Sí, confirmo» tras terminar la pregunta, rechazar con
+«No» e interrumpir una respuesta. Comprobá el acento sin exageración, respuestas
+breves y todas las protecciones V0.2.1. Este perfil no está publicado todavía.
+
 ## MCP y futuras integraciones
 
 `src/tools/adapters/mcp.ts` acepta el contrato oficial `MCPServer` de @openai/agents-core 0.18.0. Usa `MCPServerStreamableHttp` para servidores remotos nuevos o `MCPServerStdio` para procesos locales. No uses SSE legado para nuevas integraciones. No se conecta ningún servidor de demostración ni servidor de terceros por defecto.
