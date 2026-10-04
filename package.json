@@ -1,6 +1,6 @@
 {
   "name": "jarvis-assistant",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -12,17 +12,23 @@
     "build": "npm run typecheck && vite build && tsc -p tsconfig.server.json",
     "start": "node --env-file-if-exists=.env dist/server/server/index.js",
     "test": "tsx --test src/core/*.test.ts src/server/*.test.ts src/tools/*.test.ts",
-    "google:authorize": "tsx src/server/google-authorize.ts"
+    "google:authorize": "tsx src/server/google-authorize.ts",
+    "gmail:authorize": "tsx src/server/gmail-authorize.ts",
+    "gmail:accounts": "tsx src/server/gmail-accounts.ts"
   },
   "dependencies": {
     "@js-temporal/polyfill": "0.5.1",
     "@openai/agents-core": "0.18.0",
     "@openai/agents-realtime": "^0.18.0",
     "google-auth-library": "11.1.0",
+    "mailparser": "^3.9.34",
+    "nodemailer": "^10.0.14",
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@types/mailparser": "^3.9.0",
     "@types/node": "^26.6.4",
+    "@types/nodemailer": "^8.0.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.2"

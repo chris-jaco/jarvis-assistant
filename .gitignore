@@ -9,3 +9,6 @@ artifacts/
 
 .local/
 *google-tokens*.json
+
+# Gmail secure account files, including custom storage locations.
+g_*.json

@@ -8,6 +8,9 @@ import { ToolExecutor } from '../tools/execution.js';
 import { WebSearchAdapter } from '../tools/adapters/search.js';
 import { CalendarAdapter, GoogleCalendarTransport } from '../tools/adapters/calendar.js';
 import { GoogleAuth, googleConfig } from '../tools/adapters/google-auth.js';
+import { GmailAccountStore } from '../tools/adapters/gmail-accounts.js';
+import { GmailAdapter } from '../tools/adapters/gmail.js';
+import { GoogleGmailTransport } from '../tools/adapters/gmail-transport.js';
 import { validateTimezone } from '../tools/adapters/time.js';
 export function createToolRuntime(env: NodeJS.ProcessEnv = process.env) {
   const timezone = validateTimezone(env.USER_TIMEZONE ?? 'Europe/Madrid');
@@ -17,6 +20,8 @@ export function createToolRuntime(env: NodeJS.ProcessEnv = process.env) {
   registry.add(new WebSearchAdapter(env.OPENAI_API_KEY, env.OPENAI_SEARCH_MODEL ?? 'gpt-4.1'));
   const auth = new GoogleAuth(googleConfig(env));
   registry.add(new CalendarAdapter(new GoogleCalendarTransport(() => auth.token()), timezone, env.GOOGLE_CALENDAR_ID ?? 'primary', writePolicy === 'true'));
+  const gmail = new GmailAccountStore(env);
+  registry.add(new GmailAdapter(gmail, new GoogleGmailTransport(gmail), timezone, writePolicy === 'true'));
   return { registry, timezone };
 }
 const invocation = z.object({ invocationId: z.string().min(1).max(128), toolId: z.string().max(80), input: z.unknown() }).strict();

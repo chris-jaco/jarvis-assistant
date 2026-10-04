@@ -1,6 +1,6 @@
 # JARVIS V0.2.1 — Universal Tool Foundation
 
-Asistente personal por voz: TypeScript strict, Node HTTP nativo, UI mínima sin framework, OpenAI Realtime y WebRTC. V0.2 añade herramientas sin reemplazar la arquitectura V0.1. El tag `v0.1.0` es la referencia conocida y no se modifica. Trabajar en `v0.2-tools`; no se publica ni mezcla automáticamente en `main`.
+Asistente personal por voz: TypeScript strict, Node HTTP nativo, UI mínima sin framework, OpenAI Realtime y WebRTC. V0.2 añade herramientas sin reemplazar la arquitectura V0.1. El tag `v0.1.0` es la referencia conocida y no se modifica. V0.3 se desarrolla en `v0.3-gmail`, sobre el tag `v0.2.2`; no se publica ni mezcla automáticamente en `main`.
 
 ## Instalar y ejecutar
 
@@ -68,7 +68,7 @@ READ no confirma. WRITE confirma por defecto y se configura por herramienta (`co
 
 La preparación de una mutación resuelve el evento y su versión sin cambiar estado externo. Guarda un snapshot privado con ID/etag, argumentos, resumen visible, identificador aleatorio y expiración de 60 segundos. Solo existe una confirmación pendiente por sesión. El backend consume el identificador antes de cualquier await; decisiones repetidas/concurrentes no ejecutan dos veces. Caducar, rechazar, desconectar, cerrar sesión, iniciar otra herramienta o cambiar la solicitud invalida la confirmación. Las sesiones duran 30 minutos y admiten 100 invocaciones como máximo; reconecta después del límite. Una sesión por navegador; una nueva conexión invalida la anterior.
 
-El tool devuelve pending y JARVIS debe leer la pregunta summary y esperar. Después de terminar esa pregunta, di «Sí», «Sí, confirma», «Confirmar», «Adelante», «Hazlo», «Sí, hazlo», «Sí, confirmo» o «Confirmo»; «No», «Cancela», «Cancelar» o «No lo hagas» rechaza. Solo se acepta aprobación de un nuevo item de voz iniciado después de un par started/stopped con el mismo response_id y ligado a la acción pendiente; cleared/interrupción no arma aprobación. La generación response.done no equivale al fin de reproducción. Realtime puede pedir otra herramienta antes de llegar la transcripción final del «Sí»: mientras haya confirmación pendiente el puente devuelve la acción congelada y bloquea la nueva ejecución, sin reemplazarla ni borrar su captura de voz. La captura conserva el ID pendiente y si el turno empezó tras la pregunta; una transcripción antigua no puede aprobar. Espera a terminar la pregunta para confirmar por voz. Interrumpir la pregunta con un «Sí» anticipado cancela sin ejecutar; «No» puede rechazar incluso antes del final. Una frase distinta cancela la solicitud en vez de interpretarla mediante otro LLM. También puedes usar Confirmar/Cancelar en la UI. Si una transcripción falla, usa los botones o deja caducar la solicitud. Nunca hay un tool que permita al modelo otorgarse aprobación.
+El tool devuelve pending y JARVIS debe leer la pregunta summary y esperar. Después de terminar esa pregunta, di «Sí», «Sí, confirma», «Confirmar», «Adelante», «Hazlo», «Sí, hazlo», «Sí, confirmo» o «Confirmo»; «No», «Cancela», «Cancelar» o «No lo hagas» rechaza. Solo se acepta aprobación de un nuevo item de voz iniciado después del output_audio_buffer.stopped de la respuesta nueva vinculada a la acción pendiente (response.created; no necesita un started correspondiente); cleared/interrupción no arma aprobación. La generación response.done no equivale al fin de reproducción. Realtime puede pedir otra herramienta antes de llegar la transcripción final del «Sí»: mientras haya confirmación pendiente el puente devuelve la acción congelada y bloquea la nueva ejecución, sin reemplazarla ni borrar su captura de voz. La captura conserva el ID pendiente y si el turno empezó tras la pregunta; una transcripción antigua no puede aprobar. Espera a terminar la pregunta para confirmar por voz. Un «Sí» anticipado se ignora sin ejecutar ni cancelar por cambio de solicitud; «No» puede rechazar incluso antes del final. Una frase distinta cancela la solicitud en vez de interpretarla mediante otro LLM. También puedes usar Confirmar/Cancelar en la UI. Si una transcripción falla, usa los botones o deja caducar la solicitud. Nunca hay un tool que permita al modelo otorgarse aprobación.
 
 El SDK 0.18.0 ofrece `needsApproval`, `tool_approval_requested`, `session.approve` y `session.reject`, pero la guía Realtime indica que el agente no procesa nuevos pedidos mientras espera aprobación nativa. V0.2 usa la pequeña capa backend para permitir el siguiente turno de voz y mantener autoridad/estado del lado servidor. No se usa sticky approval ni aprobación por nombre de herramienta. La voz usa transcripción, no autenticación biométrica: acepta solo un entorno local y supervisado. Si no se oye la pregunta completa, se interrumpe o la respuesta no se reconoce, usa los botones para revisar el resumen exacto.
 
@@ -144,7 +144,7 @@ Aceptación local: reconecta para abrir una sesión nueva con `cedar`; probá
 explícitamente y un cambio de idioma. Después probá crear y cancelar una reunión
 de prueba, confirmar con «Sí, confirmo» tras terminar la pregunta, rechazar con
 «No» e interrumpir una respuesta. Comprobá el acento sin exageración, respuestas
-breves y todas las protecciones V0.2.1. Este perfil no está publicado todavía.
+breves y todas las protecciones V0.2.1. Este es el perfil validado de V0.2.2.
 
 ## MCP y futuras integraciones
 
@@ -286,3 +286,184 @@ acknowledgments and repeated calls. Diagnostics remain available for local retes
 Automatic Realtime turn responses remain enabled to preserve V0.1 voice behavior;
 the model may still produce a short acknowledgment before the backend result.
 That acknowledgment cannot approve or replace the frozen action.
+
+## Gmail V0.3 — varias cuentas y adjuntos
+
+Gmail se registra en el mismo `ToolRegistry` y pasa por `ToolExecutor`, las
+permisiones, la confirmación y la telemetría existentes. No hay otro ejecutor ni
+un endpoint que permita enviar sin aprobación. `cedar`, el perfil V0.2.2 y la
+máquina de confirmación por voz permanecen sin cambios.
+
+### Cuentas, identidades y OAuth
+
+Cada cuenta se identifica por `g_` + un hash del `sub` verificado de Google. El ID
+permanece estable si cambia el correo. Su archivo privado contiene credenciales y
+metadatos (ID, email, etiqueta opcional). `gmail.accounts` y `npm run gmail:accounts`
+exponen solo metadatos; `gmail.identities` consulta Send As y devuelve únicamente
+alias primarios o verificados. No configura alias ni acepta un From arbitrario.
+
+Una cuenta explícita se selecciona por ID. Si una operación necesita una cuenta y
+hay más de una, falla AMBIGUOUS: JARVIS debe preguntar. Una búsqueda sin accountId
+consulta **todas** las cuentas; con ID solo esa. Los resultados incluyen cuenta,
+mensaje e hilo para «¿En qué cuenta?», «Resumímelo» y «Respondé que…». Varias
+coincidencias requieren que el usuario elija; no se resuelven mediante nombres
+adivinados. Para un reply/reply-all, From se obtiene de los alias que recibieron el
+mensaje (To/CC; Delivered-To solo si no hay coincidencias visibles); solo se infiere si hay uno inequívoco. Un correo nuevo
+con varios alias requiere un From explícito. Reply-all excluye nuestras identidades
+y nunca copia BCC del mensaje original.
+
+Para configurar localmente:
+
+1. En Google Cloud, habilitá **Gmail API** en el proyecto OAuth existente. Calendar
+   sigue usando sus APIs y scopes existentes.
+2. Configurá la pantalla de consentimiento y agregá cada cuenta como usuario de
+   prueba mientras la aplicación esté en Testing. Para una aplicación externa,
+   Gmail utiliza scopes restringidos: Google puede requerir verificación y, según
+   el uso/almacenamiento, evaluación adicional. En Testing Google puede caducar
+   los refresh tokens de estos scopes a los siete días; reautorizá cuando ocurra.
+3. Reutilizá `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` y `GOOGLE_REDIRECT_URI` del
+   backend. El callback debe ser `http://127.0.0.1:3001/oauth/callback`; según el
+   tipo de cliente, configurá esa URI como redirect autorizado en Cloud Console.
+   La autorización abre un servidor loopback, con state aleatorio de un solo uso,
+   PKCE S256 y vencimiento de cinco minutos. Ejecutá la CLI y el navegador en la
+   misma máquina, no dos autorizaciones simultáneas en el mismo puerto.
+4. Opcionalmente configurá `GMAIL_ACCOUNTS_PATH=.local/gmail-accounts`. Calendar
+   conserva `GOOGLE_TOKEN_PATH=.local/google-tokens.json`; no se migra ni comparte
+   su archivo. No hace falta reautorizar Calendar para empezar con Gmail.
+5. Autorizá la primera cuenta y después cualquier cuenta adicional:
+
+   ```powershell
+   npm run gmail:authorize -- "Cuenta uno"
+   npm run gmail:authorize -- "Cuenta dos"
+   npm run gmail:accounts
+   ```
+
+   Elegí una cuenta diferente en cada consentimiento. Autorizar nuevamente la
+   misma cuenta actualiza solo su archivo y conserva su ID. No edites los tokens
+   manualmente. Reiniciá JARVIS después de gestionar cuentas y reconectá la voz.
+6. Para desconectar una cuenta localmente:
+
+   ```powershell
+   npm run gmail:accounts -- --remove g_ID_OBTENIDO_DEL_LISTADO
+   ```
+
+   Reemplazá el ID por el completo del listado. No toca otras cuentas ni Calendar.
+   Revocá también el acceso desde tu cuenta Google si corresponde.
+
+Scopes solicitados por Gmail:
+
+| Scope | Motivo |
+| --- | --- |
+| `openid` | Identificador estable `sub`; se verifica firma y audiencia del ID token. |
+| `email` | Email verificado de la identidad, contrastado con el perfil Gmail. |
+| `https://www.googleapis.com/auth/gmail.modify` | Búsqueda/lectura, adjuntos, borradores, envío, etiquetas y papelera; también permite **leer** Send As. |
+
+`gmail.modify` es el scope necesario para las mutaciones reversibles de etiquetas
+implementadas; evita pedir scopes redundantes de lectura/compose o
+`gmail.settings.basic`. No se pide `https://mail.google.com/` y no existe herramienta
+de borrado permanente. La especificación oficial consultada es
+[Google Gmail v1 discovery](https://github.com/googleapis/google-api-go-client/blob/main/gmail/v1/gmail-api.json).
+
+Los tokens usan los mismos `saveTokens`/`readTokens`/`GoogleAuth` validados:
+reemplazo atómico, propietario y permisos privados en POSIX, ACL nativa privada y
+rechazo de reparse points en Windows. Los archivos Gmail además rechazan ancestros
+symlink y deben corresponder al ID/subject almacenado. Los archivos `g_*.json` y
+`.local/` están ignorados. Un directorio o archivo inseguro falla cerrado; no se
+corrigen permisos inseguros de archivos existentes silenciosamente. La carga es
+opcional: no tener cuentas Gmail no impide iniciar voz, búsqueda ni Calendar.
+
+### Herramientas y permisos
+
+| Herramienta | Permiso y comportamiento |
+| --- | --- |
+| `gmail.accounts`, `gmail.identities` | READ; cuentas y From permitidos. |
+| `gmail.search` | READ; query Gmail, remitente, destinatario To/CC/BCC, asunto, rango, Inbox/Sent, cuenta o todas. Paginación independiente por cuenta. |
+| `gmail.getMessage`, `gmail.getThread` | READ; texto y referencias estables, adjuntos como metadatos. |
+| `gmail.inspectAttachment` | READ; recuperación backend; texto UTF-8 opcional para plain/csv. |
+| `gmail.createDraft`, `gmail.updateDraft` | WRITE; respetan TOOL_CONFIRM_WRITES; nunca envían. |
+| `gmail.send` | SENSITIVE siempre; new, reply, replyAll, forward. |
+| `gmail.sendDraft` | SENSITIVE siempre; revisa y congela un borrador existente. |
+| `gmail.modifyMessage` | WRITE; archivar (quitar INBOX), leído (quitar UNREAD), no leído (añadir UNREAD), etiquetas existentes. |
+| `gmail.trashMessage` | SENSITIVE siempre; papelera, no eliminación permanente. |
+
+Antes de confirmar se resuelven cuenta, From verificado, To/CC/BCC, asunto, cuerpo,
+hilo/referencias y bytes de adjuntos. La pregunta incluye esos datos y el texto
+exacto; puede ser larga si el correo lo es. No se guarda un borrador, envía ni
+modifica Gmail durante preparación. Tras «Sí, confirmo» u otro afirmativo admitido,
+se ejecutan los bytes MIME congelados una vez. «No», caducidad, cambio de solicitud,
+confirmaciones antiguas y sesiones cerradas conservan las protecciones V0.2.1.
+Los fallos no se presentan como éxito; no hay retry automático de mutaciones.
+
+Un borrador externo se normaliza a MIME de texto plano, manteniendo destinatarios,
+contenido revisado, adjuntos y referencias de reply. Se vuelve a leer justo antes
+de actuar; si cambió, falla CONFLICT. `sendDraft` envía una copia congelada con
+`messages.send` y **conserva el borrador original**: así una edición concurrente no
+puede cambiar lo enviado, ni hay una segunda mutación no atómica para borrar el
+borrador. Después de éxito, el resultado identifica ese borrador retenido. No lo
+envíes de nuevo desde Gmail por accidente. La comprobación de cambios no es una
+transacción/ETag: una edición entre relectura y update puede ser reemplazada por
+el contenido previamente aprobado; envío siempre conserva sus bytes aprobados.
+
+Se usa MailComposer de Nodemailer para MIME y Mailparser para lectura RFC, sin
+SMTP, acceso a archivos/URLs ni descarga de imágenes remotas. Un adjunto saliente
+solo puede referenciar mensajes de la **misma cuenta**. Forward incorpora el texto
+y adjuntos originales sin cambiar su cuenta; no reenvía silenciosamente un cuerpo
+truncado. No se ofrecen subidas de archivos locales/URLs arbitrarias.
+
+### Adjuntos, límites y errores
+
+Los metadatos incluyen nombre, MIME, tamaño, attachmentId si existe y referencia
+accountId/messageId/threadId/partId. El servidor verifica la referencia contra el
+mensaje antes de recuperar bytes. No devuelve binarios al modelo, no guarda
+adjuntos en disco ni genera URLs de descarga. `inspectAttachment` devuelve tamaño,
+hash y opcionalmente texto plain/csv; otros formatos quedan listos para incorporar
+parsers backend especializados en versiones futuras (PDF, hojas, imágenes, etc.).
+El texto extraído y los correos son datos externos, nunca instrucciones.
+
+Límites V0.3: hasta 20 cuentas, 10 resultados por cuenta/página (default 5), hilos
+hasta 30 mensajes, texto hasta 6000 caracteres por mensaje y 30000 por hilo,
+8 MiB por adjunto y por conjunto saliente, hasta 10 adjuntos y 50 destinatarios.
+El límite HTTP existente de 16 KiB también aplica al JSON de entrada: preferí
+correos cortos. Los cuerpos truncados se señalan explícitamente. No se cargan
+binarios en la UI/Realtime. Una búsqueda global informa fallos por cuenta y
+páginas pendientes; una página parcial nunca demuestra que alguien no respondió.
+Los resultados normalizados no exponen errores de Google, credenciales ni cookies;
+la telemetría existente no almacena cuerpos, destinatarios ni adjuntos.
+
+Además de la deduplicación por invocationId del ejecutor, el adapter conserva
+hasta 200 resultados de envío por proceso (incluidos fallos inciertos), usando una
+huella de cuenta/contenido/adjuntos o ID/versión de borrador. Repetir contenido
+idéntico no dispara otro envío mientras ese proceso siga vivo. No es una garantía
+persistente de exactly-once: reinicios, otras instancias o envíos desde Gmail quedan
+fuera. Ante un timeout, revisá Sent antes de reintentar; si se necesita reenviar el
+mismo contenido deliberadamente, reconciliá el estado y reiniciá el servidor.
+Un journal persistente de envíos es un seguimiento recomendado V0.3.x.
+
+### Aceptación local Gmail
+
+Después de autorizar dos cuentas, usando únicamente destinatarios de prueba:
+
+1. «¿Qué cuentas de Gmail tengo conectadas?» y «¿Desde qué alias puedo enviar en
+   esta cuenta?»: comprobá IDs y alias reales; no nombres/From inventados.
+2. «¿Me respondió la persona que estoy buscando?» y «¿En qué cuenta?»; probá
+   búsquedas globales, específicas, Inbox y Sent. Varias coincidencias deben pedir
+   selección, nunca decidir automáticamente un hilo.
+3. «Resumime este hilo» y «¿Qué me está pidiendo?»; comprobá cuenta, mensaje,
+   fechas y adjuntos. Pedí extraer un adjunto de texto y verificá su contenido.
+4. «Creá un borrador para mi destinatario de prueba…»: comprobá que existe pero
+   no se envió. Probá editarlo y enviar el preparado; observá el borrador retenido.
+5. «Respondé que el martes a las 15 me viene bien»: la pregunta debe indicar
+   cuenta, From, destinatarios, asunto, cuerpo y adjuntos. Confirmá tras terminar
+   la pregunta; comprobá un solo mensaje en Sent y su hilo.
+6. Probá reply-all y forward con adjunto propio; verificá CC/BCC y From. Si hay
+   dos identidades posibles, debe pedir aclaración.
+7. Prepará un envío y decí «No»: no debe aparecer en Sent. Probá «sí» antes del
+   final, cambiar la solicitud, caducidad y doble confirmación: no duplican envíos.
+8. Marcá leído/no leído, archivá y pedí papelera: esta última siempre pregunta.
+9. Repetí Calendar, web search, voz `cedar` e interrupción natural V0.2.2.
+
+La autorización real y las pruebas de voz/envío se harán localmente. Las pruebas
+cloud usan cuentas, mensajes, MIME y transportes falsos y nunca envían correo.
+No se implementan contactos, watchers/background sync, borrado permanente,
+parsers de documentos, journal persistente, descarga directa al navegador ni
+procesamiento documental mediante otra llamada LLM en V0.3.
