@@ -312,3 +312,22 @@ for (const mode of ['early', 'stale', 'expired', 'failed']) {
     } finally { bridge.close(); f.executor.close(); globalThis.fetch = original; }
   });
 }
+
+test('persistent Sofia identity is available in another session but never bypasses Gmail sender/recipient/SENSITIVE safety', async () => {
+  const { PrivateJsonMemoryStore } = await import('../memory/store.js'); const { MemoryService } = await import('../memory/service.js');
+  const { candidate, source } = await import('../memory/test-fixtures.js'); const { randomUUID } = await import('node:crypto'); const { rm } = await import('node:fs/promises');
+  const path = `.local/memory-tests/${randomUUID()}/memories.json`;
+  try {
+    const first = new MemoryService(new PrivateJsonMemoryStore(path));
+    await first.remember(candidate('My partner is Sofia.', { type: 'USER_PROFILE', subject: { id: 'user', name: 'User', aliases: [] }, key: 'partner', relationships: [{ predicate: 'partner', target: { id: 'sofia', name: 'Sofia', aliases: [] } }] }), source('My partner is Sofia.'));
+    const second = new MemoryService(new PrivateJsonMemoryStore(path)); const identityOnly = await second.search('Email Sofia'); assert.ok(identityOnly.length); assert.ok(identityOnly.every(r => r.value.email === undefined));
+    await second.remember(candidate('Sofia email is sofia@example.test.', { type: 'PERSON', subject: { id: 'sofia', name: 'Sofia', aliases: [] }, key: 'email', value: { email: 'sofia@example.test' } }), source('Sofia email is sofia@example.test.'));
+    const third = new MemoryService(new PrivateJsonMemoryStore(path)); const person = (await third.search('Email Sofia')).find(r => r.type === 'PERSON')!;
+    const f = fixture();
+    try {
+      assert.equal((await f.invoke('gmail.send', { ...outgoing, accountId: undefined, from: undefined, to: [person.value.email] })).status, 'error');
+      const prepared = await f.invoke('gmail.send', { ...outgoing, to: [person.value.email] }); assert.equal(prepared.status, 'pending'); assert.equal(f.api.mutations().length, 0); if (prepared.status !== 'pending') throw new Error();
+      assert.equal((await f.executor.decide(prepared.confirmationId, true)).status, 'success'); assert.equal(f.api.mutations().length, 1);
+    } finally { f.executor.close(); }
+  } finally { await rm(path.slice(0, path.lastIndexOf('/')), { recursive: true, force: true }); }
+});

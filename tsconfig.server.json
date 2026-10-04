@@ -11,6 +11,7 @@
     "src/core/personality.ts",
     "src/server/google-authorize.ts",
     "src/server/gmail-authorize.ts",
-    "src/server/gmail-accounts.ts"
+    "src/server/gmail-accounts.ts",
+    "src/server/memory-bootstrap.ts"
   ]
 }

@@ -1,18 +1,21 @@
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
+import { privateRequestPath } from './private-paths.js';
 import { createToolsHandler } from './tools.js';
 import { createClientSecret, TokenError } from './token.js';
 try { process.loadEnvFile('.env'); } catch (error) {
   if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
 }
 const production = process.argv[1]?.endsWith('.js') ?? false;
-const vite = production ? undefined : await (await import('vite')).createServer({ server: { middlewareMode: true }, appType: 'spa' });
+const viteApi = production ? undefined : await import('vite');
+const vite = viteApi ? await viteApi.createServer({ server: { middlewareMode: true }, appType: 'spa', plugins: [{ name: 'jarvis-private-storage', configResolved(config) { config.server.fs.deny.push('**/.local/**', '**/*google-tokens*.json', '**/g_*.json'); } }] }) : undefined;
 const root = resolve('dist/client');
 const mime: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
 const tools = createToolsHandler(process.env, { development: !production });
 let tokenPending = false;
 const server = createServer(async (req, res) => {
+  if (privateRequestPath(req.url ?? '')) { res.writeHead(404); res.end(); return; }
   if (await tools.handle(req, res)) return;
   const path = req.url?.split('?')[0];
   if (path === '/api/realtime/token') {

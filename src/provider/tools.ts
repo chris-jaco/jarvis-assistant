@@ -16,6 +16,7 @@ export async function toolRequest(path: string, data?: unknown, method = 'POST')
 }
 export class VoiceToolBridge {
   pending: PendingConfirmation | null = null;
+  get confirmationActive(): boolean { return Boolean(this.pending || this.decisionInFlight || this.intentInFlight); }
   private armed = false;
   private decisionInFlight = false;
   private intentRevision = 0;

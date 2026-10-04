@@ -23,15 +23,26 @@ export class ToolExecutor {
   private calls = new Map<string, { fingerprint: string; result: Promise<ToolResult> }>();
   private controllers = new Set<AbortController>();
   private closed = false;
+  private foregroundCalls = 0;
+  private backgroundCalls = 0;
   private revision = 0;
   constructor(private readonly registry: ToolRegistry, private readonly now = Date.now, private readonly confirmationMs = 60_000, readonly telemetry = new ToolTelemetry(), private readonly trace: TraceSink = () => {}) {}
-  invoke(id: string, toolId: string, input: unknown): Promise<ToolResult> {
+  invoke(id: string, toolId: string, input: unknown, options: { background?: true } = {}): Promise<ToolResult> {
     const fingerprint = JSON.stringify([toolId, input]);
     const previous = this.calls.get(id);
     if (previous) return previous.fingerprint === fingerprint ? previous.result : Promise.resolve(safeError(new ToolError('CONFLICT')));
-    if (this.closed || this.calls.size >= 100) return Promise.resolve(safeError(new ToolError('LIMIT')));
-    // Any new action invalidates the previous pending action, including reads.
-    this.invalidate('rejected');
+    const background = options.background === true;
+    if (background) {
+      const tool = this.registry.resolve(toolId);
+      // Server-only maintenance cannot create/approve a confirmation or consume
+      // the user's 100-call budget. Both budgets and the replay cache remain bounded.
+      if (!tool || (tool.permission !== 'READ' && !(tool.permission === 'WRITE' && tool.confirm === false && !tool.confirmWhen))) return Promise.resolve(safeError(new ToolError('INVALID_INPUT')));
+      if (this.pending) return Promise.resolve(safeError(new ToolError('CONFLICT')));
+    }
+    if (this.closed || (background ? this.backgroundCalls >= 256 : this.foregroundCalls >= 100)) return Promise.resolve(safeError(new ToolError('LIMIT')));
+    if (background) this.backgroundCalls++;
+    else { this.foregroundCalls++; this.invalidate('rejected'); } // New foreground requests still invalidate.
+
     const result = this.start(id, toolId, input);
     this.calls.set(id, { fingerprint, result });
     return result;

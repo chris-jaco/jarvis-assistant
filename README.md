@@ -504,3 +504,204 @@ un resultado incierto exige comprobar Enviados, nunca reintentar automáticament
 
 Referencia oficial del formato de Responses consultada para este cambio:
 https://github.com/openai/openai-node/blob/master/src/resources/responses/responses.ts
+
+## JARVIS V0.4 — memoria contextual persistente
+
+### Arquitectura y almacenamiento
+
+`src/memory/` separa esquema, privacidad, almacenamiento, extracción, recuperación
+y adapter. El historial Realtime/UI sigue siendo contexto de conversación; no se
+archiva. Los registros semánticos duraderos son independientes. La secuencia y el instante de inicio de voz impiden que transcripciones antiguas sustituyan un turno nuevo. Los últimos seis
+IDs relevantes forman contexto de trabajo de sesión, sin historial crudo ni
+persistencia adicional. TEMPORARY usa una fecha UTC de caducidad.
+
+`MemoryStore` ofrece lectura y transacciones de borradores síncronos. V0.4 usa JSON
+versionado en `.local/memory/memories.json`: no añade bindings SQLite ni cambia el
+mínimo Node 22.12. SQLite puede ser un siguiente adapter de almacenamiento, una vez
+fijado un runtime/API adecuado para todas las plataformas. Los IDs/procedencia y
+las reglas semánticas no dependen del formato físico.
+
+La escritura crea un archivo temporal privado, sincroniza su contenido y lo
+renombra atómicamente. Las transacciones se serializan dentro del proceso y usan
+un lock exclusivo entre procesos. No ejecutar varios servidores simultáneamente:
+V0.4 no coordina sus contextos/colas de extracción. Si un proceso muere dejando
+`memories.json.lock`, detener todos los servidores y comprobar que ningún escritor
+sigue activo antes de retirar **solo ese lock vacío**; no borrar la base. No hay
+recuperación automática que pueda robar un lock activo. Máximo: 2.000 registros,
+8 MiB de snapshot; no hay compactación/pruning autónomo ni garantía contra pérdida
+por fallo físico del disco.
+
+Los caminos configurables deben permanecer dentro de `.local`, ignorado por Git.
+POSIX exige propietario actual, directorios privados y archivos sin permisos de
+grupo/otros; se crean con 0700/0600. Windows reutiliza la validación ACL existente,
+con acceso limitado al usuario y principals de sistema confiables. Se rechazan
+symlinks, reparse points cuando aplica y archivos enlazados/inseguros. Un directorio
+existente inseguro no se relaja ni se cambia a ciegas; memoria falla de forma segura.
+El servidor bloquea caminos privados (incluidos @fs/encoded paths) antes de Vite y añade deny rules conservando sus defaults. No se sirven snapshots/tokens de .local por HTTP, ni en desarrollo. Los datos no están cifrados en disco: proteger el usuario del sistema y sus backups.
+
+### Esquema y procedencia
+
+Tipos: USER_PROFILE, PREFERENCE, PERSON, ORGANIZATION, PROJECT, SKILL, DECISION,
+FACT, EPISODE y TEMPORARY. Cada registro tiene UUID estable, entidad/aliases,
+clave semántica, contenido compacto, valores estructurados, relaciones tipadas,
+procedencia/evidencia, timestamps UTC, confianza, importancia, corroboraciones,
+estado y enlaces de supersesión; TEMPORARY requiere expiresAt.
+
+Entidades usan IDs derivados de su identidad descriptiva; distintas identidades
+con el mismo nombre provocan ambigüedad. No se precargan personas, emails, clientes
+ni organizaciones de ejemplo. El modelo extractor debe reutilizar entidad/clave
+para correcciones; una extracción incorrecta puede requerir inspección/corrección.
+
+La prioridad normal es declaración explícita > evidencia de herramienta > sistema
+> inferencia. Entre declaraciones explícitas prevalece la más nueva. Las inferencias
+no sobrescriben datos explícitos y baja confianza se descarta. Los resultados actuales
+de Calendar/Gmail se consultan con sus herramientas, no se sustituyen por recuerdos.
+Menciones del mismo hecho actualizan un registro; cambios crean una versión nueva y
+marcan la anterior superseded. Lo supersedido/caducado no se inyecta como vigente.
+
+### Extracción automática, explícita y privacidad
+
+Una transcripción de usuario real permite recuperar contexto y evaluar hasta cuatro
+candidatos mediante Responses API, Structured Outputs, `gpt-4.1-mini`, sin tools ni
+reintentos, `store: false` y timeout de ocho segundos. La extracción interpreta
+semánticamente solicitudes explícitas y declaraciones estables sin exigir frases
+exactas. No se procesan automáticamente respuestas del asistente, resultados de
+herramientas, documentos o cuerpos completos de correo. La evidencia debe ser un
+fragmento literal corto de la transcripción actual; no se acepta evidencia inventada.
+
+Los candidatos se persisten fuera del camino de respuesta de audio, únicamente
+cuando la sesión está libre. Si existe otra herramienta/confirmación, se cierra la
+sesión o cambió el estado por una corrección/olvido, se descarta la escritura tardía.
+Una eliminación impide que una extracción anterior resucite lo olvidado, también
+entre sesiones del mismo backend. Las colas son limitadas; bajo carga puede perderse
+una oportunidad de extracción: usar herramientas explícitas para datos importantes.
+
+El filtro determinista de secretos corre **antes** de enviar la transcripción al
+extractor y otra vez antes de persistir candidato/procedencia/snapshot. Bloquea claves,
+passwords, tokens conocidos, códigos de autenticación, claves privadas, patrones de
+tarjeta/IBAN y respuestas de seguridad. No depende de la decisión del LLM. Es
+conservador: puede rechazar texto legítimo sobre autenticación y no puede reconocer
+un secreto arbitrario sin patrón/contexto identificable. No dictar secretos para
+memorizarlos. Datos relevantes y contexto limitado sí se envían a OpenAI; local-first
+se refiere al almacenamiento, no a extracción completamente offline.
+
+### Recuperación e integración Realtime
+
+La recuperación combina aliases/entidades, relaciones, claves/valores, conceptos
+léxicos bilingües, recencia, importancia, confianza y vigencia. `MemoryRelevance`
+aísla el ranking para futuros embeddings; no hay vector DB. No es una búsqueda
+semántica universal: paráfrasis/idiomas fuera de sus conceptos pueden perder matches.
+Un nombre coincidente con varias entidades devuelve AMBIGUOUS; pedir identidad/alias
+único, nunca elegir por ranking silenciosamente.
+
+Solo se inyectan unos pocos registros dentro del presupuesto configurable. En la
+conexión se recupera un pequeño perfil/preferencias; cada turno sustituye el contexto
+anterior y revalida la vigencia. El contexto de trabajo se usa para referencias
+anafóricas y nunca se convierte en autorización. No se envía todo el archivo.
+
+El transporte envía un `session.update` mínimo con solo instructions (la API pública sendEvent) sin reemplazar el agente,
+crear mensajes/turnos sintéticos ni modificar voz, modelo, WebRTC, VAD o barge-in.
+Se evita updateSessionConfig parcial porque el SDK 0.18.0 rellena defaults de voz/VAD; no se cambian esos campos en la actualización de memoria. VAD puede empezar a generar antes de llegar la transcripción/recuperación: para
+respuestas/decisiones que dependan de contexto previo, las instrucciones exigen
+`memory.search` **antes de responder o preparar la acción** si el contexto no basta.
+La recuperación por evento es complementaria, no una barrera temporal garantizada.
+Memoria averiada nunca desconecta la voz; no se inventa contexto ni éxito de escritura.
+Las validaciones nativas ACL de Windows pueden aumentar la latencia de almacenamiento.
+
+### Herramientas y seguridad
+
+| Tool | Permiso | Comportamiento |
+| --- | --- | --- |
+| memory.search | READ | Contexto relevante y acotado; ambigüedad explícita. Flags de inspección permiten ver incertidumbre/caducidad sin inyectarla como actual. |
+| memory.get | READ | Inspección por ID interno; historical permite revisar versiones inactivas, nunca usarlas como vigentes. |
+| memory.remember | WRITE, sin confirmación extra | Propuesta compacta; procedencia conservadora de inferencia si la propone el agente sin verificación directa. |
+| memory.update | WRITE, confirmación obligatoria | Congela el registro/versión y el contenido/valores corregidos. |
+| memory.forget | SENSITIVE | Selección exacta, confirmación y borrado físico de la cadena de versiones. |
+
+La ingestión de transcripciones verificadas usa el mismo Registry/ToolExecutor mediante
+un tool interno `memory.ingest`, oculto y rechazado por el endpoint de invocaciones del
+modelo. No existe otro ejecutor ni una ruta de aprobación de memoria. Las operaciones internas tienen un presupuesto separado de 256 llamadas; mantienen validación/permisos/telemetría, no pueden ejecutar SENSITIVE ni WRITE con confirmación y no invalidan un pending. El límite original de 100 invocaciones del usuario permanece intacto. Las declaraciones
+verificadas y el bootstrap aportan procedencia explícita; propuestas no verificadas del
+agente no pueden elevarse a esa autoridad ni sobrescribir un hecho explícito.
+
+Olvidar por ID o por coincidencia exacta única; nunca borrar por búsqueda difusa.
+Ante varios recuerdos, preguntar cuál; si el usuario pide explícitamente TODO de una entidad, scope entity exige un nombre/alias exacto único y congela todos los recuerdos asociados por IDs/relaciones estructuradas (máximo ocho y resumen revisable). No selecciona por texto difuso. Todos se validan antes de borrar; si cualquiera cambió, no se elimina nada. Se borra la cadena supersedida del
+recuerdo confirmado; no se conserva una copia de su contenido en telemetría.
+Archivos `.tmp` se retiran; backups externos del usuario no se pueden borrar por esta API.
+
+Las herramientas comparten validación, errores seguros, permisos y telemetría existentes. La recuperación contextual automática es una lectura interna de MemoryStore; no toma el lock de herramientas/decisiones ni consume su presupuesto. Toda mutación automática sí pasa por Registry/ToolExecutor con permisos, validación y telemetría.
+No se loguean contenido, evidencia, identidades privadas ni rutas. Solo afirmar
+recordado/corregido/olvidado tras un resultado que confirme persistencia/eliminación.
+Un recuerdo de una persona no inventa su email ni remitente: Gmail conserva resolución
+de cuenta/alias, payload congelado y confirmación SENSITIVE. El éxito de envío sigue
+requiriendo `success` y `sent: true`.
+
+### Configuración y bootstrap revisado
+
+| Variable | Default | Uso |
+| --- | --- | --- |
+| MEMORY_PATH | .local/memory/memories.json | Snapshot privado dentro de .local. |
+| MEMORY_CONTEXT_CHARS | 3000 | Presupuesto entre 500 y 8000 caracteres. |
+| MEMORY_RETRIEVAL_LIMIT | 5 | Entre 1 y 8 registros relevantes. |
+| MEMORY_AUTOMATIC | true | Extracción automática; herramientas siguen disponibles con false. |
+
+No se requiere otra credencial aparte de OPENAI_API_KEY para extracción online. Si
+falta, la memoria explícita por herramientas/bootstrap sigue disponible; no se finge
+extracción automática. Configuración de memoria inválida deshabilita esa integración
+sin impedir iniciar el asistente.
+
+`npm run memory:bootstrap` lee un array JSON de candidatos revisados por stdin. No
+contiene preferencias/personas personales hardcodeadas ni se ejecuta automáticamente.
+El bootstrap utiliza la misma arquitectura y guarda origen explicit_user. Para la
+preferencia de respuestas cortas/confirmaciones naturales, preparar un candidato
+PREFERENCE con subject `{id: "user", name: "User", aliases: []}`, key estable,
+content revisado, value estructurado, relationships `[]`, confidence/importance entre
+0 y 1; preservar expresamente seguridad y detalles de la acción. Guardar el input
+privado en `.local/reviewed-memory.json`, nunca en Git.
+
+```sh
+npm run memory:bootstrap < .local/reviewed-memory.json
+```
+
+PowerShell (UTF-8 explícito, también para Windows PowerShell 5):
+
+```powershell
+$jarvisPreviousEncoding = $OutputEncoding
+try {
+  $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+  Get-Content -Raw -Encoding UTF8 .local\reviewed-memory.json | npm run memory:bootstrap
+} finally { $OutputEncoding = $jarvisPreviousEncoding }
+```
+
+También se puede dictar la preferencia con voz como declaración explícita y comprobar
+su persistencia. El comando imprime solo un resultado genérico. Cambios corregidos
+se pueden inspeccionar y olvidar; no hay datos personales distribuidos como defaults.
+
+### Aceptación local V0.4
+
+1. Ejecutar install/typecheck/tests/build y conectar: «Hola Jarvis, ¿me escuchás?».
+   Comprobar voz cedar, transcript e interrupción natural.
+2. Declarar «Mi pareja es Sofia». Pedir «¿Qué recordás de Sofia?». No debe inventar email.
+3. Declarar un email **de prueba bajo tu control**. Reiniciar backend y sesión, pedir
+   enviar a esa persona: resolver identidad/cuenta, preguntar si hay ambigüedad y
+   confirmar la acción congelada; nunca enviar antes del backend success/sent:true.
+4. Declarar «Frekuent es un cliente y estamos expandiendo a Portugal». Reconectar y
+   preguntar «¿Qué estamos haciendo con Frekuent?». El ejemplo se guarda solo si lo dictás.
+5. Declarar una entrega completa con año/fecha y corregirla a otra. Consultar: solo la
+   versión nueva debe ser vigente. Inspeccionar procedencia y editar con memory.update.
+6. Declarar contexto con plazo inequívoco. Tras caducar, comprobar que no influye.
+7. Pedir olvidar un recuerdo; rechazar una vez, aprobar después. Reiniciar y confirmar
+   que no está. Varios matches deben requerir aclaración y ninguna eliminación previa.
+8. Saludos/relleno no deben producir recuerdos. No probar con secretos reales: usar
+   ejemplos falsos etiquetados como password/token y comprobar que no se guardan.
+9. Repetir Calendar READ/WRITE/SENSITIVE y Gmail SEND con afirmaciones naturales,
+   negativas, correcciones y voz anterior al prompt. El bridge V0.3.2 sigue autoritativo.
+10. Probar con almacenamiento inaccesible/configuración inválida: conversación sigue;
+    no anunciar que guardó/olvidó nada. Verificar actividad sin datos personales.
+
+Limitaciones: un usuario local y una instancia de backend; sin sync multi-dispositivo,
+sin cifrado de aplicación, extracción/modelos probabilísticos que requieren aceptación
+en vivo, selección exacta/alcance explícito para borrar, capacidad limitada y búsqueda semántica aproximada.
+Para migrar, implementar otro MemoryStore y opcionalmente otro MemoryRelevance/extractor,
+conservar IDs, relaciones, procedencia y supersesión y añadir un protocolo de conflictos
+antes de sincronizar; no exponer el archivo privado directamente al navegador.

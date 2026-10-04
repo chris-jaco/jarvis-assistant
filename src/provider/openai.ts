@@ -1,6 +1,7 @@
 import { OpenAIRealtimeWebRTC, RealtimeAgent, RealtimeSession } from '@openai/agents-realtime';
 import { JARVIS_INSTRUCTIONS, REALTIME_MODEL, JARVIS_VOICE, TURN_EAGERNESS } from '../core/personality.js';
 import type { VoiceProvider, ProviderObserver, TranscriptEntry } from '../core/provider.js';
+import { VoiceMemoryBridge, updateMemoryInstructions } from './memory.js';
 import { VoiceToolBridge } from './tools.js';
 import { SessionMetrics } from '../telemetry/session.js';
 
@@ -8,6 +9,7 @@ class ClientError extends Error {}
 export class OpenAIVoiceProvider implements VoiceProvider {
   private session?: RealtimeSession;
   private tools?: VoiceToolBridge;
+  private memory?: VoiceMemoryBridge;
   private stream?: MediaStream;
   private abort?: AbortController;
   private generation = 0;
@@ -51,7 +53,15 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       const toolConfig = await bridge.initialize();
       if (!current()) { bridge.close(); return; }
       const transport = new OpenAIRealtimeWebRTC({ mediaStream: stream, audioElement: this.audio });
-      const session = new RealtimeSession(new RealtimeAgent({ name: 'JARVIS', instructions: `${JARVIS_INSTRUCTIONS}\n${toolConfig.context}`, tools: toolConfig.tools }), {
+      const baseInstructions = `${JARVIS_INSTRUCTIONS}\n${toolConfig.context}`;
+      let memoryContext = '';
+      const memory = new VoiceMemoryBridge(async context => {
+        if (current() && this.session) { memoryContext = context; updateMemoryInstructions(transport, `${baseInstructions}\n${memoryContext}`); }
+      }, () => bridge.confirmationActive);
+      this.memory = memory;
+      memoryContext = await memory.initial();
+      if (!current()) { memory.close(); return; }
+      const session = new RealtimeSession(new RealtimeAgent({ name: 'JARVIS', instructions: () => `${baseInstructions}\n${memoryContext}`, tools: toolConfig.tools }), {
         model: REALTIME_MODEL, transport, tracingDisabled: true,
         config: { outputModalities: ['audio'], audio: {
           input: { transcription: { model: 'gpt-4o-mini-transcribe', language: 'es' },
@@ -68,6 +78,10 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       session.on('transport_event', event => {
         if (!current()) return;
         void bridge.transportEvent(event).catch(() => undefined);
+        if (event.type === 'input_audio_buffer.speech_started' && typeof event.item_id === 'string') memory.speechStarted(event.item_id);
+        if (event.type === 'conversation.item.input_audio_transcription.completed' && typeof event.item_id === 'string' && typeof event.transcript === 'string') {
+          void memory.turn(event.item_id, event.transcript);
+        }
         switch (event.type) {
           case 'input_audio_buffer.speech_started':
             this.metrics.detectedTurns++;
@@ -118,6 +132,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
   disconnect(): void {
     ++this.generation;
     this.active = false;
+    this.memory?.close(); this.memory = undefined;
     this.tools?.close(); this.tools = undefined;
     this.observer.tools?.([], null);
     this.abort?.abort();
