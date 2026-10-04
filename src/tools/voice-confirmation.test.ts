@@ -1,3 +1,4 @@
+import { fakeIntent, naturalApprovals } from './testing/confirmation-intent.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RunContext } from '@openai/agents-core';
@@ -6,7 +7,7 @@ import { VoiceToolBridge } from '../provider/tools.js';
 import type { ConfirmationTrace } from '../diagnostics/confirmation.js';
 import { ToolRegistry } from './registry.js';
 import { ToolExecutor } from './execution.js';
-async function fixture(traceEnabled = false, prepareInitially = true) {
+async function fixture(traceEnabled = false, prepareInitially = true, classify?: (body: { confirmationId: string; utterance: string }) => Promise<unknown>) {
   const traces: ConfirmationTrace[] = [];
   const original = globalThis.fetch; let now = Date.now(); let executions = 0; let invocations = 0;
   const registry = new ToolRegistry();
@@ -20,6 +21,7 @@ async function fixture(traceEnabled = false, prepareInitially = true) {
     if (path === 'invoke') { invocations++; return Response.json(await executor.invoke(body.invocationId, body.toolId, body.input)); }
     if (path === 'activity') return Response.json({ activity: executor.telemetry.snapshot(), pending: executor.pendingState() });
     if (path === 'cancel') { cancellations++; executor.invalidate(); return Response.json({ cancelled: true }); }
+    if (path === 'intent') return Response.json(classify ? await classify(body) : { confirmationId: body.confirmationId, intent: fakeIntent(body.utterance) });
     if (path === 'decision') { decisions.push(body.approved); return Response.json(await executor.decide(body.confirmationId, body.approved)); }
     throw new Error('Unexpected path');
   };
@@ -213,5 +215,63 @@ test('previous action response cannot arm a newly prepared confirmation', async 
     assert.equal(f.executions(), 0); assert.equal(f.cancellations(), 0);
     await livePrompt(f, 'new-prompt'); await f.speech('new-audio'); await f.transcript('Sí, confirmo.', 'new-audio');
     assert.equal(f.executions(), 1);
+  } finally { f.close(); }
+});
+
+for (const phrase of naturalApprovals.filter(p => !/(envío|envíalo|mandalo|mandáselo)/i.test(p))) {
+  test(`Calendar uses the same semantic approval path: ${phrase}`, async () => {
+    const f = await fixture(); try {
+      await f.prompt(); await f.speech(); await f.invoke();
+      await f.transcript(phrase); await f.transcript(phrase);
+      assert.deepEqual(f.decisions, [true]); assert.equal(f.executions(), 1);
+      assert.equal(f.cancellations(), 0); assert.equal(f.invocations(), 1);
+    } finally { f.close(); }
+  });
+}
+
+for (const mode of ['redundant-tool', 'new-speech', 'correction', 'closed', 'expired']) {
+  test(`shared semantic resolution race: ${mode}`, async () => {
+    let release!: () => void; let started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const start = new Promise<void>(resolve => { started = resolve; });
+    const f = await fixture(true, true, async body => {
+      if (body.utterance === 'Cambiale el asunto') return { confirmationId: body.confirmationId, intent: 'correction' };
+      started(); await gate; return { confirmationId: body.confirmationId, intent: 'affirmative' };
+    });
+    try {
+      await f.prompt(); await f.speech('approval');
+      const resolution = f.transcript('Perfecto, confirmo.', 'approval'); await start;
+      await f.invoke(); assert.equal(f.invocations(), 1); assert.equal(f.executions(), 0);
+      if (mode === 'new-speech' || mode === 'correction') await f.speech('new');
+      if (mode === 'correction') await f.transcript('Cambiale el asunto', 'new');
+      if (mode === 'closed') f.bridge.close();
+      if (mode === 'expired') f.expire();
+      release(); await resolution;
+      assert.equal(f.executions(), mode === 'redundant-tool' ? 1 : 0);
+      if (mode === 'redundant-tool') { assert.deepEqual(f.decisions, [true]); assert.equal(f.cancellations(), 0); }
+      if (mode === 'correction') assert.equal(f.executor.pendingState(), null);
+    } finally { release(); f.close(); }
+  });
+}
+for (const mode of ['wrong-id', 'malformed', 'unavailable']) {
+  test(`semantic ${mode} response never executes`, async () => {
+    const f = await fixture(false, true, async body => {
+      if (mode === 'unavailable') throw new Error('private-key');
+      return { confirmationId: mode === 'wrong-id' ? 'another-id' : body.confirmationId, intent: mode === 'malformed' ? 'execute' : 'affirmative' };
+    });
+    try { await f.prompt(); await f.speech(); await f.transcript('Perfecto, confirmo.'); assert.equal(f.executions(), 0); assert.ok(!f.messages.some(m => m.includes('private-key'))); }
+    finally { f.close(); }
+  });
+}
+
+test('an unconfirmed cancellation never claims that the backend did not execute', async () => {
+  const f = await fixture(false, true, async body => ({ confirmationId: body.confirmationId, intent: 'ambiguous' }));
+  const request = globalThis.fetch;
+  globalThis.fetch = async (url, options) => String(url).endsWith('/cancel') ? Response.json({ cancelled: false }) : request(url, options);
+  try {
+    await f.prompt(); await f.speech(); await f.transcript('No sé');
+    assert.equal(f.executions(), 0); assert.equal(f.messages.length, 1);
+    assert.ok(f.messages[0]!.includes('No se pudo verificar la cancelación'));
+    assert.ok(!f.messages[0]!.includes('no se ejecutó'));
   } finally { f.close(); }
 });

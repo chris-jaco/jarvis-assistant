@@ -68,7 +68,7 @@ READ no confirma. WRITE confirma por defecto y se configura por herramienta (`co
 
 La preparación de una mutación resuelve el evento y su versión sin cambiar estado externo. Guarda un snapshot privado con ID/etag, argumentos, resumen visible, identificador aleatorio y expiración de 60 segundos. Solo existe una confirmación pendiente por sesión. El backend consume el identificador antes de cualquier await; decisiones repetidas/concurrentes no ejecutan dos veces. Caducar, rechazar, desconectar, cerrar sesión, iniciar otra herramienta o cambiar la solicitud invalida la confirmación. Las sesiones duran 30 minutos y admiten 100 invocaciones como máximo; reconecta después del límite. Una sesión por navegador; una nueva conexión invalida la anterior.
 
-El tool devuelve pending y JARVIS debe leer la pregunta summary y esperar. Después de terminar esa pregunta, di «Sí», «Sí, confirma», «Confirmar», «Adelante», «Hazlo», «Sí, hazlo», «Sí, confirmo» o «Confirmo»; «No», «Cancela», «Cancelar» o «No lo hagas» rechaza. Solo se acepta aprobación de un nuevo item de voz iniciado después del output_audio_buffer.stopped de la respuesta nueva vinculada a la acción pendiente (response.created; no necesita un started correspondiente); cleared/interrupción no arma aprobación. La generación response.done no equivale al fin de reproducción. Realtime puede pedir otra herramienta antes de llegar la transcripción final del «Sí»: mientras haya confirmación pendiente el puente devuelve la acción congelada y bloquea la nueva ejecución, sin reemplazarla ni borrar su captura de voz. La captura conserva el ID pendiente y si el turno empezó tras la pregunta; una transcripción antigua no puede aprobar. Espera a terminar la pregunta para confirmar por voz. Un «Sí» anticipado se ignora sin ejecutar ni cancelar por cambio de solicitud; «No» puede rechazar incluso antes del final. Una frase distinta cancela la solicitud en vez de interpretarla mediante otro LLM. También puedes usar Confirmar/Cancelar en la UI. Si una transcripción falla, usa los botones o deja caducar la solicitud. Nunca hay un tool que permita al modelo otorgarse aprobación.
+El tool devuelve pending y JARVIS debe leer la pregunta summary y esperar. Después de terminar esa pregunta, podés confirmar con lenguaje natural, por ejemplo «Sí», «Sí, confirma», «Confirmar», «Adelante», «Hazlo», «Sí, hazlo», «Sí, confirmo» o «Confirmo»; «No», «Cancela», «Cancelar» o «No lo hagas» rechaza. Solo se acepta aprobación de un nuevo item de voz iniciado después del output_audio_buffer.stopped de la respuesta nueva vinculada a la acción pendiente (response.created; no necesita un started correspondiente); cleared/interrupción no arma aprobación. La generación response.done no equivale al fin de reproducción. Realtime puede pedir otra herramienta antes de llegar la transcripción final del «Sí»: mientras haya confirmación pendiente el puente devuelve la acción congelada y bloquea la nueva ejecución, sin reemplazarla ni borrar su captura de voz. La captura conserva el ID pendiente y si el turno empezó tras la pregunta; una transcripción antigua no puede aprobar. Espera a terminar la pregunta para confirmar por voz. Un «Sí» anticipado se ignora sin ejecutar ni cancelar por cambio de solicitud; «No» puede rechazar incluso antes del final. V0.3.2 sustituye las listas de frases por clasificación semántica compartida en backend para todas las integraciones (ver abajo). También puedes usar Confirmar/Cancelar en la UI. Si una transcripción falla, usa los botones o deja caducar la solicitud. Nunca hay un tool que permita al modelo otorgarse aprobación.
 
 El SDK 0.18.0 ofrece `needsApproval`, `tool_approval_requested`, `session.approve` y `session.reject`, pero la guía Realtime indica que el agente no procesa nuevos pedidos mientras espera aprobación nativa. V0.2 usa la pequeña capa backend para permitir el siguiente turno de voz y mantener autoridad/estado del lado servidor. No se usa sticky approval ni aprobación por nombre de herramienta. La voz usa transcripción, no autenticación biométrica: acepta solo un entorno local y supervisado. Si no se oye la pregunta completa, se interrumpe o la respuesta no se reconoce, usa los botones para revisar el resumen exacto.
 
@@ -467,3 +467,40 @@ cloud usan cuentas, mensajes, MIME y transportes falsos y nunca envían correo.
 No se implementan contactos, watchers/background sync, borrado permanente,
 parsers de documentos, journal persistente, descarga directa al navegador ni
 procesamiento documental mediante otra llamada LLM en V0.3.
+
+
+### V0.3.2: intención de confirmación compartida
+
+Calendar y Gmail usan el mismo pending, bridge, endpoint `/api/tools/intent` y
+`ToolExecutor.decide`. No existe un parser de afirmaciones de Gmail. El backend
+clasifica el propósito de la intervención respecto del resumen congelado mediante
+Responses API (`gpt-4.1-mini`, Structured Outputs estricto, `store: false`, sin
+herramientas). Las únicas salidas son affirmative, negative, correction, unrelated
+y ambiguous. Afirmar con cortesía o repetir brevemente la acción no requiere una
+frase exacta; cambiar datos, introducir condiciones o mostrar incertidumbre nunca
+es aprobación. El modelo clasificador no ejecuta ni altera acciones.
+
+El ID se comprueba antes y después de clasificar; el bridge conserva la captura
+original de elegibilidad y descarta resultados si cambió el pending, se cerró la
+sesión o comenzó otra intervención. Las llamadas redundantes de Realtime se
+bloquean mientras se espera la clasificación, la cancelación o la ejecución.
+El ejecutor sigue consumiendo el ID una sola vez y comprobando la caducidad.
+Una cancelación de voz también lleva el ID para no cancelar otra acción.
+
+La clasificación añade una llamada de modelo, con límite de 8 segundos y sin
+reintentos. Usa OPENAI_API_KEY únicamente en backend. El resumen de la acción y
+la transcripción se envían a OpenAI como datos, sin credenciales ni logs de su
+contenido. Un fallo, rechazo, salida inválida o ambigüedad nunca autoriza ejecución:
+se cancela la confirmación sin ejecutar y se solicita aclaración. Los botones de
+la UI conservan su flujo de decisión explícita. No se necesitan nuevas variables.
+
+Las pruebas simulan las respuestas estructuradas del clasificador para verificar
+el estado, la pertenencia a sesión y las carreras; no prueban que un modelo
+probabilístico clasifique toda frase correctamente. Conservá esa comprobación en
+la aceptación en vivo: probar «Perfecto, te confirmo el envío», afirmaciones
+naturales, negativas, correcciones de destinatario/cuenta/contenido/adjuntos y voz
+anticipada. No afirmar que un email se envió hasta `success` con `sent: true`;
+un resultado incierto exige comprobar Enviados, nunca reintentar automáticamente.
+
+Referencia oficial del formato de Responses consultada para este cambio:
+https://github.com/openai/openai-node/blob/master/src/resources/responses/responses.ts

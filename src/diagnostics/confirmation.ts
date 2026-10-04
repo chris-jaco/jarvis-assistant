@@ -9,7 +9,7 @@ export interface ConfirmationTrace {
   promptResponseId?: string;
   armed?: boolean;
   capturedApprovable?: boolean;
-  classification?: 'affirmative' | 'negative' | 'unrelated';
+  classification?: 'affirmative' | 'negative' | 'correction' | 'unrelated' | 'ambiguous';
 }
 export type TraceSink = (entry: ConfirmationTrace) => void;
 function opaqueId(id: string | undefined): string | undefined {

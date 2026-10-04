@@ -4,6 +4,7 @@ import type { TraceSink } from '../diagnostics/confirmation.js';
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { ToolRegistry } from '../tools/registry.js';
+import { ConfirmationIntentClassifier } from '../tools/confirmation-intent.js';
 import { ToolExecutor } from '../tools/execution.js';
 import { WebSearchAdapter } from '../tools/adapters/search.js';
 import { CalendarAdapter, GoogleCalendarTransport } from '../tools/adapters/calendar.js';
@@ -25,6 +26,8 @@ export function createToolRuntime(env: NodeJS.ProcessEnv = process.env) {
   return { registry, timezone };
 }
 const invocation = z.object({ invocationId: z.string().min(1).max(128), toolId: z.string().max(80), input: z.unknown() }).strict();
+const cancellation = z.object({ confirmationId: z.string().uuid().optional() }).strict();
+const voiceIntent = z.object({ confirmationId: z.string().uuid(), utterance: z.string().min(1).max(2000) }).strict();
 const decision = z.object({ confirmationId: z.string().uuid(), approved: z.boolean() }).strict();
 async function body(req: IncomingMessage): Promise<unknown> {
   if (req.headers['content-type']?.split(';')[0] !== 'application/json') throw new Error();
@@ -32,10 +35,11 @@ async function body(req: IncomingMessage): Promise<unknown> {
   for await (const chunk of req) { bytes += chunk.length; if (bytes > 16_384) throw new Error(); chunks.push(Buffer.from(chunk)); }
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
-export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnostics: { development?: boolean; sink?: TraceSink } = {}) {
+export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnostics: { development?: boolean; sink?: TraceSink } = {}, dependencies: { runtime?: ReturnType<typeof createToolRuntime>; classifier?: Pick<ConfirmationIntentClassifier, 'classify'>; now?: () => number } = {}) {
   const confirmationTrace = diagnostics.development === true && env.JARVIS_CONFIRMATION_TRACE === 'true';
   const trace = confirmationTracer(confirmationTrace, diagnostics.sink);
-  const { registry, timezone } = createToolRuntime(env);
+  const { registry, timezone } = dependencies.runtime ?? createToolRuntime(env);
+  const classifier = dependencies.classifier ?? new ConfirmationIntentClassifier(env.OPENAI_API_KEY);
   const sessions = new Map<string, { executor: ToolExecutor; expiresAt: number; busy: boolean }>();
   const lifetime = 30 * 60_000;
   const cleanup = () => { for (const [id, session] of sessions) if (session.expiresAt <= Date.now()) { session.executor.close(); sessions.delete(id); } };
@@ -54,7 +58,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
       if (previousId) { sessions.get(previousId)?.executor.close(); sessions.delete(previousId); }
       if (sessions.size >= 10) { send(429, { error: 'Demasiadas sesiones.' }); return true; }
       const id = randomBytes(32).toString('hex');
-      sessions.set(id, { executor: new ToolExecutor(registry, Date.now, 60_000, undefined, trace), expiresAt: Date.now() + lifetime, busy: false });
+      sessions.set(id, { executor: new ToolExecutor(registry, dependencies.now ?? Date.now, 60_000, undefined, trace), expiresAt: Date.now() + lifetime, busy: false });
       res.setHeader('Set-Cookie', `jarvis_session=${id}; HttpOnly; SameSite=Strict; Path=/api/tools; Max-Age=1800${origin?.startsWith('https:') ? '; Secure' : ''}`);
       send(200, { tools: registry.descriptors(), timezone, now: new Date().toISOString(), confirmationTrace }); return true;
     }
@@ -70,9 +74,25 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
       const input = await body(req);
       if (path === '/api/tools/invoke') {
         const p = invocation.parse(input); trace({ event: 'server POST /invoke', reason: 'request' }); send(200, await session.executor.invoke(p.invocationId, p.toolId, p.input));
+      } else if (path === '/api/tools/intent') {
+        const p = voiceIntent.parse(input); const pending = session.executor.pendingState();
+        if (!pending || pending.confirmationId !== p.confirmationId) { send(200, { confirmationId: p.confirmationId, intent: 'ambiguous' }); }
+        else {
+          trace({ event: 'server POST /intent', reason: 'classifying', pendingId: p.confirmationId });
+          const intent = await classifier.classify(pending.summary, p.utterance);
+          // A classification arriving after expiry, close or replacement has no authority.
+          const current = session.executor.pendingState();
+          const boundIntent = current?.confirmationId === p.confirmationId ? intent : 'ambiguous';
+          trace({ event: 'server intent.result', reason: 'classified', pendingId: p.confirmationId, classification: boundIntent });
+          send(200, { confirmationId: p.confirmationId, intent: boundIntent });
+        }
       } else if (path === '/api/tools/decision') {
         const p = decision.parse(input); trace({ event: 'server POST /decision', reason: p.approved ? 'approved' : 'rejected', pendingId: p.confirmationId }); send(200, await session.executor.decide(p.confirmationId, p.approved));
-      } else if (path === '/api/tools/cancel') { trace({ event: 'server POST /cancel', reason: 'request' }); session.executor.invalidate(); send(200, { cancelled: true }); }
+      } else if (path === '/api/tools/cancel') {
+        const p = cancellation.parse(input); const current = session.executor.pendingState();
+        if (p.confirmationId && current?.confirmationId !== p.confirmationId) send(200, { cancelled: false });
+        else { trace({ event: 'server POST /cancel', reason: 'request', pendingId: p.confirmationId }); session.executor.invalidate(); send(200, { cancelled: true }); }
+      }
       else send(404, { error: 'Ruta desconocida.' });
     } catch { send(400, { error: 'Solicitud inválida.' }); }
     finally { session.busy = false; }

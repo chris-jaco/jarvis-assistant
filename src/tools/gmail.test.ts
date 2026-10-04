@@ -1,3 +1,4 @@
+import { fakeIntent, naturalApprovals } from './testing/confirmation-intent.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RunContext } from '@openai/agents-core';
@@ -181,6 +182,7 @@ test('Gmail through real voice bridge: stale yes cannot send; post-prompt confir
     if (route === 'invoke') return Response.json(await f.executor.invoke(input.invocationId, input.toolId, input.input));
     if (route === 'activity') return Response.json({ activity: f.executor.telemetry.snapshot(), pending: f.executor.pendingState() });
     if (route === 'cancel') { f.executor.invalidate(); return Response.json({ cancelled: true }); }
+    if (route === 'intent') return Response.json({ confirmationId: input.confirmationId, intent: fakeIntent(input.utterance) });
     if (route === 'decision') { decisions.push(input.approved); return Response.json(await f.executor.decide(input.confirmationId, input.approved)); }
     throw new Error('Unexpected route');
   };
@@ -236,10 +238,10 @@ test('reply to our own Sent message targets original recipients and preserves se
   assert.equal(parsed.from!.value[0]!.address, ownerA.email); assert.equal((Array.isArray(parsed.to) ? parsed.to[0] : parsed.to)!.value[0]!.address, 'recipient@example.test'); assert.equal(parsed.inReplyTo, '<source@example.test>');
 });
 
-for (const phrase of ['Sí', 'sí, confirma', 'confirmar', 'adelante', 'hazlo', 'sí, hazlo', 'sí, sí, te confirmo', 'Sí, sí, te confirmo. Envíaselo, por favor.', 'Sí, envíaselo', 'Sí, envíalo', 'sí, te confirmo, envíaselo por favor', 'confirmo', 'señor confirmo', 'No, mandalo a otra dirección', 'Sí, pero cambiá el asunto', 'Esperá, agregá a Juan en copia', 'Mandalo desde la otra cuenta', 'No lo envíes', 'Sí, envíalo a otra dirección', 'Sí, agregá un adjunto', 'Qué tengo mañana']) {
+for (const phrase of [...naturalApprovals, 'Sí', 'sí, confirma', 'confirmar', 'adelante', 'hazlo', 'sí, hazlo', 'sí, sí, te confirmo', 'Sí, sí, te confirmo. Envíaselo, por favor.', 'Sí, envíaselo', 'Sí, envíalo', 'sí, te confirmo, envíaselo por favor', 'confirmo', 'señor confirmo', 'No, cambiale el asunto.', 'Sí, pero mandalo a Pedro.', 'Agregá a Juan en copia.', 'Usá mi otra cuenta.', 'Adjuntá también el PDF.', 'No, mandalo a otra dirección', 'Sí, pero cambiá el asunto', 'Esperá, agregá a Juan en copia', 'Mandalo desde la otra cuenta', 'No lo envíes', 'Sí, envíalo a otra dirección', 'Sí, agregá un adjunto', 'Qué tengo mañana']) {
   test(`live Gmail confirmation lifecycle: ${phrase}`, async () => {
     const original = globalThis.fetch; const f = fixture(); const decisions: boolean[] = []; const notices: string[] = [];
-    const affirmative = !['No, mandalo a otra dirección', 'Sí, pero cambiá el asunto', 'Esperá, agregá a Juan en copia', 'Mandalo desde la otra cuenta', 'No lo envíes', 'Sí, envíalo a otra dirección', 'Sí, agregá un adjunto', 'Qué tengo mañana'].includes(phrase);
+    const affirmative = !['No, cambiale el asunto.', 'Sí, pero mandalo a Pedro.', 'Agregá a Juan en copia.', 'Usá mi otra cuenta.', 'Adjuntá también el PDF.', 'No, mandalo a otra dirección', 'Sí, pero cambiá el asunto', 'Esperá, agregá a Juan en copia', 'Mandalo desde la otra cuenta', 'No lo envíes', 'Sí, envíalo a otra dirección', 'Sí, agregá un adjunto', 'Qué tengo mañana'].includes(phrase);
     let invokes = 0; let cancellations = 0;
     let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
     globalThis.fetch = async (url, options) => {
@@ -248,7 +250,8 @@ for (const phrase of ['Sí', 'sí, confirma', 'confirmar', 'adelante', 'hazlo', 
       if (route === 'invoke') { invokes++; return Response.json(await f.executor.invoke(input.invocationId, input.toolId, input.input)); }
       if (route === 'activity') return Response.json({ activity: f.executor.telemetry.snapshot(), pending: f.executor.pendingState() });
       if (route === 'cancel') { cancellations++; f.executor.invalidate(); return Response.json({ cancelled: true }); }
-      if (route === 'decision') { decisions.push(input.approved); if (input.approved) await gate; return Response.json(await f.executor.decide(input.confirmationId, input.approved)); }
+      if (route === 'intent') return Response.json({ confirmationId: input.confirmationId, intent: fakeIntent(input.utterance) });
+    if (route === 'decision') { decisions.push(input.approved); if (input.approved) await gate; return Response.json(await f.executor.decide(input.confirmationId, input.approved)); }
       throw new Error('Unexpected route');
     };
     const bridge = new VoiceToolBridge(() => {}, message => notices.push(message));
@@ -264,6 +267,7 @@ for (const phrase of ['Sí', 'sí, confirma', 'confirmar', 'adelante', 'hazlo', 
       await invoke(); assert.equal(invokes, 1); assert.equal(bridge.pending!.confirmationId, frozen);
       const completion = bridge.transportEvent({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'confirmation', transcript: phrase });
       if (affirmative) {
+        await new Promise<void>(resolve => setImmediate(resolve));
         assert.deepEqual(decisions, [true]); assert.equal(cancellations, 0);
         assert.equal(notices.length, 0); assert.equal(f.api.mutations().length, 0);
         const awaiting = await invoke(); assert.ok(JSON.stringify(awaiting).includes('awaiting_execution')); assert.equal(invokes, 1);
@@ -285,7 +289,8 @@ for (const mode of ['early', 'stale', 'expired', 'failed']) {
       if (route === 'session') return Response.json({ tools: f.registry.descriptors(), timezone: 'Europe/Madrid', now: new Date().toISOString() });
       if (route === 'invoke') return Response.json(await f.executor.invoke(input.invocationId, input.toolId, input.input));
       if (route === 'activity') return Response.json({ activity: f.executor.telemetry.snapshot(), pending: f.executor.pendingState() });
-      if (route === 'decision') return Response.json(await f.executor.decide(input.confirmationId, input.approved));
+      if (route === 'intent') return Response.json({ confirmationId: input.confirmationId, intent: fakeIntent(input.utterance) });
+    if (route === 'decision') return Response.json(await f.executor.decide(input.confirmationId, input.approved));
       throw new Error('Unexpected route');
     };
     const bridge = new VoiceToolBridge(() => {}, n => notices.push(n));

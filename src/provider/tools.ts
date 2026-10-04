@@ -2,6 +2,7 @@ import { tool, setSensitiveDataLoggingEnabled } from '@openai/agents-realtime';
 import { z } from 'zod';
 import { confirmationTracer } from '../diagnostics/confirmation.js';
 import type { ConfirmationTrace, TraceSink } from '../diagnostics/confirmation.js';
+import { intentSchema } from '../tools/confirmation-intent.js';
 import type { ToolResult } from '../tools/types.js';
 import type { ToolActivity } from '../tools/telemetry.js';
 setSensitiveDataLoggingEnabled(false);
@@ -17,6 +18,8 @@ export class VoiceToolBridge {
   pending: PendingConfirmation | null = null;
   private armed = false;
   private decisionInFlight = false;
+  private intentRevision = 0;
+  private intentInFlight = 0;
   private promptPlayback?: { confirmationId: string; responseId: string; interrupted: boolean };
   private observedResponses = new Set<string>();
   private captured = new Map<string, { id: string; approvable: boolean }>();
@@ -42,7 +45,7 @@ export class VoiceToolBridge {
           if (this.closed) return { status: 'error', message: 'Sesión cerrada.' };
           // Realtime may request another tool before asynchronous user transcription.
           // Never let the model replace/execute a frozen action while it awaits a decision.
-          if (this.decisionInFlight) return { status: 'awaiting_execution', message: 'La decisión está en procesamiento. Espera el resultado del backend; todavía no hay éxito confirmado. No repitas la acción.' };
+          if (this.decisionInFlight || this.intentInFlight) { this.diagnostic('tool.invoke', this.intentInFlight ? 'blocked_while_classifying' : 'blocked_while_deciding'); return { status: 'awaiting_execution', message: 'La decisión está en procesamiento. Espera el resultado del backend; todavía no hay éxito confirmado. No repitas la acción.' }; }
           if (this.pending) { this.diagnostic('tool.invoke', 'blocked_while_pending'); return { status: 'pending', ...this.pending }; }
           let input: unknown; try { input = JSON.parse(inputJson); } catch { return { status: 'error', message: 'JSON inválido.' }; }
           try {
@@ -125,6 +128,9 @@ export class VoiceToolBridge {
     }
   }
   speechStarted(itemId: string): void {
+    // A new turn supersedes an unresolved semantic decision. Old classification
+    // must not execute while the user is already correcting or changing intent.
+    if (this.intentInFlight && !this.captured.has(itemId)) ++this.intentRevision;
     if (!this.captured.has(itemId) && this.pending && this.pending.expiresAt > Date.now()) this.captured.set(itemId, { id: this.pending.confirmationId, approvable: this.armed });
     const capture = this.captured.get(itemId);
     this.diagnostic('speech.capture', capture ? 'captured' : 'not_captured', { itemId, capturedId: capture?.id, capturedApprovable: capture?.approvable });
@@ -132,14 +138,25 @@ export class VoiceToolBridge {
   async transcript(itemId: string, text: string): Promise<void> {
     if (!this.pending || this.closed) { this.diagnostic('transcript.classify', 'no_pending_or_closed', { itemId }); return; }
     const capture = this.captured.get(itemId); this.captured.delete(itemId);
-    const normalized = text.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '').replace(/[\p{P}\p{S}]/gu, ' ').replace(/\s+/g, ' ').trim();
-    // Match the WHOLE utterance: only bounded affirmative words and anaphoric
-    // action restatements are allowed. Corrections, recipients, accounts, subject,
-    // body or attachment changes leave unmatched words and must invalidate.
-    // 'senor confirmo' is a narrow speech-transcription alias, not a prefix.
-    const approved = ['si', 'si confirma', 'confirma', 'confirmar', 'si confirmo', 'confirmo', 'adelante', 'hazlo', 'si hazlo', 'yes', 'senor confirmo'].includes(normalized) || /^si(?: si){0,2}(?: (?:te )?confirmo)?(?: (?:hazlo|envialo|enviaselo))?(?: por favor)?$/.test(normalized);
-    const rejected = ['no', 'cancela', 'cancelar', 'no lo hagas', 'no cancelalo', 'cancel', 'no lo envies'].includes(normalized);
-    this.diagnostic('transcript.classify', capture?.id === this.pending.confirmationId ? 'matching_capture' : 'missing_or_stale_capture', { itemId, capturedId: capture?.id, capturedApprovable: capture?.approvable, classification: approved ? 'affirmative' : rejected ? 'negative' : 'unrelated' });
+    const pendingId = this.pending.confirmationId;
+    if (capture?.id !== pendingId) {
+      this.diagnostic('transcript.classify', 'missing_or_stale_capture', { itemId, capturedId: capture?.id }); return;
+    }
+    const revision = ++this.intentRevision;
+    this.intentInFlight++;
+    let intent: import('../tools/confirmation-intent.js').ConfirmationIntent = 'ambiguous';
+    try {
+      this.diagnostic('POST /intent', 'classifying', { itemId, capturedId: pendingId, capturedApprovable: capture.approvable });
+      const result = await toolRequest('intent', { confirmationId: pendingId, utterance: text }) as { confirmationId?: unknown; intent?: unknown };
+      if (result.confirmationId === pendingId) intent = intentSchema.parse(result.intent);
+    } catch { /* Unavailable/malformed classifier never grants approval. */ }
+    finally { this.intentInFlight--; }
+    if (this.closed || revision !== this.intentRevision || this.pending?.confirmationId !== pendingId) {
+      this.diagnostic('intent.ignore', 'superseded_or_closed', { itemId, capturedId: pendingId }); return;
+    }
+    const approved = intent === 'affirmative';
+    const rejected = intent === 'negative';
+    this.diagnostic('transcript.classify', capture?.id === this.pending.confirmationId ? 'matching_capture' : 'missing_or_stale_capture', { itemId, capturedId: capture?.id, capturedApprovable: capture?.approvable, classification: intent });
     if (rejected && capture?.id === this.pending.confirmationId) { await this.decide(false); return; }
     if (approved) {
       if (capture?.approvable && capture.id === this.pending.confirmationId) await this.decide(true);
@@ -147,22 +164,29 @@ export class VoiceToolBridge {
       // An early/stale affirmative is not a request change and cannot execute.
       return;
     }
+    // Ambiguity invalidates too: a later yes must not approve an uncertain old turn.
+    // Correction/unrelated speech never reuses the frozen payload.
     // Do not let delayed transcripts or an unrelated utterance approve an action.
     if (capture?.id === this.pending.confirmationId) {
-      this.diagnostic('POST /cancel', 'unrelated_matching_capture', { itemId, capturedId: capture.id, capturedApprovable: capture.approvable });
+      this.diagnostic('POST /cancel', intent === 'ambiguous' ? 'ambiguous_matching_capture' : intent === 'correction' ? 'correction_matching_capture' : 'unrelated_matching_capture', { itemId, capturedId: capture.id, capturedApprovable: capture.approvable });
       const cancelledId = this.pending.confirmationId;
+      this.decisionInFlight = true;
       this.pending = null; this.armed = false; this.promptPlayback = undefined; this.captured.clear();
       try {
-        await toolRequest('cancel', {});
-        if (!this.closed) this.notify(`Resultado del backend: la confirmación ${cancelledId} se canceló porque el usuario cambió de solicitud. Esa acción ya no está pendiente y no se ejecutó. Puedes preparar inmediatamente una NUEVA confirmación con la solicitud corregida; no esperes su rechazo ni su caducidad.`);
+        const cancellation = await toolRequest('cancel', { confirmationId: cancelledId }) as { cancelled?: unknown };
+        if (cancellation.cancelled !== true) throw new Error('Cancellation not confirmed');
+        if (!this.closed && intent === 'ambiguous') this.notify('Resultado del backend: la confirmación se canceló porque no se pudo determinar una aprobación inequívoca. La acción no se ejecutó. Pide una aclaración; no reintentes automáticamente.');
+        else if (!this.closed) this.notify(`Resultado del backend: la confirmación ${cancelledId} se canceló porque el usuario cambió de solicitud. Esa acción ya no está pendiente y no se ejecutó. Puedes preparar inmediatamente una NUEVA confirmación con la solicitud corregida; no esperes su rechazo ni su caducidad.`);
       } catch {
         if (!this.closed) this.notify('No se pudo verificar la cancelación. No asumas que la acción se ejecutó ni repitas una escritura sin comprobar su estado.');
       }
       await this.refresh();
+      this.decisionInFlight = false;
     }
   }
   async decide(approved: boolean): Promise<void> {
     const pending = this.pending; if (!pending || this.closed) return;
+    ++this.intentRevision;
     this.diagnostic('POST /decision', approved ? 'approved' : 'rejected');
     // Clear speech captures immediately, but keep model invocations blocked until
     // the authoritative decision result (not the user's yes) has been received.
