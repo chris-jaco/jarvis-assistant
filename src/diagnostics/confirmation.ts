@@ -19,7 +19,7 @@ function opaqueId(id: string | undefined): string | undefined {
   for (let i = 0; i < id.length; i++) hash = Math.imul(hash ^ id.charCodeAt(i), 16777619);
   return `id-${(hash >>> 0).toString(16).padStart(8, '0')}`;
 }
-export function confirmationTracer(enabled: boolean, sink: TraceSink = entry => console.info('[JARVIS confirmation]', JSON.stringify(entry))): TraceSink {
+export function confirmationTracer(enabled: boolean, sink: TraceSink = entry => console.info('[ATLAS confirmation]', JSON.stringify(entry))): TraceSink {
   return entry => {
     if (!enabled) return;
     // Whitelist fields explicitly. Even accidental extra properties cannot escape.

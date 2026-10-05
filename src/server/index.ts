@@ -51,7 +51,7 @@ const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? '127.0.0.1';
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be an integer from 1 to 65535.');
 if (!host.trim()) throw new Error('HOST must not be empty.');
-server.listen(port, host, () => console.log(`JARVIS: http://${host}:${port}`));
+server.listen(port, host, () => console.log(`ATLAS: http://${host}:${port}`));
 async function shutdown(): Promise<void> { tools.close(); server.close(); await vite?.close(); }
 process.on('SIGTERM', () => { void shutdown(); });
 process.on('SIGINT', () => { void shutdown(); });

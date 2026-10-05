@@ -1,6 +1,6 @@
-# JARVIS V0.2.1 — Universal Tool Foundation
+# Atlas V0.4.4 — Voice-first identity and interface
 
-Asistente personal por voz: TypeScript strict, Node HTTP nativo, UI mínima sin framework, OpenAI Realtime y WebRTC. V0.2 añade herramientas sin reemplazar la arquitectura V0.1. El tag `v0.1.0` es la referencia conocida y no se modifica. V0.3 se desarrolla en `v0.3-gmail`, sobre el tag `v0.2.2`; no se publica ni mezcla automáticamente en `main`.
+Asistente personal por voz: TypeScript strict, Node HTTP nativo, interfaz sin framework, OpenAI Realtime y WebRTC. V0.4.4 cambia la identidad a Atlas y la experiencia visual sobre la base aceptada V0.4.3 en `v0.4-memory`. Las secciones anteriores de versiones describen la evolución de herramientas, Gmail y memoria. La arquitectura validada, las credenciales y los tags anteriores se conservan. Esta versión requiere aceptación de voz local antes de publicarse como release.
 
 ## Instalar y ejecutar
 
@@ -68,7 +68,7 @@ READ no confirma. WRITE confirma por defecto y se configura por herramienta (`co
 
 La preparación de una mutación resuelve el evento y su versión sin cambiar estado externo. Guarda un snapshot privado con ID/etag, argumentos, resumen visible, identificador aleatorio y expiración de 60 segundos. Solo existe una confirmación pendiente por sesión. El backend consume el identificador antes de cualquier await; decisiones repetidas/concurrentes no ejecutan dos veces. Caducar, rechazar, desconectar, cerrar sesión, iniciar otra herramienta o cambiar la solicitud invalida la confirmación. Las sesiones duran 30 minutos y admiten 100 invocaciones como máximo; reconecta después del límite. Una sesión por navegador; una nueva conexión invalida la anterior.
 
-El tool devuelve pending y JARVIS debe leer la pregunta summary y esperar. Después de terminar esa pregunta, podés confirmar con lenguaje natural, por ejemplo «Sí», «Sí, confirma», «Confirmar», «Adelante», «Hazlo», «Sí, hazlo», «Sí, confirmo» o «Confirmo»; «No», «Cancela», «Cancelar» o «No lo hagas» rechaza. Solo se acepta aprobación de un nuevo item de voz iniciado después del output_audio_buffer.stopped de la respuesta nueva vinculada a la acción pendiente (response.created; no necesita un started correspondiente); cleared/interrupción no arma aprobación. La generación response.done no equivale al fin de reproducción. Realtime puede pedir otra herramienta antes de llegar la transcripción final del «Sí»: mientras haya confirmación pendiente el puente devuelve la acción congelada y bloquea la nueva ejecución, sin reemplazarla ni borrar su captura de voz. La captura conserva el ID pendiente y si el turno empezó tras la pregunta; una transcripción antigua no puede aprobar. Espera a terminar la pregunta para confirmar por voz. Un «Sí» anticipado se ignora sin ejecutar ni cancelar por cambio de solicitud; «No» puede rechazar incluso antes del final. V0.3.2 sustituye las listas de frases por clasificación semántica compartida en backend para todas las integraciones (ver abajo). También puedes usar Confirmar/Cancelar en la UI. Si una transcripción falla, usa los botones o deja caducar la solicitud. Nunca hay un tool que permita al modelo otorgarse aprobación.
+El tool devuelve pending y Atlas debe leer la pregunta summary y esperar. Después de terminar esa pregunta, podés confirmar con lenguaje natural, por ejemplo «Sí», «Sí, confirma», «Confirmar», «Adelante», «Hazlo», «Sí, hazlo», «Sí, confirmo» o «Confirmo»; «No», «Cancela», «Cancelar» o «No lo hagas» rechaza. Solo se acepta aprobación de un nuevo item de voz iniciado después del output_audio_buffer.stopped de la respuesta nueva vinculada a la acción pendiente (response.created; no necesita un started correspondiente); cleared/interrupción no arma aprobación. La generación response.done no equivale al fin de reproducción. Realtime puede pedir otra herramienta antes de llegar la transcripción final del «Sí»: mientras haya confirmación pendiente el puente devuelve la acción congelada y bloquea la nueva ejecución, sin reemplazarla ni borrar su captura de voz. La captura conserva el ID pendiente y si el turno empezó tras la pregunta; una transcripción antigua no puede aprobar. Espera a terminar la pregunta para confirmar por voz. Un «Sí» anticipado se ignora sin ejecutar ni cancelar por cambio de solicitud; «No» puede rechazar incluso antes del final. V0.3.2 sustituye las listas de frases por clasificación semántica compartida en backend para todas las integraciones (ver abajo). También puedes usar Confirmar/Cancelar en la UI. Si una transcripción falla, usa los botones o deja caducar la solicitud. Nunca hay un tool que permita al modelo otorgarse aprobación.
 
 El SDK 0.18.0 ofrece `needsApproval`, `tool_approval_requested`, `session.approve` y `session.reject`, pero la guía Realtime indica que el agente no procesa nuevos pedidos mientras espera aprobación nativa. V0.2 usa la pequeña capa backend para permitir el siguiente turno de voz y mantener autoridad/estado del lado servidor. No se usa sticky approval ni aprobación por nombre de herramienta. La voz usa transcripción, no autenticación biométrica: acepta solo un entorno local y supervisado. Si no se oye la pregunta completa, se interrumpe o la respuesta no se reconoce, usa los botones para revisar el resumen exacto.
 
@@ -95,7 +95,7 @@ Herramientas:
 | calendar.updateEvent | WRITE | Renombrar/mover un evento con horario completo. |
 | calendar.deleteEvent | SENSITIVE | Eliminar una ocurrencia/evento tras confirmación obligatoria. |
 
-Fechas locales se convierten con Temporal en USER_TIMEZONE; offsets explícitos representan instantes. Se rechazan horas inexistentes/ambiguas en cambios DST y rangos invertidos. El agente recibe timezone y reloj al conectar. Para «mañana», construye desde el calendario local, no sumando siempre 24 h. Si falta duración, JARVIS pregunta. Un nombre requiere rango de búsqueda; varias coincidencias producen AMBIGUOUS y no mutan nada. Puede listar el rango y pedir al usuario escoger un ID. No se eligen silenciosamente eventos. Máximo 100 resultados; listas truncadas fallan explícitamente. No se gestionan series completas ni movimientos de eventos de día completo. Crear/actualizar reuniones con asistentes usa sendUpdates=all solo después de aprobación; las mutaciones sin asistentes y eliminación conservan sendUpdates=none; prueba inicialmente con un calendario privado de pruebas.
+Fechas locales se convierten con Temporal en USER_TIMEZONE; offsets explícitos representan instantes. Se rechazan horas inexistentes/ambiguas en cambios DST y rangos invertidos. El agente recibe timezone y reloj al conectar. Para «mañana», construye desde el calendario local, no sumando siempre 24 h. Si falta duración, Atlas pregunta. Un nombre requiere rango de búsqueda; varias coincidencias producen AMBIGUOUS y no mutan nada. Puede listar el rango y pedir al usuario escoger un ID. No se eligen silenciosamente eventos. Máximo 100 resultados; listas truncadas fallan explícitamente. No se gestionan series completas ni movimientos de eventos de día completo. Crear/actualizar reuniones con asistentes usa sendUpdates=all solo después de aprobación; las mutaciones sin asistentes y eliminación conservan sendUpdates=none; prueba inicialmente con un calendario privado de pruebas.
 
 Autorización inicial, en tu máquina local:
 
@@ -104,7 +104,7 @@ Autorización inicial, en tu máquina local:
 3. Crea un cliente OAuth tipo **Web application** con redirect URI exacta `http://127.0.0.1:3001/oauth/callback`. La app y callback son servicios locales, no un login frontend público.
 4. Introduce client ID y client secret en `.env` backend. Selecciona USER_TIMEZONE y GOOGLE_CALENDAR_ID. No compartas el archivo ni valores en chat.
 5. Ejecuta `npm run google:authorize`. Abre la URL indicada en un navegador **de la misma máquina** y concede los scopes calendar.events y calendar.freebusy. El callback escucha solo en loopback y se cierra al finalizar o después de 5 minutos.
-6. Reinicia JARVIS. No copies tokens al browser. El archivo `.local/google-tokens.json` contiene refresh/access tokens, se reemplaza atómicamente. En Linux/macOS conserva archivo 0600 y carpeta 0700 y exige propietario actual sin acceso de grupo/otros. En Windows usa ACL nativa: crea una carpeta privada con herencia desactivada para el usuario actual y SYSTEM, y verifica propietario y todas las reglas Allow del archivo/carpeta (solo usuario, SYSTEM o Administrators). No interpreta chmod como una ACL Windows. `.local/` está ignorado por Git. El código rechaza archivos no regulares, hard links, symlinks y carpetas inseguras antes de leer/escribir; en Windows también comprueba reparse points en el recorrido del path. Verifica la seguridad del temporal vacío antes de escribir tokens y lo elimina si falla. Windows requiere Windows PowerShell integrado y un filesystem con ACL (por ejemplo NTFS); si no puede verificar la seguridad falla cerrado como UNCONFIGURED, sin fallback a permisos simulados. Para una carpeta existente insegura no cambia permisos silenciosamente: utiliza una nueva carpeta de credenciales dedicada (por ejemplo GOOGLE_TOKEN_PATH=.local/oauth/google-tokens.json), autoriza de nuevo y retira de forma segura el archivo antiguo. Evita OneDrive/junctions o unidades FAT para este almacenamiento; una ruta privada fuera del checkout también sirve. Nunca guardes tokens en rutas versionadas. google-auth-library refresca access tokens y el backend persiste tokens renovados conservando refresh_token.
+6. Reinicia Atlas. No copies tokens al browser. El archivo `.local/google-tokens.json` contiene refresh/access tokens, se reemplaza atómicamente. En Linux/macOS conserva archivo 0600 y carpeta 0700 y exige propietario actual sin acceso de grupo/otros. En Windows usa ACL nativa: crea una carpeta privada con herencia desactivada para el usuario actual y SYSTEM, y verifica propietario y todas las reglas Allow del archivo/carpeta (solo usuario, SYSTEM o Administrators). No interpreta chmod como una ACL Windows. `.local/` está ignorado por Git. El código rechaza archivos no regulares, hard links, symlinks y carpetas inseguras antes de leer/escribir; en Windows también comprueba reparse points en el recorrido del path. Verifica la seguridad del temporal vacío antes de escribir tokens y lo elimina si falla. Windows requiere Windows PowerShell integrado y un filesystem con ACL (por ejemplo NTFS); si no puede verificar la seguridad falla cerrado como UNCONFIGURED, sin fallback a permisos simulados. Para una carpeta existente insegura no cambia permisos silenciosamente: utiliza una nueva carpeta de credenciales dedicada (por ejemplo GOOGLE_TOKEN_PATH=.local/oauth/google-tokens.json), autoriza de nuevo y retira de forma segura el archivo antiguo. Evita OneDrive/junctions o unidades FAT para este almacenamiento; una ruta privada fuera del checkout también sirve. Nunca guardes tokens en rutas versionadas. google-auth-library refresca access tokens y el backend persiste tokens renovados conservando refresh_token.
 7. Para revocar, retira acceso en tu cuenta Google y elimina el token file privado. No registres su contenido. Si faltan credenciales, archivo o autorización, Calendar devuelve UNCONFIGURED sin impedir conversación/búsqueda.
 
 El callback valida state aleatorio, consume una sola respuesta y usa PKCE S256. El OAuth completo necesita tu cuenta; no fue ejecutado con credenciales reales en cloud. Un callback de loopback requiere tu navegador local, no simplemente abrirlo desde una máquina distinta.
@@ -114,7 +114,7 @@ El callback valida state aleatorio, consume una sola respuesta y usa PKCE S256. 
 
 Create acepta `attendees: ["sofia@example.com", "juan@example.com"]`: trim, minúsculas, validación de email, máximo 50 y deduplicación. Update permite cambios solo de asistentes sin mover horario, además de título/horario; si mueve debe enviar inicio y fin juntos. `attendeeMode: "add"` es el default y conserva asistentes existentes y RSVP; `"replace"`/`"remove"` requieren una solicitud explícita. replace con [] retira todos; remove retira los emails indicados. El cuerpo preparado y el resumen incluyen destinatarios finales y cambios antes de confirmar, y conservan ID/etag. Preparación solo lee, nunca invita. Un evento cambiado después de preparar falla If-Match sin retry automático. Una lista parcial de asistentes falla cerrada.
 
-Mover/renombrar una reunión con asistentes también requiere aprobación para sus actualizaciones externas. Actualizaciones que no cambian asistentes omiten el campo del PATCH para conservarlos. Calendar detalles devuelve emails para revisión; no se añaden a telemetría. Un nombre como «Sofía» no resuelve un contacto: JARVIS debe pedir email explícito, nunca adivinarlo. Un adapter de contactos futuro podría proporcionar esos mismos emails validados; no está implementado. La entrega de correo depende de Google y preferencias del destinatario, no está garantizada por una respuesta HTTP exitosa. Eliminación conserva su política previa de notificaciones.
+Mover/renombrar una reunión con asistentes también requiere aprobación para sus actualizaciones externas. Actualizaciones que no cambian asistentes omiten el campo del PATCH para conservarlos. Calendar detalles devuelve emails para revisión; no se añaden a telemetría. Un nombre como «Sofía» no resuelve un contacto: Atlas debe pedir email explícito, nunca adivinarlo. Un adapter de contactos futuro podría proporcionar esos mismos emails validados; no está implementado. La entrega de correo depende de Google y preferencias del destinatario, no está garantizada por una respuesta HTTP exitosa. Eliminación conserva su política previa de notificaciones.
 
 Aceptación local adicional: crea una reunión privada de prueba con tu email de pruebas, rechaza y comprueba que no existe ni invita; repite y confirma con «Sí, confirma» tras el final de la pregunta. Comprueba un solo evento y una invitación tras aprobación. Añade un segundo email con update sin cambiar la hora, comprueba que mantiene el primero y sus RSVP, y verifica «No lo hagas». Un nombre sin email debe generar una pregunta, no invitación. Prueba todos los afirmativos, frase ambigua, expiración de 60 s, cambio de solicitud, botones y barge-in. No uses destinatarios de terceros sin su consentimiento para tus pruebas.
 
@@ -140,7 +140,7 @@ el voseo pueden variar entre respuestas y requieren escucha real. Las pruebas
 verifican configuración e instrucciones, no la calidad acústica.
 
 Aceptación local: reconecta para abrir una sesión nueva con `cedar`; probá
-«Hola Jarvis, ¿me escuchás?», una pregunta sencilla, una explicación larga pedida
+«Hola Atlas, ¿me escuchás?», una pregunta sencilla, una explicación larga pedida
 explícitamente y un cambio de idioma. Después probá crear y cancelar una reunión
 de prueba, confirmar con «Sí, confirmo» tras terminar la pregunta, rechazar con
 «No» e interrumpir una respuesta. Comprobá el acento sin exageración, respuestas
@@ -178,7 +178,7 @@ No hay medidas reales de latencia OpenAI/Google en cloud sin credenciales. WRITE
 
 ## Voz y estabilidad V0.1
 
-`src/core/personality.ts` centraliza instrucciones, REALTIME_MODEL, JARVIS_VOICE y TURN_EAGERNESS. Token/session comparten voz marin y semantic VAD medium, createResponse=true e interruptResponse=true. Allí se pueden ajustar concisión/estilo y voz en versiones futuras; no se rediseña el comportamiento de interrupción en V0.2.
+`src/core/personality.ts` centraliza instrucciones, REALTIME_MODEL, JARVIS_VOICE y TURN_EAGERNESS. Token/session comparten voz cedar y semantic VAD medium, createResponse=true e interruptResponse=true. Allí se pueden ajustar concisión/estilo y voz en versiones futuras; no se rediseña el comportamiento de interrupción en V0.2.
 
 Mantiene autenticación GA `POST /v1/realtime/client_secrets` en backend, response mínima `{value: ek_...}`, WebRTC SDK/browser, contexto de sesión, history_updated/transcript, estados de reproducción, micrófono, controles y limpieza al desconectar. Ni la clave permanente ni tokens Google llegan a la UI. SDK tracing está desactivado y sensitive logging desactivado. Reconectar inicia contexto nuevo.
 
@@ -190,19 +190,19 @@ Servidor destinado a uso personal local en loopback. SameSite, comprobación de 
 
 Después de configurar OpenAI y autorizar Google, ejecuta npm run dev y abre la UI local. Usa calendario privado de pruebas y confirma timezone. Ejecuta **también npm run build && npm start** con el dev detenido para validar producción.
 
-A. **Voz existente:** «Hola Jarvis, ¿me escuchas?» Comprueba micrófono, audio, transcript y estados. Di «Me llamo Ana» y luego «¿Cómo me llamo?» para comprobar contexto.
+A. **Voz existente:** «Hola Atlas, ¿me escuchas?» Comprueba micrófono, audio, transcript y estados. Di «Me llamo Ana» y luego «¿Cómo me llamo?» para comprobar contexto.
 
-B. **Información actual:** «Jarvis, ¿qué pasó hoy con OpenAI?» Comprueba web.search ✓, respuesta actual con fuentes cuando disponibles y ausencia de afirmaciones inventadas si provocas un fallo de búsqueda.
+B. **Información actual:** «Atlas, ¿qué pasó hoy con OpenAI?» Comprueba web.search ✓, respuesta actual con fuentes cuando disponibles y ausencia de afirmaciones inventadas si provocas un fallo de búsqueda.
 
 C. **Leer Calendar:** «¿Qué tengo mañana?» Contrasta títulos y horarios en Google Calendar y USER_TIMEZONE; sin confirmación.
 
 D. **Disponibilidad:** «¿Tengo algún hueco mañana por la tarde?» Si pide horario, di «de 15 a 20». Contrasta huecos reales con eventos/all-day en el calendario.
 
-E. **Crear:** «Agéndame una prueba de Jarvis mañana a las 18.» Si pide duración, di «30 minutos». Con TOOL_CONFIRM_WRITES=true debe preguntar resumen/horario; comprueba que NO existe aún. Espera el final de la pregunta y di «Sí». Debe aparecer un solo evento 18:00–18:30. Con false debe ejecutar sin confirmación de WRITE.
+E. **Crear:** «Agéndame una prueba de Atlas mañana a las 18.» Si pide duración, di «30 minutos». Con TOOL_CONFIRM_WRITES=true debe preguntar resumen/horario; comprueba que NO existe aún. Espera el final de la pregunta y di «Sí». Debe aparecer un solo evento 18:00–18:30. Con false debe ejecutar sin confirmación de WRITE.
 
-F. **Modificar:** «Mueve la prueba de Jarvis a las 18:30.» Si pregunta duración, di «mantén los 30 minutos». Confirma si true; verifica 18:30–19:00 y que no hay duplicado. Si hay dos pruebas, debe pedir cuál sin mover ninguna.
+F. **Modificar:** «Mueve la prueba de Atlas a las 18:30.» Si pregunta duración, di «mantén los 30 minutos». Confirma si true; verifica 18:30–19:00 y que no hay duplicado. Si hay dos pruebas, debe pedir cuál sin mover ninguna.
 
-G. **Eliminar:** «Elimina la prueba de Jarvis.» Debe pedir fecha si falta o buscar en rango explícito acordado. JARVIS **debe preguntar confirmación explícita con evento/fecha** incluso con TOOL_CONFIRM_WRITES=false. Antes de «Sí» comprueba que sigue existiendo. Después de confirmación, verifica eliminación. Un segundo «Sí» no debe ejecutar otra eliminación.
+G. **Eliminar:** «Elimina la prueba de Atlas.» Debe pedir fecha si falta o buscar en rango explícito acordado. Atlas **debe preguntar confirmación explícita con evento/fecha** incluso con TOOL_CONFIRM_WRITES=false. Antes de «Sí» comprueba que sigue existiendo. Después de confirmación, verifica eliminación. Un segundo «Sí» no debe ejecutar otra eliminación.
 
 H. **Rechazar:** Crea otra prueba; pide borrarla y, tras la pregunta, di «No». Verifica que sigue en Calendar. Repite y espera más de 60 s antes de «Sí»; debe caducar sin borrar. Repite con solicitud distinta seguida de «Sí»: ninguna acción anterior debe ejecutarse.
 
@@ -253,7 +253,7 @@ npm run dev
 
 On Linux/macOS use `JARVIS_CONFIRMATION_TRACE=true npm run dev`.
 Open the browser developer tools **Console**, enable **Preserve log**, filter for
-`[JARVIS confirmation]`, and connect/reconnect JARVIS. Reproduce the correction
+`[ATLAS confirmation]`, and connect/reconnect Atlas. Reproduce the correction
 followed by a new confirmation prompt and **“Sí, confirmo.”** once. Copy the
 filtered console lines from `bridge.initialize` through the cancellation or
 decision, plus terminal lines with the same prefix. Return those lines and the
@@ -268,7 +268,7 @@ and function-call events; bridge transitions, blocked repeated tools, `/cancel`
 and `/decision`; and server executor preparation/invalidation/decision/close.
 Identifiers are correlation hints, not authentication values; hashes may collide.
 No transcript text, audio, tool arguments/results, attendee details, credentials,
-cookies or tokens are logged. No diagnostic trace is persisted by JARVIS.
+cookies or tokens are logged. No diagnostic trace is persisted by Atlas.
 
 Tracing defaults off and requires both explicit opt-in and the development server.
 `npm start` never enables it, even if the environment variable is true. Stop the
@@ -303,7 +303,7 @@ exponen solo metadatos; `gmail.identities` consulta Send As y devuelve únicamen
 alias primarios o verificados. No configura alias ni acepta un From arbitrario.
 
 Una cuenta explícita se selecciona por ID. Si una operación necesita una cuenta y
-hay más de una, falla AMBIGUOUS: JARVIS debe preguntar. Una búsqueda sin accountId
+hay más de una, falla AMBIGUOUS: Atlas debe preguntar. Una búsqueda sin accountId
 consulta **todas** las cuentas; con ID solo esa. Los resultados incluyen cuenta,
 mensaje e hilo para «¿En qué cuenta?», «Resumímelo» y «Respondé que…». Varias
 coincidencias requieren que el usuario elija; no se resuelven mediante nombres
@@ -340,7 +340,7 @@ Para configurar localmente:
 
    Elegí una cuenta diferente en cada consentimiento. Autorizar nuevamente la
    misma cuenta actualiza solo su archivo y conserva su ID. No edites los tokens
-   manualmente. Reiniciá JARVIS después de gestionar cuentas y reconectá la voz.
+   manualmente. Reiniciá Atlas después de gestionar cuentas y reconectá la voz.
 6. Para desconectar una cuenta localmente:
 
    ```powershell
@@ -505,7 +505,7 @@ un resultado incierto exige comprobar Enviados, nunca reintentar automáticament
 Referencia oficial del formato de Responses consultada para este cambio:
 https://github.com/openai/openai-node/blob/master/src/resources/responses/responses.ts
 
-## JARVIS V0.4 — memoria contextual persistente
+## Atlas V0.4 — memoria contextual persistente
 
 ### Arquitectura y almacenamiento
 
@@ -679,7 +679,7 @@ se pueden inspeccionar y olvidar; no hay datos personales distribuidos como defa
 
 ### Aceptación local V0.4
 
-1. Ejecutar install/typecheck/tests/build y conectar: «Hola Jarvis, ¿me escuchás?».
+1. Ejecutar install/typecheck/tests/build y conectar: «Hola Atlas, ¿me escuchás?».
    Comprobar voz cedar, transcript e interrupción natural.
 2. Declarar «Mi pareja es Sofia». Pedir «¿Qué recordás de Sofia?». No debe inventar email.
 3. Declarar un email **de prueba bajo tu control**. Reiniciar backend y sesión, pedir
@@ -741,7 +741,7 @@ instrucciones centrales, sin un clasificador de frases españolas ni cambios al
 motor de confirmación. La interpretación conversacional requiere validación
 por voz real; las pruebas automáticas no garantizan decisiones perfectas del
 modelo. Los filtros de deletreo dependen del texto que entregue STT: si éste
-pierde las letras originales, Jarvis debe pedir repetir/deletrear o aportar el
+pierde las letras originales, Atlas debe pedir repetir/deletrear o aportar el
 texto, no reconstruirlas por pronunciación.
 
 Para la aceptación local: buscá una entidad existente usando variantes de
@@ -794,7 +794,7 @@ preparación local. Una propuesta del modelo mantiene su procedencia de
 inferencia; para reemplazar un dato explícito existente se usa la corrección
 confirmada, sin depender de extracción automática.
 
-Durante `npm run dev`, los fallos producen entradas `[JARVIS memory]` con
+Durante `npm run dev`, los fallos producen entradas `[ATLAS memory]` con
 `operation`, `stage`, `code` y `elapsedMs`. Incluyen cola, seguridad, snapshot,
 validación, commit y operaciones públicas. No contienen rutas, nombres,
 argumentos, IDs, contenido de memoria, mensajes originales, stacks ni secretos.
@@ -808,7 +808,7 @@ nativas de ACL/reparse points que se ejecutan únicamente en Windows. Las
 mediciones simuladas no sustituyen la aceptación en Windows: después de
 actualizar, inspeccioná un recuerdo, guardá una nueva preferencia y corregí
 una existente con confirmación. Si falla, compartí únicamente la línea de
-metadatos `[JARVIS memory]`, nunca el JSON privado ni credenciales.
+metadatos `[ATLAS memory]`, nunca el JSON privado ni credenciales.
 
 ### V0.4.3 — preferencias y rendimiento en Windows
 
@@ -888,3 +888,101 @@ historial. Repetir la corrección `onavox.ai` → `onabox.ai` y comprobar que el
 summary, contenido y valor son literales. Con profiling activo, comparar lectura
 fría/caliente y la ejecución de la corrección **después** de la aprobación; no
 editar manualmente `.local` ni pegar contenido privado para diagnosticar tiempos.
+
+## Atlas V0.4.4 — identidad e interfaz por voz
+
+Atlas es el nombre permanente del asistente. La voz sigue siendo `cedar`, con
+español rioplatense ligero, voseo natural y respuestas cortas, directas y con el
+resultado primero. Los hechos personales siguen en memoria, no en el prompt.
+No se narran pasos internos salvo que una demora real necesite un aviso; los
+errores no justifican inventar éxito ni reintentar escrituras sensibles.
+
+La pantalla muestra el orb central (tocarlo conecta/desconecta), una transcripción
+viva debajo y un estado secundario: Conectado, Escuchando, Pensando, Hablando o
+Desconectado. La transcripción actualiza los mismos turnos mientras llegan
+fragmentos; sigue el último turno salvo que estés leyendo mensajes anteriores.
+No hay burbujas ni dashboard. La actividad/timings existentes se conservan en
+«Detalles de sesión», cerrado por defecto. Interrumpir aparece sólo mientras
+Atlas habla; Activar audio aparece si el navegador bloquea autoplay.
+
+Módulos frontend:
+
+- `src/client/orb.ts`: proyección de estados existentes y variables CSS.
+- `src/client/audio-levels.ts`: análisis pasivo y ciclo de vida de Web Audio.
+- `src/client/transcript.ts`: turnos incrementales y scroll.
+- `src/client/confirmation-dialog.ts`: presentación del pending existente.
+- `src/client/main.ts`: composición, controles de sesión y observadores.
+
+El orb usa gradientes, reflejos y CSS sin dependencia 3D. Conectado respira
+lentamente; Pensando muestra un arco lento y no responde al audio. Escuchando
+usa **el mismo MediaStream de micrófono** ya capturado por el provider, sin otro
+getUserMedia. Hablando usa **audio.srcObject**, el MediaStream remoto que asigna
+el SDK WebRTC instalado. Los analizadores se conectan a fuentes pasivas, nunca
+al destino de audio: no duplican reproducción ni cambian VAD/WebRTC. La energía
+RMS tiene umbral de ruido, normalización, límite y suavizado attack/release. No
+hay pulsos aleatorios durante habla. En una interrupción se cambia a la energía
+del usuario con transiciones visuales, sin cancelar nada desde el orb.
+
+El AudioContext se prepara dentro del clic de conexión y se reutiliza al llegar
+el stream; si el navegador lo suspende puede reactivarse con Activar audio.
+Si Web Audio no está disponible, la voz continúa y el orb conserva el estado,
+sin fingir amplitud. AudioContext, nodos, listeners y requestAnimationFrame se
+liberan al desconectar; callbacks antiguos no reactivan el análisis. No se paran
+tracks desde la visualización: esa propiedad sigue en el provider. Al abandonar
+la página se desconecta; volver desde el back/forward cache recarga la interfaz
+para no revivir listeners ya liberados. `prefers-reduced-motion` elimina giros,
+respiración y deformación, conservando estado e intensidad medida.
+
+### Confirmación multimodal
+
+El diálogo sólo aparece con un pending y muestra **su summary congelado** como
+texto. No reconstruye remitentes, destinatarios, adjuntos ni parámetros desde
+el cliente; tampoco muestra payloads, IDs técnicos o credenciales. Todos los
+detalles necesarios de seguridad del summary se conservan, incluso si es largo.
+
+Voz y botones llegan al **mismo VoiceToolBridge / ToolExecutor**. Un clic envía
+la decisión con el ID mostrado; el provider lo compara con el pending actual
+antes de delegar. Escape equivale a Cancelar, nunca a aprobar. No se cierra
+optimistamente por un clic: espera la actualización del bridge/backend. Las
+resoluciones por voz cierran el mismo diálogo. El doble clic se bloquea en la
+vista; los IDs congelados, caducidad, consumo antes del await y protecciones de
+carreras existentes siguen siendo la autoridad. El diálogo enfoca Cancelar al
+abrirse, usa el focus trap nativo y devuelve foco al control anterior al cerrar.
+La expiración local sólo deshabilita controles; no concede autorización.
+
+### Compatibilidad y aceptación
+
+El repositorio `chris-jaco/jarvis-assistant`, carpeta, nombre interno del paquete,
+constantes `JARVIS_*`, variables `JARVIS_CONFIRMATION_TRACE` /
+`JARVIS_MEMORY_PROFILE` y rutas `.local` se mantienen por compatibilidad. Los
+logs públicos ahora usan `[ATLAS confirmation]` / `[ATLAS memory]`; no cambia su
+contenido permitido ni las condiciones de activación. No se migra memoria ni
+se cambia OAuth, Calendar, Gmail, permisos, bridge semántico o almacenamiento.
+`jsdom` se usa sólo como dependencia de desarrollo para pruebas de DOM; no llega
+al bundle servido. El orb no incorpora dependencias de producción nuevas.
+
+Aceptación local (Chrome/Edge en Windows, localhost/HTTPS):
+
+1. Conectar tocando el orb, decir «Hola Atlas, ¿me escuchás?» y comprobar Tú/Atlas,
+   fragmentos y texto final. Susurrar/hablar normalmente debe cambiar su energía.
+2. Pedir una explicación e interrumpir: el orb debe seguir tu voz sin cortar el
+   micrófono ni alterar barge-in. Pedir datos actuales y observar Pensando hasta
+   que lleguen la respuesta y el audio; Hablando sigue la reproducción real.
+3. Preparar una acción sensible de prueba (por ejemplo una eliminación de Calendar
+   o un Gmail a una cuenta propia). Revisar el summary completo. Confirmar por
+   voz: el diálogo debe desaparecer y la acción ejecutarse una sola vez.
+4. Repetir con Confirmar, luego pronunciar «sí»: debe haber una única ejecución.
+   Repetir con Cancelar y Escape: nada se ejecuta. Cambiar la solicitud y comprobar
+   que un diálogo viejo no aprueba la acción nueva. Dejar caducar una propuesta.
+5. Leer transcripción anterior mientras llega otra respuesta: no debe forzar el
+   scroll al final. Probar teclado, viewport móvil y movimiento reducido del SO.
+6. Repetir conexión/desconexión durante captura y reproducción; comprobar que el
+   micrófono se libera y no se multiplican analizadores. Validar Calendar, Gmail,
+   búsqueda, preferencia persistente V0.4.3 y corrección literal Onabox.
+
+Las pruebas automáticas no usan cuentas ni Realtime real. Las comprobaciones en
+Chromium con streams de audio sintético verifican RMS, silencio, diálogos, foco,
+Escape, responsive y reduced motion; no sustituyen esta aceptación en vivo ni
+validan voz/acento en Windows/Safari. Si el stream remoto aún no llegó o está
+pausado/silenciado, el estado puede indicar Hablando sin amplitud; no se inventa
+una onda para ocultarlo.

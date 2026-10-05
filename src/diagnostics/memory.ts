@@ -6,7 +6,7 @@ export interface MemoryDiagnostic { operation: MemoryOperation; stage: MemorySta
 export type MemoryDiagnosticSink = (entry: MemoryDiagnostic) => void;
 const codes = new Set(['INVALID_INPUT', 'UNCONFIGURED', 'UPSTREAM', 'TIMEOUT', 'AMBIGUOUS', 'CONFLICT', 'EXPIRED', 'REJECTED', 'LIMIT', 'ENOENT', 'EACCES', 'EPERM', 'EEXIST', 'ENOSPC', 'EBUSY']);
 export class MemoryDiagnostics {
-  constructor(private readonly enabled = false, private readonly sink: MemoryDiagnosticSink = entry => console.info('[JARVIS memory]', JSON.stringify(entry)), private readonly profile = false) {}
+  constructor(private readonly enabled = false, private readonly sink: MemoryDiagnosticSink = entry => console.info('[ATLAS memory]', JSON.stringify(entry)), private readonly profile = false) {}
   failure(operation: MemoryOperation, stage: MemoryStage, error: unknown, started: number): void {
     if (!this.enabled) return;
     const raw = error instanceof ToolError ? error.category : error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError') ? 'TIMEOUT' : (error as { code?: unknown } | null)?.code;
