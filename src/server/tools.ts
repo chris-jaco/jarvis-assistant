@@ -42,7 +42,9 @@ export function createToolRuntime(env: NodeJS.ProcessEnv = process.env, diagnost
   const registry = new ToolRegistry();
   const mode = env.BROWSER_PROVIDER ?? 'isolated'; if (!['isolated', 'attached'].includes(mode)) throw new Error('Invalid BROWSER_PROVIDER');
   const options = browserOptions(env);
-  const provider = mode === 'attached' ? new AttachedChromeProvider(new NativeTransport(env.ATLAS_BROWSER_HOST_PATH, env.ATLAS_BROWSER_EXTENSION_ID), options.enabled, env.BROWSER_CONNECTION_ID) : new IsolatedBrowserProvider(options, undefined, browserDiagnostics);
+  const native = mode === 'attached' ? new NativeTransport(env.ATLAS_BROWSER_HOST_PATH, env.ATLAS_BROWSER_EXTENSION_ID, { diagnostic: line => console.info(line) }) : undefined;
+  if (native && options.enabled) native.initialize();
+  const provider = native ? new AttachedChromeProvider(native, options.enabled, env.BROWSER_CONNECTION_ID) : new IsolatedBrowserProvider(options, undefined, browserDiagnostics);
   const browser = new BrowserAdapter(provider, browserDiagnostics); registry.add(browser);
   registry.add(new WebSearchAdapter(env.OPENAI_API_KEY, env.OPENAI_SEARCH_MODEL ?? 'gpt-4.1'));
   const auth = new GoogleAuth(googleConfig(env));

@@ -25,17 +25,20 @@ export class AttachedChromeProvider implements BrowserProvider {
   }
   state(id: string) { const session = this.sessions.get(id); return session && !session.closed ? { workflow: session.workflow ?? null, ready: session.ready ?? null } : { workflow: null, ready: null }; }
   private session(): Session { const session = this.scope.getStore(); if (!session || session.closed) throw new ToolError('REJECTED'); return session; }
-  private connection(session: Session): string {
-    if (!this.enabled) throw new ToolError('UNCONFIGURED'); const connections = this.transport.connections();
+  private async connection(session: Session, signal: AbortSignal): Promise<string> {
+    if (!this.enabled || this.transport.configuration?.().configured === false) throw new ToolError('UNCONFIGURED');
+    const connections = this.transport.waitForConnections ? await this.transport.waitForConnections(signal) : this.transport.connections();
     if (session.connection && connections.includes(session.connection)) return session.connection;
     // A new connection never inherits scopes. Multiple connections need explicit selection.
     session.tabs.clear(); session.active = undefined; session.observation = undefined;
     const selected = this.configuredConnection ? connections.find(id => id === this.configuredConnection) : connections.length === 1 ? connections[0] : undefined;
-    if (!selected) throw new ToolError(connections.length > 1 ? 'AMBIGUOUS' : 'UNCONFIGURED'); session.connection = selected; return selected;
+    if (!selected) throw new ToolError(connections.length > 1 ? 'AMBIGUOUS' : 'UPSTREAM'); session.connection = selected; return selected;
   }
   private async call(operation: Operation, args: Record<string, unknown>, signal: AbortSignal): Promise<Reply> {
-    const session = this.session(); const connection = this.connection(session);
-    const request = parseRequest({ protocol: 'atlas.browser', version: 1, kind: 'request', requestId: randomUUID(), backendSessionId: session.id, taskId: session.task, connectionEpoch: this.transport.epoch, deadlineAt: Date.now() + 17_000, operation, args });
+    const deadlineAt = Date.now() + 17_000;
+    const session = this.session(); const connection = await this.connection(session, signal);
+    if (signal.aborted || deadlineAt <= Date.now()) throw new ToolError('TIMEOUT');
+    const request = parseRequest({ protocol: 'atlas.browser', version: 1, kind: 'request', requestId: randomUUID(), backendSessionId: session.id, taskId: session.task, connectionEpoch: this.transport.epoch, deadlineAt, operation, args });
     const reply = replySchema.parse(await this.transport.request(connection, request, signal));
     if (session.closed) throw new ToolError('REJECTED');
     if (reply.outcome === 'ACCESS_PENDING' || reply.outcome === 'REQUIRES_USER_INTERACTION') session.workflow = reply;

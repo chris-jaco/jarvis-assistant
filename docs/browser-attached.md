@@ -123,3 +123,23 @@ Remove-Item Env:ATLAS_NATIVE_TEST_BINARY
 ```
 
 Sin esa variable, el test Native informa skip explícito. Los tests POSIX/Windows condicionales mantienen sus límites; ni los mocks de Chrome ni Chromium con fixtures sustituyen A–L real.
+
+## Startup y primer handshake (fix de acceptance V0.5.1)
+
+Con `BROWSER_ENABLED=true` y `BROWSER_PROVIDER=attached`, Atlas valida la configuración y arranca el broker al crear el runtime, después de cargar `.env`. Incluso con `BROWSER_TRACE=false` muestra:
+
+```text
+[ATLAS browser] provider=attached configured=true
+[ATLAS browser] provider=attached stage=broker_spawn code=STARTING
+[ATLAS browser] provider=attached stage=broker_spawn code=RETURNED elapsedMs=...
+[ATLAS browser] provider=attached stage=broker_spawn code=OK elapsedMs=...
+[ATLAS browser] provider=attached stage=bridge_connected code=OK elapsedMs=...
+```
+
+`configured=true` confirma path absoluto a un archivo regular accesible + ID válido; no significa que Chrome ya esté conectado. Una configuración inválida muestra sólo los nombres/categorías lógicas (`ATLAS_BROWSER_HOST_PATH:missing/not_absolute/not_regular_file/unavailable`, `ATLAS_BROWSER_EXTENSION_ID:missing/invalid`), nunca los valores privados. No lanza el broker ni espera un handshake en ese caso y la tool falla con `UNCONFIGURED`.
+
+Si una llamada llega antes de conectar Chrome, espera el primer canal hasta cinco segundos, con AbortSignal y dentro del presupuesto existente de la tool. No reenvía la acción. Broker fallido, extensión desconectada o agotamiento de esa espera se reportan como `UPSTREAM`, no como falta de configuración. Una cancelación antes de enviar el comando es `TIMEOUT`; la incertidumbre tras dispatch conserva `EXECUTION_UNKNOWN`. Múltiples canales mantienen selección explícita.
+
+`broker_spawn RETURNED` mide el retorno de `spawn()` al backend; `OK` mide su evento de proceso iniciado; `bridge_connected` mide la conexión Native Messaging desde el inicio del spawn. `bridge_wait` informa el tiempo de espera de una tool. Estas líneas acotadas permiten separar arranque del proceso y handshake, sin paths, IDs, DOM, URLs ni errores crudos. El fallo original comprobaba la lista vacía inmediatamente después de un spawn lazy, antes de recibir el handshake; no había un timer de 14 s para configuración. La duración exacta de Windows requiere estos timings, no se atribuye a antivirus ni a permisos sin evidencia.
+
+Este fix sólo cambia backend/tests/docs. Para `npm run dev`, basta `git pull --ff-only origin v0.5-browser-control` + reiniciar Atlas. No requiere npm install, rebuild/reload de la extensión ni reinstalar el host. Para ejecutar producción con `npm start`, recompilá el backend con `npm run build`.
