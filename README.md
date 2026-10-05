@@ -997,9 +997,9 @@ transparentes mediante viewport; no traza ni redibuja la silueta. Sirve también
 como favicon autónomo, sin texto ni fondo, manteniendo proporciones.
 
 El header lo colorea no destructivamente con una máscara CSS y
-`--atlas-accent: #7abfa7`, compartido por icono, punto de marca e indicador activo.
-Conectando/desconectado/error mantienen el indicador neutro. El favicon usa el
-mismo color; una prueba comprueba su coincidencia con la variable CSS.
+`--atlas-accent: #35E6D0`, compartido por icono, punto de marca e indicador activo.
+Conectando/desconectado/error mantienen el indicador neutro. El icono del header mide 1.25rem (un 22% menor que antes). El favicon es negro,
+independiente del accent, con la misma silueta y transparencia.
 La tarjeta de confirmación sólo cambia superficie, borde, radio, sombra y
 padding. Voz, IDs, payload congelado, botones, foco y protección de carreras se
 mantienen en los módulos validados sin cambios.

@@ -16,13 +16,16 @@ test('brand and favicon reuse the supplied PNG silhouette without redrawing or a
 
 test('one CSS accent drives icon and dot; only active connection states have its indicator', async () => {
   const css = await readFile('src/client/style.css', 'utf8');
-  assert.match(css, /--atlas-accent: #7abfa7/);
+  assert.match(css, /--atlas-accent: #35E6D0/);
   assert.match(css, /\.brand-icon \{[^}]*background: var\(--atlas-accent\)/);
   assert.match(css, /\.brand-dot \{ color: var\(--atlas-accent\)/);
   assert.match(css, /\.state-dot \{[^}]*background: #6d7c8f/);
   const rule = css.match(/body\[data-state="connected"\][^{}]+\{ background: var\(--atlas-accent\); \}/)![0]!;
   for (const state of ['connected', 'listening', 'thinking', 'speaking']) assert.ok(rule.includes(`data-state="${state}"`));
   for (const state of ['disconnected', 'error', 'connecting']) assert.ok(!rule.includes(`data-state="${state}"`));
-  const accent = css.match(/--atlas-accent: (#[a-f\d]+)/)![1]!;
-  assert.ok((await readFile('public/brand/atlas-icon.svg', 'utf8')).includes(`fill="${accent}"`));
+  assert.match(css, /\.brand-icon \{ width: 1\.25rem; aspect-ratio: 1047 \/ 820/);
+  const svg = await readFile('public/brand/atlas-icon.svg', 'utf8');
+  assert.ok(svg.includes('fill="#000000"'));
+  assert.ok(!svg.includes('--atlas-accent'));
+  assert.ok(!svg.includes('#35E6D0'));
 });
