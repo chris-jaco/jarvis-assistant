@@ -1,3 +1,6 @@
+import { BrowserDiagnostics } from '../../browser/diagnostics.js';
+import { browserCode } from '../../diagnostics/browser.js';
+import { ToolError } from '../types.js';
 import { z } from 'zod';
 import type { BrowserProvider } from '../../browser/provider.js';
 import type { ToolAdapter, ToolDefinition } from '../types.js';
@@ -5,9 +8,15 @@ const empty = z.object({}).strict(); const ref = z.string().uuid();
 const url = z.string().url().max(2000);
 export class BrowserAdapter implements ToolAdapter {
   readonly integration = 'browser'; readonly transport = 'local' as const;
-  constructor(private readonly provider: BrowserProvider) {}
+  constructor(private readonly provider: BrowserProvider, readonly diagnostics = new BrowserDiagnostics()) {}
   tools(): ToolDefinition[] {
-    const tool = (id: string, description: string, schema: z.ZodType, execute: ToolDefinition['execute'], read = false): ToolDefinition => ({ id: `browser.${id}`, name: `browser_${id}`, description, integration: this.integration, capability: id, permission: read ? 'READ' : 'WRITE', confirm: false, schema, timeoutMs: 18_000, execute });
+    const tool = (id: string, description: string, schema: z.ZodType, execute: ToolDefinition['execute'], read = false): ToolDefinition => ({ id: `browser.${id}`, name: `browser_${id}`, description, integration: this.integration, capability: id, permission: read ? 'READ' : 'WRITE', confirm: false, schema, timeoutMs: 18_000, execute: (input, signal) => this.diagnostics.run('adapter', async () => {
+      const abort = this.diagnostics.capture('execution_abort', 'TIMEOUT');
+      signal.addEventListener('abort', abort, { once: true });
+      try { const result = await execute(input, signal); this.diagnostics.event('provider_result', 'OK'); return result; }
+      catch (error) { this.diagnostics.event('provider_result', error instanceof ToolError ? browserCode(error.category) : 'UPSTREAM'); throw error; }
+      finally { signal.removeEventListener('abort', abort); }
+    }, signal) });
     return [
       tool('status', 'Estado del navegador local visible. No inicia el navegador.', empty, () => this.provider.status(), true),
       tool('tabs', 'Lista IDs estables, títulos y pestaña activa. Inicia el navegador si hace falta.', empty, (_, signal) => this.provider.listTabs(signal), true),

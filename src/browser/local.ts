@@ -1,3 +1,4 @@
+import { BrowserDiagnostics } from './diagnostics.js';
 import { randomUUID } from 'node:crypto';
 import { mkdir, lstat } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -19,24 +20,27 @@ export class LocalBrowserProvider implements BrowserProvider {
   private context?: BrowserContext; private connecting?: Promise<BrowserContext>;
   private tabs = new Map<string, Page>(); private active?: string; private last = new Map<string, string>();
   private refs = new Map<string, Ref>(); private unavailable = false; private closed = false; private security = new TokenFileSecurity();
-  constructor(private readonly options: LocalBrowserOptions, private readonly launch?: () => Promise<BrowserContext>) {}
-  async status(): Promise<BrowserStatus> { return { available: this.options.enabled && !this.unavailable, connected: !!this.context, visible: true, ...(!this.options.enabled ? { reason: 'disabled' as const } : this.unavailable ? { reason: 'unavailable' as const } : {}) }; }
+  constructor(private readonly options: LocalBrowserOptions, private readonly launch?: () => Promise<BrowserContext>, private readonly diagnostics = new BrowserDiagnostics()) {}
+  async status(): Promise<BrowserStatus> { this.diagnostics.event('provider_state', 'OK', 0, { channel: this.options.channel, connected: !!this.context, initializing: !!this.connecting }); return { available: this.options.enabled && !this.unavailable, connected: !!this.context, visible: true, ...(!this.options.enabled ? { reason: 'disabled' as const } : this.unavailable ? { reason: 'unavailable' as const } : {}) }; }
   private check(signal: AbortSignal) { if (signal.aborted) throw new ToolError('TIMEOUT'); }
-  private async init(): Promise<BrowserContext> {
+  private async init(signal: AbortSignal): Promise<BrowserContext> {
     if (!this.options.enabled || this.closed) throw new ToolError('UNCONFIGURED');
+    this.diagnostics.event('provider_state', 'OK', 0, { channel: this.options.channel, connected: !!this.context, initializing: !!this.connecting });
     if (this.context) return this.context;
-    if (!this.connecting) this.connecting = (async () => {
+    if (this.connecting) return this.diagnostics.run('initialization_wait', () => this.connecting!, signal);
+    if (!this.connecting) this.connecting = this.diagnostics.run('provider_initialization', async () => {
       try {
         let context: BrowserContext;
-        if (this.launch) context = await this.launch();
+        if (this.launch) context = await this.diagnostics.run('browser_launch', () => this.launch!(), signal);
         else {
           const root = resolve(this.options.root ?? process.cwd());
           for (const path of [resolve(root, '.local'), resolve(root, '.local/browser-profile')]) {
             let created = false; try { await mkdir(path, { mode: 0o700 }); created = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-            await this.security.validate(path, await lstat(path), true, created);
+            await this.diagnostics.run('profile_security', async () => this.security.validate(path, await lstat(path), true, created), signal);
           }
-          context = await chromium.launchPersistentContext(resolve(root, '.local/browser-profile'), { headless: false, chromiumSandbox: true, channel: this.options.channel === 'chromium' ? undefined : this.options.channel, timeout: 12_000, acceptDownloads: false, serviceWorkers: 'block' });
+          context = await this.diagnostics.run('browser_launch', () => chromium.launchPersistentContext(resolve(root, '.local/browser-profile'), { headless: false, chromiumSandbox: true, channel: this.options.channel === 'chromium' ? undefined : this.options.channel, timeout: 12_000, acceptDownloads: false, serviceWorkers: 'block' }), signal);
         }
+        await this.diagnostics.run('context_ready', async () => {
         context.setDefaultTimeout(4000); context.setDefaultNavigationTimeout(8000);
         // No consequential network methods, even if a page's search/click handler is deceptive.
         await context.route('**/*', route => {
@@ -54,14 +58,15 @@ export class LocalBrowserProvider implements BrowserProvider {
           new MutationObserver(() => { ++revision; }).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
         })()`;
         await context.addInitScript(observer);
-        for (const page of context.pages()) await page.evaluate(observer);
+        for (const page of context.pages()) await this.diagnostics.run('startup_page', () => page.evaluate(observer), signal);
+        }, signal);
         this.context = context; this.unavailable = false;
         context.on('page', page => this.track(page)); context.on('close', () => { this.context = undefined; this.tabs.clear(); this.active = undefined; void this.clearRefs(); });
         for (const page of context.pages()) this.track(page);
         return context;
       } catch { this.unavailable = true; throw new ToolError('UNCONFIGURED'); }
       finally { this.connecting = undefined; }
-    })();
+    }, signal);
     return this.connecting;
   }
   private track(page: Page) {
@@ -72,17 +77,18 @@ export class LocalBrowserProvider implements BrowserProvider {
     page.on('download', download => { void download.cancel(); });
   }
   private async clearRefs() { const refs = [...this.refs.values()]; this.refs.clear(); await Promise.all(refs.map(ref => ref.handle.dispose().catch(() => {}))); }
-  private async page(signal: AbortSignal): Promise<Page> { this.check(signal); const context = await this.init(); this.check(signal); if (!this.active) await context.newPage(); const page = this.tabs.get(this.active!); if (!page || page.isClosed()) throw new ToolError('CONFLICT'); return page; }
-  private async tab(id: string, page: Page): Promise<BrowserTab> { return { id, title: privateText(await page.title()), url: displayUrl(page.url()), active: id === this.active, ...(this.last.has(id) ? { lastInteraction: this.last.get(id) } : {}) }; }
+  private async page(signal: AbortSignal): Promise<Page> { this.check(signal); const context = await this.init(signal); this.check(signal); if (!this.active) await this.diagnostics.run('tab_creation', () => context.newPage(), signal); const page = this.tabs.get(this.active!); if (!page || page.isClosed()) throw new ToolError('CONFLICT'); return page; }
+  private async tab(id: string, page: Page, signal?: AbortSignal): Promise<BrowserTab> { return this.diagnostics.run('tab_metadata', async () => ({ id, title: privateText(await page.title()), url: displayUrl(page.url()), active: id === this.active, ...(this.last.has(id) ? { lastInteraction: this.last.get(id) } : {}) }), signal); }
   private touch() { if (this.active) this.last.set(this.active, new Date().toISOString()); }
   async ensureBrowser(signal: AbortSignal) { await this.page(signal); return this.status(); }
-  async listTabs(signal: AbortSignal) { await this.page(signal); return Promise.all([...this.tabs].map(([id, page]) => this.tab(id, page))); }
-  async getActiveTab(signal: AbortSignal) { const page = await this.page(signal); return this.tab(this.active!, page); }
-  async switchTab(id: string, signal: AbortSignal) { await this.page(signal); const page = this.tabs.get(id); if (!page) throw new ToolError('CONFLICT'); await this.clearRefs(); this.active = id; await page.bringToFront(); this.touch(); return this.tab(id, page); }
+  async listTabs(signal: AbortSignal) { await this.page(signal); return Promise.all([...this.tabs].map(([id, page]) => this.tab(id, page, signal))); }
+  async getActiveTab(signal: AbortSignal) { const page = await this.page(signal); return this.tab(this.active!, page, signal); }
+  async switchTab(id: string, signal: AbortSignal) { await this.page(signal); const page = this.tabs.get(id); if (!page) throw new ToolError('CONFLICT'); await this.clearRefs(); this.active = id; await page.bringToFront(); this.touch(); return this.tab(id, page, signal); }
   async closeTab(id: string, signal: AbortSignal) { await this.page(signal); const page = this.tabs.get(id); if (!page) throw new ToolError('CONFLICT'); await page.close(); }
-  async openTab(url: string, signal: AbortSignal) { const target = navigationUrl(url); await this.page(signal); this.check(signal); const page = await this.context!.newPage(); this.active = [...this.tabs].find(([, value]) => value === page)![0]; return this.navigate(target, signal); }
-  async navigate(url: string, signal: AbortSignal) { const target = navigationUrl(url); const page = await this.page(signal); await this.clearRefs(); this.check(signal); await page.goto(target, { waitUntil: 'domcontentloaded' }); this.touch(); return this.tab(this.active!, page); }
-  async observe(signal: AbortSignal): Promise<BrowserObservation> {
+  async openTab(url: string, signal: AbortSignal) { const target = navigationUrl(url); await this.page(signal); this.check(signal); const page = await this.diagnostics.run('tab_creation', () => this.context!.newPage(), signal); this.active = [...this.tabs].find(([, value]) => value === page)![0]; return this.navigate(target, signal); }
+  async navigate(url: string, signal: AbortSignal) { const target = navigationUrl(url); const page = await this.page(signal); await this.clearRefs(); this.check(signal); await this.diagnostics.run('navigation', () => page.goto(target, { waitUntil: 'domcontentloaded' }), signal); this.touch(); return this.tab(this.active!, page, signal); }
+  async observe(signal: AbortSignal): Promise<BrowserObservation> { return this.diagnostics.run('observe', () => this.observePage(signal), signal); }
+  private async observePage(signal: AbortSignal): Promise<BrowserObservation> {
     const page = await this.page(signal); await this.clearRefs();
     // Fixed trusted extractor; caller cannot provide JS or selectors. Values are never read.
     const handles = await page.locator('a[href],button,input,textarea,select,[role="button"],[role="searchbox"],[role="textbox"],video,audio').elementHandles();
@@ -115,19 +121,22 @@ export class LocalBrowserProvider implements BrowserProvider {
     if (!ref || ref.page !== page || ref.revision !== await this.revision(page) || !await ref.handle.evaluate(el => el.isConnected)) throw new ToolError('CONFLICT');
     if (ref.info.action === 'blocked') throw new ToolError('REJECTED'); return ref;
   }
-  async click(id: string, signal: AbortSignal) {
+  async click(id: string, signal: AbortSignal) { return this.diagnostics.run('action', () => this.clickAction(id, signal), signal); }
+  private async clickAction(id: string, signal: AbortSignal) {
     const ref = await this.ref(id, signal); this.check(signal);
     if (ref.info.action === 'navigation') { await this.navigate(ref.href!, signal); return; } // Direct GET, never run arbitrary onclick.
     if (ref.info.action === 'media') await ref.handle.evaluate(async el => { const media = el as HTMLMediaElement; if (media.paused) await media.play(); else media.pause(); });
     else if (ref.info.role === 'button') await ref.handle.click(); else if (['textbox', 'searchbox'].includes(ref.info.role)) await ref.handle.focus(); else throw new ToolError('REJECTED');
     this.touch(); await this.clearRefs();
   }
-  async type(id: string, text: string, mode: 'replace' | 'append', signal: AbortSignal) {
+  async type(id: string, text: string, mode: 'replace' | 'append', signal: AbortSignal) { return this.diagnostics.run('action', () => this.typeAction(id, text, mode, signal), signal); }
+  private async typeAction(id: string, text: string, mode: 'replace' | 'append', signal: AbortSignal) {
     const ref = await this.ref(id, signal); if (ref.info.action !== 'search' || !['textbox', 'searchbox'].includes(ref.info.role)) throw new ToolError('REJECTED');
     if (privateText(text, 2000) === '[redacted]') throw new ToolError('REJECTED');
     this.check(signal); if (mode === 'replace') await ref.handle.fill(text); else { await ref.handle.focus(); await ref.handle.press('ControlOrMeta+End'); await ref.page.keyboard.insertText(text); } this.touch(); await this.clearRefs();
   }
-  async press(id: string, key: BrowserKey, signal: AbortSignal) {
+  async press(id: string, key: BrowserKey, signal: AbortSignal) { return this.diagnostics.run('action', () => this.pressAction(id, key, signal), signal); }
+  private async pressAction(id: string, key: BrowserKey, signal: AbortSignal) {
     const ref = await this.ref(id, signal);
     if (!['Enter', 'Escape', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(key)) throw new ToolError('INVALID_INPUT');
     if (ref.info.action === 'media') { if (!['Space', 'Enter'].includes(key)) throw new ToolError('REJECTED'); await this.click(id, signal); return; }
@@ -135,8 +144,8 @@ export class LocalBrowserProvider implements BrowserProvider {
     this.check(signal); await ref.handle.press(key); this.touch(); await this.clearRefs();
   }
   async scroll(direction: 'up' | 'down', signal: AbortSignal) { const page = await this.page(signal); await page.mouse.wheel(0, direction === 'down' ? 600 : -600); this.touch(); await this.clearRefs(); }
-  async back(signal: AbortSignal) { const page = await this.page(signal); await this.clearRefs(); this.check(signal); await page.goBack({ waitUntil: 'domcontentloaded' }); this.touch(); return this.tab(this.active!, page); }
-  async forward(signal: AbortSignal) { const page = await this.page(signal); await this.clearRefs(); this.check(signal); await page.goForward({ waitUntil: 'domcontentloaded' }); this.touch(); return this.tab(this.active!, page); }
-  async reload(signal: AbortSignal) { const page = await this.page(signal); await this.clearRefs(); this.check(signal); await page.reload({ waitUntil: 'domcontentloaded' }); this.touch(); return this.tab(this.active!, page); }
+  async back(signal: AbortSignal) { const page = await this.page(signal); await this.clearRefs(); this.check(signal); await page.goBack({ waitUntil: 'domcontentloaded' }); this.touch(); return this.tab(this.active!, page, signal); }
+  async forward(signal: AbortSignal) { const page = await this.page(signal); await this.clearRefs(); this.check(signal); await page.goForward({ waitUntil: 'domcontentloaded' }); this.touch(); return this.tab(this.active!, page, signal); }
+  async reload(signal: AbortSignal) { const page = await this.page(signal); await this.clearRefs(); this.check(signal); await page.reload({ waitUntil: 'domcontentloaded' }); this.touch(); return this.tab(this.active!, page, signal); }
   async close() { this.closed = true; try { await this.connecting; } catch { /* No raw launch error is exposed. */ } await this.clearRefs(); await this.context?.close(); }
 }

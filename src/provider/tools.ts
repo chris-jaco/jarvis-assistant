@@ -1,3 +1,5 @@
+import { browserTracer, browserCode, isBrowserTool } from '../diagnostics/browser.js';
+import type { BrowserDiagnosticSink } from '../diagnostics/browser.js';
 import { tool, setSensitiveDataLoggingEnabled } from '@openai/agents-realtime';
 import { z } from 'zod';
 import { confirmationTracer } from '../diagnostics/confirmation.js';
@@ -8,10 +10,12 @@ import type { ToolActivity } from '../tools/telemetry.js';
 setSensitiveDataLoggingEnabled(false);
 export interface PendingConfirmation { confirmationId: string; summary: string; expiresAt: number }
 interface Descriptor { id: string; description: string; inputSchema: unknown }
-export async function toolRequest(path: string, data?: unknown, method = 'POST'): Promise<unknown> {
-  const response = await fetch(`/api/tools/${path}`, { method, headers: { 'Content-Type': 'application/json' },
+export async function toolRequest(path: string, data?: unknown, method = 'POST', browserRequest?: { sequence: number; response(call: string): void }): Promise<unknown> {
+  const response = await fetch(`/api/tools/${path}`, { method, headers: { 'Content-Type': 'application/json', ...(browserRequest ? { 'X-Atlas-Browser-Request': String(browserRequest.sequence) } : {}) },
     ...(data === undefined ? {} : { body: JSON.stringify(data) }), signal: AbortSignal.timeout(30_000) });
   if (!response.ok) throw new Error('No se pudo contactar con las herramientas. Reconecta si la sesión caducó.');
+  const call = response.headers.get('X-Atlas-Browser-Call');
+  if (browserRequest && call && /^b[1-9]\d{0,8}$/.test(call)) browserRequest.response(call);
   return response.json();
 }
 export class VoiceToolBridge {
@@ -27,13 +31,16 @@ export class VoiceToolBridge {
   private closed = false;
   private polling?: ReturnType<typeof setInterval>;
   private trace: TraceSink = () => {};
+  private browserTrace: BrowserDiagnosticSink = () => {};
+  private browserSequence = 0;
   private diagnostic(event: string, reason: string, extra: Partial<ConfirmationTrace> = {}): void {
     this.trace({ event, reason, pendingId: this.pending?.confirmationId, armed: this.armed, promptResponseId: this.promptPlayback?.responseId, ...extra });
   }
   constructor(private readonly activity: (rows: ToolActivity[], pending: PendingConfirmation | null) => void,
-    private readonly notify: (message: string) => void, private readonly traceSink?: TraceSink) {}
+    private readonly notify: (message: string) => void, private readonly traceSink?: TraceSink, private readonly browserSink?: BrowserDiagnosticSink) {}
   async initialize() {
-    const config = await toolRequest('session', {}) as { tools: Descriptor[]; timezone: string; now: string; confirmationTrace?: boolean };
+    const config = await toolRequest('session', {}) as { tools: Descriptor[]; timezone: string; now: string; confirmationTrace?: boolean; browserTrace?: boolean };
+    this.browserTrace = browserTracer(config.browserTrace === true, this.browserSink);
     this.trace = confirmationTracer(config.confirmationTrace === true, this.traceSink);
     this.diagnostic('bridge.initialize', 'trace_enabled');
     if (this.closed) { void toolRequest('session', undefined, 'DELETE').catch(() => undefined); return { tools: [], context: '' }; }
@@ -49,14 +56,18 @@ export class VoiceToolBridge {
           if (this.decisionInFlight || this.intentInFlight) { this.diagnostic('tool.invoke', this.intentInFlight ? 'blocked_while_classifying' : 'blocked_while_deciding'); return { status: 'awaiting_execution', message: 'La decisión está en procesamiento. Espera el resultado del backend; todavía no hay éxito confirmado. No repitas la acción.' }; }
           if (this.pending) { this.diagnostic('tool.invoke', 'blocked_while_pending'); return { status: 'pending', ...this.pending }; }
           let input: unknown; try { input = JSON.parse(inputJson); } catch { return { status: 'error', message: 'JSON inválido.' }; }
+          const sequence = ++this.browserSequence; const browserTool = config.browserTrace === true && isBrowserTool(descriptor.id) ? descriptor.id : undefined;
+          const browserStarted = performance.now(); let browserCall: string | undefined;
+          if (browserTool) this.browserTrace({ stage: 'realtime_received', code: 'RUNNING', elapsedMs: 0, clientRequest: sequence, tool: browserTool });
+          const browserResult = (code: import('../diagnostics/browser.js').BrowserCode) => { if (browserTool) this.browserTrace({ stage: 'realtime_result', code, elapsedMs: Math.round(performance.now() - browserStarted), clientRequest: sequence, tool: browserTool, ...(browserCall ? { call: browserCall } : {}) }); };
           try {
             this.diagnostic('POST /invoke', 'request');
-            const result = await toolRequest('invoke', { invocationId: details?.toolCall?.callId ?? crypto.randomUUID(), toolId: descriptor.id, input }) as ToolResult;
-            if (this.closed) return { status: 'error', message: 'Sesión cerrada.' };
+            const result = await toolRequest('invoke', { invocationId: details?.toolCall?.callId ?? crypto.randomUUID(), toolId: descriptor.id, input }, 'POST', browserTool ? { sequence, response: call => { browserCall = call; } } : undefined) as ToolResult;
+            if (this.closed) { browserResult('CLOSED'); return { status: 'error', message: 'Sesión cerrada.' }; }
             this.pending = result.status === 'pending' ? result : null; this.armed = false; this.promptPlayback = undefined; this.captured.clear();
             this.diagnostic('tool.result', result.status === 'pending' ? 'prepared' : 'not_pending');
-            await this.refresh(); return result;
-          } catch { return { status: 'error', message: 'La herramienta no respondió. No asumas que la acción se realizó; comprueba su estado antes de repetirla.' }; }
+            await this.refresh(); browserResult(result.status === 'error' ? browserCode(result.category) : 'OK'); return result;
+          } catch { browserResult('UPSTREAM'); return { status: 'error', message: 'La herramienta no respondió. No asumas que la acción se realizó; comprueba su estado antes de repetirla.' }; }
         } })) };
   }
   private registerPromptResponse(responseId: string): void {

@@ -1123,3 +1123,37 @@ acción de envío/compra: debe detenerse sin ejecutarla. Apagá Browser Control 
 verificá que conversación y herramientas anteriores siguen funcionando. Estos
 pasos en Windows con voz/sitios reales requieren aceptación manual; los tests de
 fixtures no certifican la voz ni la UI de YouTube actual.
+
+### Browser Control: diagnostics del runtime real
+
+`BROWSER_TRACE=true` (reiniciar el backend y reconectar la voz) habilita logs
+`[ATLAS browser]` en la terminal del servidor y en la consola de la UI. La flag
+vale también con el build de producción; por defecto está deshabilitada.
+
+Cada petición Browser usa un ID diagnóstico generado por el servidor (`b1`,
+`b2`, ...), no el ID del SDK, ni el cookie de sesión. El bridge añade un contador
+local de petición y recibe el ID diagnóstico en un header dedicado. Los logs
+unen `realtime_received → http_received → adapter → provider_initialization →
+browser_launch → navigation → provider_result → executor_result → http_result →
+realtime_result`. También separan validación de perfil, preparación del contexto,
+evaluación de pestañas iniciales y creación/metadatos de tabs. Indican canal
+Chrome/Edge/Chromium y flags connected/initializing; no exponen `.env`, rutas,
+URLs, inputs, páginas, DOM, cookies, headers de autenticación ni errores crudos.
+
+`duplicate:true` identifica la repetición de un ID de invocación dentro de la
+misma sesión, preservando la protección de replay existente. `initialization_wait`
+muestra otra llamada esperando la inicialización ya en marcha. `http_busy`
+indica rechazo 429, no una cola esperando. `session_closed/replaced/expired`
+permite distinguir un abort de sesión del watchdog de ejecución, que mantiene
+18s para Browser; fetch HTTP y la tool del SDK mantienen 30s. Un abort conserva
+el ID de la llamada original aunque se dispare desde otra petición HTTP.
+
+Los diagnostics son observacionales: no cambian autoridad, locks, retries,
+confirmaciones, AbortSignals ni duración de los timeouts. BrowserProvider sigue
+siendo compartido por el runtime, mientras los executors son por sesión; cerrar
+la voz no cierra el contexto del browser. Los tests ejercitan el bridge del SDK,
+el handler HTTP y Chromium con fixtures y requests persistentes, más replay,
+status, reconexión y cancelación. No atribuyen un fallo real de Windows a una
+causa hasta tener sus trazas. Para diagnóstico, capturá las líneas del servidor
+y de la consola desde antes del comando de voz hasta el resultado (o timeout),
+manteniendo la UI en una sola pestaña para identificar sesiones inesperadas.

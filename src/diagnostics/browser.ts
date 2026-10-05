@@ -1,0 +1,18 @@
+// Shared metadata contract, safe for the browser bundle; no Node imports.
+export const browserToolIds = ['browser.status', 'browser.tabs', 'browser.open', 'browser.navigate', 'browser.switch', 'browser.close', 'browser.observe', 'browser.click', 'browser.type', 'browser.press', 'browser.scroll', 'browser.back', 'browser.forward', 'browser.reload'] as const;
+export type BrowserToolId = typeof browserToolIds[number];
+export function isBrowserTool(id: string): id is BrowserToolId { return (browserToolIds as readonly string[]).includes(id); }
+export type BrowserStage = 'http_received' | 'http_result' | 'http_busy' | 'session_closed' | 'session_replaced' | 'session_expired' | 'adapter' | 'execution_abort' | 'provider_state' | 'provider_initialization' | 'initialization_wait' | 'profile_security' | 'browser_launch' | 'context_ready' | 'startup_page' | 'tab_creation' | 'navigation' | 'tab_metadata' | 'observe' | 'action' | 'provider_result' | 'executor_result' | 'realtime_received' | 'realtime_result';
+export type BrowserCode = 'RUNNING' | 'OK' | 'TIMEOUT' | 'UNCONFIGURED' | 'CONFLICT' | 'REJECTED' | 'UPSTREAM' | 'INVALID_INPUT' | 'BUSY' | 'CLOSED';
+export interface BrowserDiagnostic {
+  stage: BrowserStage; code: BrowserCode; elapsedMs: number;
+  call?: string; clientRequest?: number; tool?: BrowserToolId; duplicate?: boolean;
+  channel?: 'chrome' | 'msedge' | 'chromium'; connected?: boolean; initializing?: boolean;
+}
+export type BrowserDiagnosticSink = (entry: BrowserDiagnostic) => void;
+export function browserTracer(enabled: boolean, sink: BrowserDiagnosticSink = entry => console.info('[ATLAS browser]', JSON.stringify(entry))): BrowserDiagnosticSink {
+  return enabled ? entry => { try { sink(entry); } catch { /* Diagnostics cannot affect execution. */ } } : () => {};
+}
+export function browserCode(category: unknown): BrowserCode {
+  return typeof category === 'string' && ['TIMEOUT', 'UNCONFIGURED', 'CONFLICT', 'REJECTED', 'UPSTREAM', 'INVALID_INPUT'].includes(category) ? category as BrowserCode : 'UPSTREAM';
+}

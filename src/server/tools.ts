@@ -1,3 +1,6 @@
+import { BrowserDiagnostics } from '../browser/diagnostics.js';
+import { isBrowserTool, browserCode } from '../diagnostics/browser.js';
+import type { BrowserDiagnosticSink } from '../diagnostics/browser.js';
 import { LocalBrowserProvider, browserOptions } from '../browser/local.js';
 import { BrowserAdapter } from '../tools/adapters/browser.js';
 import { preferenceSchema } from '../memory/preferences.js';
@@ -28,12 +31,12 @@ import { GmailAccountStore } from '../tools/adapters/gmail-accounts.js';
 import { GmailAdapter } from '../tools/adapters/gmail.js';
 import { GoogleGmailTransport } from '../tools/adapters/gmail-transport.js';
 import { validateTimezone } from '../tools/adapters/time.js';
-export function createToolRuntime(env: NodeJS.ProcessEnv = process.env, diagnostics = new MemoryDiagnostics()) {
+export function createToolRuntime(env: NodeJS.ProcessEnv = process.env, diagnostics = new MemoryDiagnostics(), browserDiagnostics = new BrowserDiagnostics(env.BROWSER_TRACE === 'true')) {
   const timezone = validateTimezone(env.USER_TIMEZONE ?? 'Europe/Madrid');
   const writePolicy = env.TOOL_CONFIRM_WRITES ?? 'true';
   if (!['true', 'false'].includes(writePolicy)) throw new Error('TOOL_CONFIRM_WRITES must be true or false');
   const registry = new ToolRegistry();
-  const browser = new BrowserAdapter(new LocalBrowserProvider(browserOptions(env))); registry.add(browser);
+  const browser = new BrowserAdapter(new LocalBrowserProvider(browserOptions(env), undefined, browserDiagnostics), browserDiagnostics); registry.add(browser);
   registry.add(new WebSearchAdapter(env.OPENAI_API_KEY, env.OPENAI_SEARCH_MODEL ?? 'gpt-4.1'));
   const auth = new GoogleAuth(googleConfig(env));
   registry.add(new CalendarAdapter(new GoogleCalendarTransport(() => auth.token()), timezone, env.GOOGLE_CALENDAR_ID ?? 'primary', writePolicy === 'true'));
@@ -52,15 +55,16 @@ async function body(req: IncomingMessage): Promise<unknown> {
   for await (const chunk of req) { bytes += chunk.length; if (bytes > 16_384) throw new Error(); chunks.push(Buffer.from(chunk)); }
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
-export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnostics: { development?: boolean; sink?: TraceSink; memorySink?: MemoryDiagnosticSink } = {}, dependencies: { runtime?: { registry: ToolRegistry; timezone: string; memory?: MemoryRuntime; browser?: BrowserAdapter }; classifier?: Pick<ConfirmationIntentClassifier, 'classify'>; now?: () => number } = {}) {
+export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnostics: { development?: boolean; sink?: TraceSink; memorySink?: MemoryDiagnosticSink; browserSink?: BrowserDiagnosticSink } = {}, dependencies: { runtime?: { registry: ToolRegistry; timezone: string; memory?: MemoryRuntime; browser?: BrowserAdapter }; classifier?: Pick<ConfirmationIntentClassifier, 'classify'>; now?: () => number } = {}) {
   const confirmationTrace = diagnostics.development === true && env.JARVIS_CONFIRMATION_TRACE === 'true';
   const trace = confirmationTracer(confirmationTrace, diagnostics.sink);
   const memoryDiagnostics = new MemoryDiagnostics(diagnostics.development === true, diagnostics.memorySink, env.JARVIS_MEMORY_PROFILE === 'true');
-  const { registry, timezone, memory, browser } = dependencies.runtime ?? createToolRuntime(env, memoryDiagnostics);
+  const browserDiagnostics = dependencies.runtime?.browser?.diagnostics ?? new BrowserDiagnostics(env.BROWSER_TRACE === 'true', diagnostics.browserSink);
+  const { registry, timezone, memory, browser } = dependencies.runtime ?? createToolRuntime(env, memoryDiagnostics, browserDiagnostics);
   const classifier = dependencies.classifier ?? new ConfirmationIntentClassifier(env.OPENAI_API_KEY);
   const sessions = new Map<string, { executor: ToolExecutor; expiresAt: number; busy: boolean; seenTurns: Set<string>; workingIds: string[]; memoryGeneration: number; lastMemorySequence: number; spellingEvidence: string; jobs: Set<Promise<void>>; closed: boolean }>();
   const lifetime = 30 * 60_000;
-  const cleanup = () => { for (const [id, session] of sessions) if (session.expiresAt <= Date.now()) { session.closed = true; session.executor.close(); sessions.delete(id); } };
+  const cleanup = () => { for (const [id, session] of sessions) if (session.expiresAt <= Date.now()) { browserDiagnostics.lifecycle(session.executor, 'session_expired'); session.closed = true; session.executor.close(); sessions.delete(id); } };
   const timer = setInterval(cleanup, 60_000); timer.unref();
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     const path = req.url?.split('?')[0];
@@ -73,21 +77,21 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
     if (path === '/api/tools/session' && req.method === 'POST') {
       if (req.headers['content-type']?.split(';')[0] !== 'application/json') { send(415, { error: 'JSON requerido.' }); return true; }
       const previousId = /(?:^|;\s*)jarvis_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
-      if (previousId) { const previous = sessions.get(previousId); if (previous) { previous.closed = true; previous.executor.close(); } sessions.delete(previousId); }
+      if (previousId) { const previous = sessions.get(previousId); if (previous) { browserDiagnostics.lifecycle(previous.executor, 'session_replaced'); previous.closed = true; previous.executor.close(); } sessions.delete(previousId); }
       if (sessions.size >= 10) { send(429, { error: 'Demasiadas sesiones.' }); return true; }
       const id = randomBytes(32).toString('hex');
       sessions.set(id, { executor: new ToolExecutor(registry, dependencies.now ?? Date.now, 60_000, undefined, trace), expiresAt: Date.now() + lifetime, busy: false, seenTurns: new Set(), workingIds: [], memoryGeneration: 0, lastMemorySequence: 0, spellingEvidence: '', jobs: new Set(), closed: false });
       res.setHeader('Set-Cookie', `jarvis_session=${id}; HttpOnly; SameSite=Strict; Path=/api/tools; Max-Age=1800${origin?.startsWith('https:') ? '; Secure' : ''}`);
-      send(200, { tools: registry.descriptors().filter(tool => tool.id !== 'memory.ingest'), timezone, now: new Date().toISOString(), confirmationTrace }); return true;
+      send(200, { tools: registry.descriptors().filter(tool => tool.id !== 'memory.ingest'), timezone, now: new Date().toISOString(), confirmationTrace, browserTrace: browserDiagnostics.enabled }); return true;
     }
     const id = /(?:^|;\s*)jarvis_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
     const session = id ? sessions.get(id) : undefined;
     if (!session) { send(401, { error: 'Sesión de herramientas caducada. Reconecta.' }); return true; }
-    if (path === '/api/tools/session' && req.method === 'DELETE') { session.closed = true; session.executor.close(); sessions.delete(id!); send(200, { closed: true }); return true; }
+    if (path === '/api/tools/session' && req.method === 'DELETE') { browserDiagnostics.lifecycle(session.executor, 'session_closed'); session.closed = true; session.executor.close(); sessions.delete(id!); send(200, { closed: true }); return true; }
     if (path === '/api/tools/activity' && req.method === 'GET') { send(200, { activity: session.executor.telemetry.snapshot(), pending: session.executor.pendingState() }); return true; }
     if (req.method !== 'POST') { send(405, { error: 'Método no permitido.' }); return true; }
     const contextualRead = path === '/api/tools/memory-context' || path === '/api/tools/memory-turn';
-    if (session.busy && !contextualRead) { send(429, { error: 'Una herramienta sigue ejecutándose.' }); return true; }
+    if (session.busy && !contextualRead) { browserDiagnostics.lifecycle(session.executor, 'http_busy'); send(429, { error: 'Una herramienta sigue ejecutándose.' }); return true; }
     if (!contextualRead) session.busy = true;
     try {
       const input = await body(req);
@@ -151,7 +155,19 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
         }
         if (p.toolId === 'memory.forget' || p.toolId === 'memory.update') ++session.memoryGeneration;
         trace({ event: 'server POST /invoke', reason: 'request' });
-        const started = performance.now(); const result = await session.executor.invoke(p.invocationId, p.toolId, p.input);
+        const started = performance.now();
+        const header = req.headers['x-atlas-browser-request'];
+        const clientRequest = typeof header === 'string' && /^[1-9]\d{0,5}$/.test(header) ? Number(header) : undefined;
+        const browserCall = isBrowserTool(p.toolId) && browserDiagnostics.enabled ? browserDiagnostics.received(session.executor, p.invocationId, p.toolId, clientRequest) : undefined;
+        if (browserCall) res.setHeader('X-Atlas-Browser-Call', browserCall.call);
+        const run = async () => {
+          if (browserCall) browserDiagnostics.event('http_received', 'RUNNING');
+          const result = await session.executor.invoke(p.invocationId, p.toolId, p.input);
+          if (browserCall) browserDiagnostics.event('executor_result', result.status === 'error' ? browserCode(result.category) : 'OK', performance.now() - started);
+          return result;
+        };
+        const result = browserCall ? await browserDiagnostics.inCall(session.executor, browserCall, run) : await run();
+        if (browserCall) await browserDiagnostics.inCall(session.executor, browserCall, async () => { browserDiagnostics.event('http_result', result.status === 'error' ? browserCode(result.category) : 'OK', performance.now() - started); });
         if (p.toolId.startsWith('memory.') && result.status === 'error') {
           const capability = registry.resolve(p.toolId)?.capability;
           const operation: MemoryOperation = ['search', 'get', 'remember', 'update', 'forget'].includes(capability ?? '') ? capability as MemoryOperation : 'context';
@@ -189,5 +205,5 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
     finally { if (!contextualRead) session.busy = false; }
     return true;
   };
-  return { handle, close: () => { void browser?.close().catch(() => undefined); clearInterval(timer); for (const session of sessions.values()) { session.closed = true; session.executor.close(); } sessions.clear(); } };
+  return { handle, close: () => { void browser?.close().catch(() => undefined); clearInterval(timer); for (const session of sessions.values()) { browserDiagnostics.lifecycle(session.executor, 'session_closed'); session.closed = true; session.executor.close(); } sessions.clear(); } };
 }
