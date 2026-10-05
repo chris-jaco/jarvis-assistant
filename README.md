@@ -986,3 +986,20 @@ Escape, responsive y reduced motion; no sustituyen esta aceptación en vivo ni
 validan voz/acento en Windows/Safari. Si el stream remoto aún no llegó o está
 pausado/silenciado, el estado puede indicar Hablando sin amplitud; no se inventa
 una onda para ocultarlo.
+
+### Refinamiento visual de Atlas V0.4.4
+
+El header conserva la tipografía de «Atlas.» y añade el símbolo suministrado.
+`public/brand/atlas_blanco.png` es una copia intacta de la variante blanca del
+ZIP (`Imagen de ChatGPT 5 oct 2026, 15_55_20.png`), adecuada para el fondo oscuro.
+`atlas-icon.svg` incorpora exactamente esos bytes y recorta sólo los márgenes
+transparentes mediante viewport; no traza ni redibuja la silueta. Sirve también
+como favicon autónomo, sin texto ni fondo, manteniendo proporciones.
+
+El header lo colorea no destructivamente con una máscara CSS y
+`--atlas-accent: #7abfa7`, compartido por icono, punto de marca e indicador activo.
+Conectando/desconectado/error mantienen el indicador neutro. El favicon usa el
+mismo color; una prueba comprueba su coincidencia con la variable CSS.
+La tarjeta de confirmación sólo cambia superficie, borde, radio, sombra y
+padding. Voz, IDs, payload congelado, botones, foco y protección de carreras se
+mantienen en los módulos validados sin cambios.
