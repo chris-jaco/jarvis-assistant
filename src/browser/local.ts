@@ -1,10 +1,10 @@
+import { observationScript } from './observation.js';
 import { BrowserDiagnostics } from './diagnostics.js';
 import { randomUUID } from 'node:crypto';
-import { mkdir, lstat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { chromium } from 'playwright';
 import type { BrowserContext, ElementHandle, Page } from 'playwright';
-import { TokenFileSecurity } from '../tools/adapters/token-security.js';
+import { prepareBrowserProfile } from './profile.js';
 import { ToolError } from '../tools/types.js';
 import { classifyElement, displayUrl, navigationUrl, privateText } from './policy.js';
 import type { BrowserElement, BrowserKey, BrowserObservation, BrowserProvider, BrowserStatus, BrowserTab } from './provider.js';
@@ -19,7 +19,7 @@ interface Ref { handle: ElementHandle<HTMLElement>; page: Page; revision: number
 export class LocalBrowserProvider implements BrowserProvider {
   private context?: BrowserContext; private connecting?: Promise<BrowserContext>;
   private tabs = new Map<string, Page>(); private active?: string; private last = new Map<string, string>();
-  private refs = new Map<string, Ref>(); private unavailable = false; private closed = false; private security = new TokenFileSecurity();
+  private refs = new Map<string, Ref>(); private unavailable = false; private closed = false;
   constructor(private readonly options: LocalBrowserOptions, private readonly launch?: () => Promise<BrowserContext>, private readonly diagnostics = new BrowserDiagnostics()) {}
   async status(): Promise<BrowserStatus> { this.diagnostics.event('provider_state', 'OK', 0, { channel: this.options.channel, connected: !!this.context, initializing: !!this.connecting }); return { available: this.options.enabled && !this.unavailable, connected: !!this.context, visible: true, ...(!this.options.enabled ? { reason: 'disabled' as const } : this.unavailable ? { reason: 'unavailable' as const } : {}) }; }
   private check(signal: AbortSignal) { if (signal.aborted) throw new ToolError('TIMEOUT'); }
@@ -33,12 +33,8 @@ export class LocalBrowserProvider implements BrowserProvider {
         let context: BrowserContext;
         if (this.launch) context = await this.diagnostics.run('browser_launch', () => this.launch!(), signal);
         else {
-          const root = resolve(this.options.root ?? process.cwd());
-          for (const path of [resolve(root, '.local'), resolve(root, '.local/browser-profile')]) {
-            let created = false; try { await mkdir(path, { mode: 0o700 }); created = true; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-            await this.diagnostics.run('profile_security', async () => this.security.validate(path, await lstat(path), true, created), signal);
-          }
-          context = await this.diagnostics.run('browser_launch', () => chromium.launchPersistentContext(resolve(root, '.local/browser-profile'), { headless: false, chromiumSandbox: true, channel: this.options.channel === 'chromium' ? undefined : this.options.channel, timeout: 12_000, acceptDownloads: false, serviceWorkers: 'block' }), signal);
+          const profile = await prepareBrowserProfile(resolve(this.options.root ?? process.cwd()), signal, this.diagnostics);
+          context = await this.diagnostics.run('browser_launch', () => chromium.launchPersistentContext(profile, { headless: false, chromiumSandbox: true, channel: this.options.channel === 'chromium' ? undefined : this.options.channel, timeout: 12_000, acceptDownloads: false, serviceWorkers: 'block' }), signal);
         }
         await this.diagnostics.run('context_ready', async () => {
         context.setDefaultTimeout(4000); context.setDefaultNavigationTimeout(8000);
@@ -90,30 +86,32 @@ export class LocalBrowserProvider implements BrowserProvider {
   async observe(signal: AbortSignal): Promise<BrowserObservation> { return this.diagnostics.run('observe', () => this.observePage(signal), signal); }
   private async observePage(signal: AbortSignal): Promise<BrowserObservation> {
     const page = await this.page(signal); await this.clearRefs();
-    // Fixed trusted extractor; caller cannot provide JS or selectors. Values are never read.
-    const handles = await page.locator('a[href],button,input,textarea,select,[role="button"],[role="searchbox"],[role="textbox"],video,audio').elementHandles();
-    const revision = await this.revision(page); const elements: BrowserElement[] = []; let size = 0;
-    for (const handle of handles.slice(0, 300)) {
-      this.check(signal);
-      const raw = await handle.evaluate(node => {
-        const el = node as HTMLElement; const input = el as HTMLInputElement;
-        if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || el.closest('[hidden],[aria-hidden="true"], [inert]') || ['password', 'hidden'].includes(input.type) || input.autocomplete?.match(/password|one-time-code|cc-/)) return null;
-        const tag = el.tagName.toLowerCase(); const declaredRole = el.getAttribute('role') ?? ''; const role = (['link', 'button', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'slider', 'switch'].includes(declaredRole) ? declaredRole : undefined) ?? ({ a: 'link', input: input.type === 'search' ? 'searchbox' : 'textbox', textarea: 'textbox', button: 'button', select: 'combobox', video: 'media', audio: 'media' } as Record<string, string>)[tag] ?? 'button';
-        const labelled = (el.getAttribute('aria-labelledby') ?? '').split(/\s+/).map(id => document.getElementById(id)?.textContent ?? '').join(' ');
-        const name = el.getAttribute('aria-label') || labelled.trim() || Array.from(input.labels ?? []).map(label => label.textContent).join(' ') || el.getAttribute('placeholder') || (['input', 'textarea', 'select'].includes(tag) || ['textbox', 'searchbox'].includes(role) || el.isContentEditable ? '' : el.textContent) || el.getAttribute('title') || tag;
-        return { tag, role, name: name.slice(0, 500), type: input.type ?? '', disabled: !!input.disabled || el.getAttribute('aria-disabled') === 'true', href: tag === 'a' ? (el as HTMLAnchorElement).href : undefined,
-          state: { ...(['video', 'audio'].includes(tag) ? { paused: (el as HTMLMediaElement).paused } : {}), ...(['checkbox', 'radio'].includes(input.type) ? { checked: input.checked } : {}), ...(el.hasAttribute('aria-expanded') ? { expanded: el.getAttribute('aria-expanded') === 'true' } : {}) },
-          search: input.type === 'search' || role === 'searchbox' || !!el.closest('[role="search"]') || /^(search|buscar|búsqueda|rechercher|suche)(\b|$)/i.test(name.trim()) };
+    const snapshot = await page.evaluateHandle(observationScript);
+    try {
+      const metadata = await snapshot.evaluate(value => {
+        const data = value as unknown as { nodes: { raw: { tag: string; role: string; name: string; type: string; disabled: boolean; href?: string; search: boolean; cookieDialog: boolean; state: BrowserElement['state'] } }[]; revision: number; truncated: boolean; dialog?: { role: string; name: string } };
+        return { ...data, nodes: data.nodes.map(entry => entry.raw) };
       });
-      if (!raw) { await handle.dispose(); continue; }
-      const name = privateText(raw.name); if (name === '[redacted]') { await handle.dispose(); continue; }
-      const info: BrowserElement = { ref: randomUUID(), role: raw.role.slice(0, 30), name, type: raw.type.slice(0, 20), disabled: raw.disabled, state: raw.state, action: classifyElement(raw) };
-      size += JSON.stringify(info).length; if (elements.length >= 40 || size > 10_000) { await handle.dispose(); break; }
-      elements.push(info); this.refs.set(info.ref, { handle: handle as ElementHandle<HTMLElement>, page, revision, info, href: raw.href });
-    }
-    for (const handle of handles) if (![...this.refs.values()].some(ref => ref.handle === handle)) await handle.dispose().catch(() => {});
-    if (revision !== await this.revision(page)) { await this.clearRefs(); throw new ToolError('CONFLICT'); }
-    return { tabId: this.active!, url: displayUrl(page.url()), title: privateText(await page.title()), elements, truncated: handles.length > elements.length };
+      const revision = metadata.revision; const elements: BrowserElement[] = []; let size = 0;
+      const nodes = await snapshot.getProperty('nodes');
+      try {
+        const entries = await nodes.getProperties();
+        try {
+          for (const [index, entry] of entries) {
+            this.check(signal); const raw = metadata.nodes[Number(index)]; if (!raw) continue;
+            const name = privateText(raw.name); if (name === '[redacted]') continue;
+            const info: BrowserElement = { ref: randomUUID(), role: raw.role.slice(0, 30), name, type: raw.type.slice(0, 20), disabled: raw.disabled, state: raw.state, action: classifyElement(raw) };
+            size += JSON.stringify(info).length; if (elements.length >= 40 || size > 10_000) break;
+            const handle = (await entry.getProperty('node')).asElement();
+            if (!handle) throw new ToolError('CONFLICT');
+            elements.push(info); this.refs.set(info.ref, { handle: handle as ElementHandle<HTMLElement>, page, revision, info, href: raw.href });
+          }
+        } finally { await Promise.all([...entries.values()].map(entry => entry.dispose())); }
+      } finally { await nodes.dispose(); }
+      if (revision !== await this.revision(page)) { await this.clearRefs(); throw new ToolError('CONFLICT'); }
+      return { tabId: this.active!, url: displayUrl(page.url()), title: privateText(await page.title()), elements, truncated: metadata.truncated || elements.length < metadata.nodes.length, ...(metadata.dialog ? { dialog: { role: privateText(metadata.dialog.role, 30), name: privateText(metadata.dialog.name) } } : {}) };
+    } catch (error) { await this.clearRefs(); throw error; }
+    finally { await snapshot.dispose(); }
   }
   private async revision(page: Page) { const revision = await page.evaluate(() => (window as unknown as { __atlasRevision?: number }).__atlasRevision); if (typeof revision !== 'number' || revision < 0) throw new ToolError('CONFLICT'); return revision; }
   private async ref(id: string, signal: AbortSignal) {

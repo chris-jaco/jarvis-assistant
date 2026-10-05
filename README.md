@@ -1085,7 +1085,17 @@ control. Usá este navegador para navegación/búsqueda en sitios de confianza;
 no lo uses para flujos de cuentas, operaciones financieras o mensajes. Los
 controles no reconocidos fallan cerrados; no intentes habilitarlos con prompts.
 El usuario conserva el control manual del navegador, fuera de las tools de Atlas.
-Cookie banners/consentimientos no reconocidos deben resolverse manualmente.
+`observe` reconoce dialogs/modals visibles y devuelve sólo sus controles, excluyendo
+el contenido detrás y controles tapados. La extracción es una instantánea acotada;
+no evalúa ni dispone cientos de elementos individualmente. Las refs conservan
+la revisión del documento: si cambia, hay que observar de nuevo.
+En un diálogo de cookies sólo botones explícitos para rechazar opcionales o
+aceptar cookies necesarias pueden recibir la clase `consent`. Aceptar todas,
+cambiar privacidad/cuentas y controles desconocidos siguen bloqueados. No se
+agregan excepciones por sitio ni se permite POST: si el consentimiento necesita
+ese método, está en un iframe o no se identifica, resolvelo manualmente. Tras el
+click, observá de nuevo para verificar que el modal desapareció; un click exitoso
+no garantiza que el consentimiento haya quedado guardado.
 
 No leemos cookies, headers, localStorage/sessionStorage ni valores de inputs.
 Se excluyen passwords, OTP y campos de tarjeta; se redaccionan nombres que
@@ -1157,3 +1167,20 @@ status, reconexión y cancelación. No atribuyen un fallo real de Windows a una
 causa hasta tener sus trazas. Para diagnóstico, capturá las líneas del servidor
 y de la consola desde antes del comando de voz hasta el resultado (o timeout),
 manteniendo la UI en una sola pestaña para identificar sesiones inesperadas.
+
+### Inicialización Windows y watcher de desarrollo
+
+Vite excluye toda `.local` de su watcher, además del bloqueo HTTP de archivos
+privados. Esto evita observar archivos de sesiones de Chrome y sus errores
+`EBUSY`. No implica copiar perfiles ni cambiar permisos.
+La preparación del perfil usa `TokenFileSecurity.validateMany`, con el worker
+PowerShell reutilizable ya utilizado por Memory: auditorías frescas del padre
+antes del hijo, sin cachear permisos ni arrancar un shell nuevo por directorio.
+Mantiene validación de owner/DACL/reparse points y permisos POSIX privados;
+la cancelación impide continuar al launch tras una auditoría abortada.
+Los presupuestos siguen siendo 18 s por tool, 12 s de launch y 8 s de navegación.
+La traza Windows previa consumía 7,6 s en dos shells ACL y 5,2 s en launch,
+dejando apenas 4,2 s para navegación. El cambio elimina arranques redundantes
+y el watcher del perfil, pero las mejoras exactas deben medirse nuevamente en
+Windows con `BROWSER_TRACE=true` (desactivado por defecto). No se atribuye toda
+la duración de launch al watcher sin una medición posterior.

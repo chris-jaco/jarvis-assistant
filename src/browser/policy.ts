@@ -17,8 +17,12 @@ export function navigationUrl(raw: string): string {
 export function displayUrl(raw: string): string {
   try { const url = new URL(raw); if (!['http:', 'https:'].includes(url.protocol)) return 'about:blank'; return url.origin + (secret.test(url.pathname) ? '/[redacted]' : url.pathname.slice(0, 200)); } catch { return 'about:blank'; }
 }
-export function classifyElement(element: { tag: string; role: string; name: string; type: string; href?: string; search: boolean; disabled: boolean }): BrowserActionClass {
+export function classifyElement(element: { tag: string; role: string; name: string; type: string; href?: string; search: boolean; disabled: boolean; cookieDialog?: boolean }): BrowserActionClass {
   if (element.disabled || consequential.test(element.name) || ['password', 'file', 'email', 'tel', 'hidden'].includes(element.type)) return 'blocked';
+  // Only decline optional tracking / accept necessary cookies in a detected cookie
+  // dialog. Accept-all, marketing, account/privacy settings and unknown controls
+  // remain blocked; no arbitrary page action becomes eligible.
+  if (element.cookieDialog && element.tag === 'button' && element.role === 'button' && /^(reject all|decline all|reject optional cookies|only necessary|accept (only )?necessary cookies|rechazar (todo|todas|todas las cookies)|solo (las )?necesarias|aceptar (solo )?(las )?cookies necesarias)[.!]?$/i.test(element.name.trim())) return 'consent';
   if (element.tag === 'a' && element.href) { try { navigationUrl(element.href); return 'navigation'; } catch { return 'blocked'; } }
   if (element.tag === 'video' || element.tag === 'audio') return 'media';
   if (element.search && ['input', 'button', 'textarea'].includes(element.tag)) return 'search';

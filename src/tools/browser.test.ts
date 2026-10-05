@@ -134,6 +134,28 @@ test('real Chromium fixtures: stable tabs, bounded observation, refs, search, st
     await provider.closeTab(second.id, signal()); assert.equal((await provider.listTabs(signal()))[0]!.id, first.id);
     await context.pages()[0]!.evaluate(() => { for (let i = 0; i < 100; i++) { const link = document.createElement('a'); link.href = '/result'; link.textContent = 'Result ' + i; document.body.append(link); } });
     const bounded = await provider.observe(signal()); assert.equal(bounded.elements.length, 40); assert.equal(bounded.truncated, true);
+    // Generic cookie dialog, independent of any site: exclude background refs,
+    // allow only privacy-preserving consent and keep consequential buttons blocked.
+    await context.pages()[0]!.evaluate(() => {
+      document.body.innerHTML = '<input type="search" aria-label="Search behind modal"><div role="dialog" aria-modal="true" aria-label="Cookies choices" style="position:fixed;inset:0;background:white;z-index:10"><h2>Cookies</h2><button id="decline">Reject all</button><button>Accept all</button><button>Change privacy settings</button><button>Send message</button></div>';
+      document.getElementById('decline')!.addEventListener('click', () => document.querySelector('[role="dialog"]')!.remove());
+    });
+    const modal = await provider.observe(signal());
+    assert.equal(modal.dialog!.name, 'Cookies choices');
+    assert.ok(!modal.elements.some(element => element.role === 'searchbox'));
+    assert.equal(modal.elements.find(element => element.name === 'Reject all')!.action, 'consent');
+    for (const name of ['Accept all', 'Change privacy settings', 'Send message']) {
+      const element = modal.elements.find(element => element.name === name)!;
+      assert.equal(element.action, 'blocked'); await assert.rejects(provider.click(element.ref, signal()), /REJECTED/);
+    }
+    const consent = modal.elements.find(element => element.action === 'consent')!;
+    await provider.click(consent.ref, signal());
+    await assert.rejects(provider.click(consent.ref, signal()), /CONFLICT/);
+    const afterConsent = await provider.observe(signal()); assert.equal(afterConsent.dialog, undefined);
+    await provider.type(afterConsent.elements.find(element => element.role === 'searchbox')!.ref, 'music', 'replace', signal());
+    // Cookie wording alone outside a dialog never grants consent capability.
+    await context.pages()[0]!.evaluate(() => { document.body.innerHTML = '<button>Reject all</button>'; });
+    assert.equal((await provider.observe(signal())).elements[0]!.action, 'blocked');
     // Even deceptively labelled search controls cannot send a POST.
     await context.pages()[0]!.evaluate(() => { document.body.innerHTML = '<button aria-label="Search" onclick="fetch(\'/send\', {method: \'POST\'})">Search</button>'; });
     const deceptive = await provider.observe(signal()); await provider.click(deceptive.elements[0]!.ref, signal());

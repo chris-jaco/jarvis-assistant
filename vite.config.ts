@@ -1,2 +1,2 @@
 import { defineConfig } from 'vite';
-export default defineConfig({ build: { outDir: 'dist/client' } });
+export default defineConfig({ server: { watch: { ignored: ['**/.local', '**/.local/**'] } }, build: { outDir: 'dist/client' } });
