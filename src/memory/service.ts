@@ -2,7 +2,9 @@ import { ToolError } from '../tools/types.js';
 import { containsSecret } from './privacy.js';
 import { candidateSchema, sourceSchema } from './types.js';
 import type { MemoryCandidate, MemoryRecord, MemorySource, MemoryStore, MemoryRelevance } from './types.js';
-export const normalize = (text: string) => text.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '').replace(/[^\p{L}\p{N}@]+/gu, ' ').trim();
+import { normalize, entityKey, entities, mentions, nearNames } from './entities.js';
+import { validateSpelling } from './spelling.js';
+export { normalize } from './entities.js';
 const concepts = [ ['pending', 'pendiente', 'pendientes', 'remaining', 'todo', 'next', 'estado', 'status'], ['delivery', 'entrega', 'deadline', 'plazo'], ['client', 'cliente', 'clientes', 'customer'], ['project', 'proyecto', 'projects', 'proyectos'], ['preference', 'preferencia', 'preferences', 'preferencias'], ['skill', 'habilidad', 'expertise', 'capacidad'], ['partner', 'pareja'], ['email', 'correo'], ['short', 'breve', 'corto'] ];
 const terms = (text: string) => normalize(text).split(/\s+/).filter(word => word.length > 2).map(word => { const group = concepts.findIndex(values => values.includes(word)); return group < 0 ? word : 'concept-' + group; });
 const authority = { explicit_user: 4, tool_result: 3, system: 2, conversation_inference: 1 };
@@ -12,7 +14,7 @@ export class LexicalMemoryRelevance implements MemoryRelevance {
   score(query: string, record: MemoryRecord): number {
     const aliases = [record.subject.name, ...record.subject.aliases, ...record.relationships.flatMap(r => [r.target.name, ...r.target.aliases])];
     const normalized = normalize(query);
-    const entity = aliases.some(alias => (' ' + normalized + ' ').includes(' ' + normalize(alias) + ' '));
+    const entity = aliases.some(alias => mentions(query, alias));
     const haystack = new Set(terms([record.content, record.key, record.type, JSON.stringify(record.value), ...aliases].join(' ')));
     const matches = terms(query).filter(term => haystack.has(term)).length;
     const preference = /\b(preferences?|preferencias?|profile|perfil|remember|recuerdas)\b/.test(normalized) && ['USER_PROFILE', 'PREFERENCE'].includes(record.type);
@@ -28,6 +30,7 @@ export class MemoryService {
     if (expected) ++this.generation;
     if (containsSecret(raw) || containsSecret(rawSource)) throw new ToolError('INVALID_INPUT');
     const candidate = candidateSchema.parse(raw); const source = sourceSchema.parse(rawSource);
+    validateSpelling(candidate, source.evidence);
     if (candidate.type === 'TEMPORARY' && !candidate.expiresAt) throw new ToolError('INVALID_INPUT');
     if (candidate.expiresAt && Date.parse(candidate.expiresAt) <= this.now()) throw new ToolError('INVALID_INPUT');
     const hashes = new Map<string, string>();
@@ -41,8 +44,19 @@ export class MemoryService {
       candidate.value = Object.fromEntries(Object.entries(candidate.value).sort(([a], [b]) => a.localeCompare(b)));
       const stamp = new Date(this.now()).toISOString();
       const entity = (e: MemoryCandidate['subject']) => {
-        const known = records.flatMap(r => [r.subject, ...r.relationships.map(link => link.target)]).find(subject => subject.id === e.id && [subject.name, ...subject.aliases].some(name => normalize(name) === normalize(e.name)));
-        return known ?? { ...e, id: (/^entity-[a-f0-9]{24}$/.test(e.id) ? e.id : hashes.get(normalize(e.id || e.name))!) };
+        if (expected && records.some(r => r.id === expected.id && r.subject.id === e.id)) return e;
+        const pool = entities(records.filter(r => r.status === 'current'));
+        const matches = pool.filter(subject => [subject.name, ...subject.aliases].some(name => entityKey(name) === entityKey(e.name)));
+        const identified = matches.find(subject => subject.id === e.id || subject.id === hashes.get(normalize(e.id || e.name)));
+        if (identified) return identified;
+        if (matches.length > 1) throw new ToolError('AMBIGUOUS');
+        const known = matches[0];
+        // A qualified same-name PERSON identity can be distinct; boundary variants
+        // cannot silently produce another entity. Preserve existing canonical data.
+        const qualifiedPerson = candidate.type === 'PERSON' && entityKey(e.id).startsWith(entityKey(e.name)) && entityKey(e.id).length > entityKey(e.name).length + 2;
+        if (known && (!qualifiedPerson || known.id === e.id || normalize(known.name) !== normalize(e.name))) return known;
+        if (!known && nearNames(e.name, pool).length) throw new ToolError('AMBIGUOUS');
+        return { ...e, id: (/^entity-[a-f0-9]{24}$/.test(e.id) ? e.id : hashes.get(normalize(e.id || e.name))!) };
       };
       candidate.subject = entity(candidate.subject);
       candidate.relationships = candidate.relationships.map(r => ({ ...r, target: entity(r.target) })).sort((a, b) => (a.predicate + a.target.id).localeCompare(b.predicate + b.target.id));
@@ -72,11 +86,17 @@ export class MemoryService {
     if (!record) throw new ToolError('INVALID_INPUT'); return record;
   }
   async resolve(query: string): Promise<string | null> {
-    const normalized = normalize(query); const entities = new Map<string, string>();
+    const entities = new Map<string, string>();
     for (const r of await this.store.read()) if (this.current(r)) {
-      for (const e of [r.subject, ...r.relationships.map(link => link.target)]) if ([e.name, ...e.aliases].some(name => normalize(name) === normalized)) entities.set(e.id, e.name);
+      for (const e of [r.subject, ...r.relationships.map(link => link.target)]) if ([e.name, ...e.aliases].some(name => entityKey(name) === entityKey(query))) entities.set(e.id, e.name);
     }
     if (entities.size > 1) throw new ToolError('AMBIGUOUS'); return [...entities.keys()][0] ?? null;
+  }
+  async suggestions(query: string): Promise<string[]> {
+    if (containsSecret(query)) return [];
+    const pool = entities((await this.store.read()).filter(r => this.current(r)));
+    if (pool.some(e => [e.name, ...e.aliases].some(name => mentions(query, name)))) return [];
+    return nearNames(query, pool);
   }
   async search(query: string, limit = 5, inspection: { uncertain?: boolean; expired?: boolean } = {}): Promise<MemoryRecord[]> {
     if (containsSecret(query)) return [];
@@ -84,8 +104,8 @@ export class MemoryService {
     const eligible = (r: MemoryRecord) => r.status === 'current' && (inspection.expired || this.current(r));
     const all = await this.store.read(); const named = new Map<string, Set<string>>();
     for (const r of all) if (eligible(r)) for (const e of [r.subject, ...r.relationships.map(link => link.target)]) for (const name of [e.name, ...e.aliases]) {
-      if (!(' ' + normalize(query) + ' ').includes(' ' + normalize(name) + ' ')) continue;
-      const ids = named.get(normalize(name)) ?? new Set<string>(); ids.add(e.id); named.set(normalize(name), ids);
+      if (!mentions(query, name)) continue;
+      const ids = named.get(entityKey(name)) ?? new Set<string>(); ids.add(e.id); named.set(entityKey(name), ids);
     }
     if ([...named.values()].some(ids => ids.size > 1)) throw new ToolError('AMBIGUOUS');
     const matchedEntities = new Set([...named.values()].flatMap(ids => [...ids]));

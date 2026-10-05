@@ -75,3 +75,18 @@ test('a newer accepted user turn supersedes queued older extraction without stal
     assert.equal(f.store.records.length, 1); assert.equal(f.store.records[0]!.source.evidence, 'Frekuent is a client expanding to Portugal.');
   } finally { await f.close(); }
 });
+
+test('verified latest voice spelling rejects model rewriting before a frozen memory correction is prepared', async () => {
+  const f = await fixture(); try {
+    const old = await f.service.remember(candidate('Platform is onavox.ai.', { key: 'platform', value: { platform: 'onavox.ai' } }), { kind: 'explicit_user', evidence: 'Platform is onavox.ai.', observedAt: new Date().toISOString() });
+    await f.post('memory-turn', { itemId: 'spelling', utterance: 'La plataforma es O-N-A-B-O-X.ai' }); await f.start;
+    // The model's rewritten evidence cannot defeat the actual transcript guard.
+    const rejected = await f.post('invoke', { invocationId: 'wrong-spelling', toolId: 'memory.update', input: { target: { id: old!.id }, candidate: candidate('Platform is onavox.ai.', { key: 'platform', value: { platform: 'onavox.ai' } }), evidence: 'onavox.ai' } });
+    assert.equal(rejected.status, 400); assert.equal(f.store.records.length, 1);
+    const correct = await f.post('invoke', { invocationId: 'correct-spelling', toolId: 'memory.update', input: { target: { id: old!.id }, candidate: candidate('Platform is Onabox.ai.', { key: 'platform', value: { platform: 'Onabox.ai' } }), evidence: 'O-N-A-B-O-X.ai' } });
+    assert.equal(correct.data.status, 'pending'); assert.ok(String(correct.data.summary).includes('Onabox.ai'));
+    f.release(); await f.finish; assert.equal(f.store.records.length, 1);
+    const executed = await f.post('decision', { confirmationId: correct.data.confirmationId, approved: true }); assert.equal(executed.data.status, 'success');
+    assert.equal(f.store.records.find(r => r.status === 'current')!.value.platform, 'Onabox.ai');
+  } finally { await f.close(); }
+});

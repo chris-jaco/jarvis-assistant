@@ -25,3 +25,13 @@ test('deterministic raw secret filtering runs before LLM; returned secret candid
   assert.deepEqual(await extraction.extract('api key: secret-value', [], now), []); assert.equal(calls, 0);
   assert.deepEqual(await extraction.extract('Frekuent is a client.', [], now), []); assert.equal(calls, 1);
 });
+test('literal and spelled domain corrections cannot be rewritten even when model evidence omits the spelling', async () => {
+  for (const utterance of ['La plataforma es Onabox.ai', 'La plataforma es O-N-A-B-O-X.ai']) {
+    const now = new Date().toISOString();
+    for (const name of ['Onabox.ai', 'onavox.ai']) {
+      const item = { ...memory('La plataforma'), content: `La plataforma es ${name}.`, value: [{ key: 'platform', value: name }] };
+      const result = await new OpenAIMemoryExtraction('fake', undefined, async () => response([item])).extract(utterance, [], now);
+      assert.equal(result.length, name === 'Onabox.ai' ? 1 : 0);
+    }
+  }
+});

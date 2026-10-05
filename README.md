@@ -705,3 +705,48 @@ en vivo, selección exacta/alcance explícito para borrar, capacidad limitada y 
 Para migrar, implementar otro MemoryStore y opcionalmente otro MemoryRelevance/extractor,
 conservar IDs, relaciones, procedencia y supersesión y añadir un protocolo de conflictos
 antes de sincronizar; no exponer el archivo privado directamente al navegador.
+
+### V0.4.1: referencias de voz y correcciones literales
+
+La resolución de entidades compara nombres y alias sin diferencias de caso,
+acentos, espacios, puntuación ni guiones. Variantes de límites entre palabras
+pueden recuperar una entidad canónica única. Si ya hay varias identidades con
+la misma forma normalizada, se pide aclaración. Las personas con identidades
+calificadas distintas siguen siendo distinguibles.
+
+Las diferencias de letras no se resuelven automáticamente: una comparación
+limitada genera hasta cuatro **nombres candidatos**, sin identificadores ni
+permiso para ejecutar acciones. `memory.search` devuelve `clarificationRequired`
+y el agente pregunta si se refiere a ellos. La escritura comprueba nombres y
+alias dentro de la transacción y rechaza la creación de una entidad cercana
+sin resolver. No se aprenden alias a partir de suposiciones ni se migran datos
+privados existentes.
+
+Para corregir nombres/identificadores, `memory.update` incluye `evidence` literal
+del usuario; una corrección con identificadores exige esa evidencia. El backend
+valida dominios visibles y secuencias de letras explícitamente deletreadas,
+conservando sus letras sin heurísticas fonéticas B/V. También compara el payload
+con los identificadores del último turno de voz aceptado, de modo que una
+evidencia reformulada por el modelo no puede sobreescribir ese turno. La
+extracción valida contra la frase original completa. Una incompatibilidad falla
+antes de preparar la confirmación; si hay incertidumbre, se pide aclaración.
+El nombre de una entidad puede corregirse por ID exacto con evidencia literal,
+manteniendo su identidad y el mecanismo de supersesión/confirmación existente.
+El backend recibe y congela el mismo valor que se presenta para confirmar.
+
+El objetivo conversacional activo guía los seguimientos ambiguos: una inspección
+de memoria continúa consultando memoria, mientras una solicitud explícita de
+Internet/información actual conserva `web.search`. Esto se expresa en las
+instrucciones centrales, sin un clasificador de frases españolas ni cambios al
+motor de confirmación. La interpretación conversacional requiere validación
+por voz real; las pruebas automáticas no garantizan decisiones perfectas del
+modelo. Los filtros de deletreo dependen del texto que entregue STT: si éste
+pierde las letras originales, Jarvis debe pedir repetir/deletrear o aportar el
+texto, no reconstruirlas por pronunciación.
+
+Para la aceptación local: buscá una entidad existente usando variantes de
+espacios/guiones, probá una variante de letras y verificá la pregunta de
+aclaración; corregí un nombre de plataforma literalmente y deletreándolo,
+revisá el summary antes de aprobar y verificá el nuevo valor tras reiniciar.
+Probá después un seguimiento de la inspección de memoria y una petición
+explícita de búsqueda web. No es necesario modificar el JSON privado a mano.

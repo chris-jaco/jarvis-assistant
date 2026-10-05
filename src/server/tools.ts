@@ -7,6 +7,8 @@ import { ToolRegistry } from '../tools/registry.js';
 import { createMemoryRuntime } from '../memory/runtime.js';
 import type { MemoryRuntime } from '../memory/runtime.js';
 import { MemoryAdapter } from '../memory/adapter.js';
+import { literalIdentifiers, validateSpelling } from '../memory/spelling.js';
+import { candidateSchema } from '../memory/types.js';
 import { containsSecret } from '../memory/privacy.js';
 import type { MemoryRecord } from '../memory/types.js';
 import { ConfirmationIntentClassifier } from '../tools/confirmation-intent.js';
@@ -46,7 +48,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
   const trace = confirmationTracer(confirmationTrace, diagnostics.sink);
   const { registry, timezone, memory } = dependencies.runtime ?? createToolRuntime(env);
   const classifier = dependencies.classifier ?? new ConfirmationIntentClassifier(env.OPENAI_API_KEY);
-  const sessions = new Map<string, { executor: ToolExecutor; expiresAt: number; busy: boolean; seenTurns: Set<string>; workingIds: string[]; memoryGeneration: number; lastMemorySequence: number; jobs: Set<Promise<void>>; closed: boolean }>();
+  const sessions = new Map<string, { executor: ToolExecutor; expiresAt: number; busy: boolean; seenTurns: Set<string>; workingIds: string[]; memoryGeneration: number; lastMemorySequence: number; spellingEvidence: string; jobs: Set<Promise<void>>; closed: boolean }>();
   const lifetime = 30 * 60_000;
   const cleanup = () => { for (const [id, session] of sessions) if (session.expiresAt <= Date.now()) { session.closed = true; session.executor.close(); sessions.delete(id); } };
   const timer = setInterval(cleanup, 60_000); timer.unref();
@@ -64,7 +66,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
       if (previousId) { const previous = sessions.get(previousId); if (previous) { previous.closed = true; previous.executor.close(); } sessions.delete(previousId); }
       if (sessions.size >= 10) { send(429, { error: 'Demasiadas sesiones.' }); return true; }
       const id = randomBytes(32).toString('hex');
-      sessions.set(id, { executor: new ToolExecutor(registry, dependencies.now ?? Date.now, 60_000, undefined, trace), expiresAt: Date.now() + lifetime, busy: false, seenTurns: new Set(), workingIds: [], memoryGeneration: 0, lastMemorySequence: 0, jobs: new Set(), closed: false });
+      sessions.set(id, { executor: new ToolExecutor(registry, dependencies.now ?? Date.now, 60_000, undefined, trace), expiresAt: Date.now() + lifetime, busy: false, seenTurns: new Set(), workingIds: [], memoryGeneration: 0, lastMemorySequence: 0, spellingEvidence: '', jobs: new Set(), closed: false });
       res.setHeader('Set-Cookie', `jarvis_session=${id}; HttpOnly; SameSite=Strict; Path=/api/tools; Max-Age=1800${origin?.startsWith('https:') ? '; Secure' : ''}`);
       send(200, { tools: registry.descriptors().filter(tool => tool.id !== 'memory.ingest'), timezone, now: new Date().toISOString(), confirmationTrace }); return true;
     }
@@ -92,6 +94,9 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
         if (p.sequence <= session.lastMemorySequence || Date.parse(p.observedAt) > Date.now() + 300_000 || !memory || session.executor.pendingState() || session.seenTurns.has(p.itemId) || session.seenTurns.size >= 100 || containsSecret(p.utterance)) { send(200, { context: '' }); }
         else {
           session.lastMemorySequence = p.sequence;
+          // Keep only literal identifiers from the latest accepted user turn, not
+          // a conversation archive. Model-supplied evidence cannot override them.
+          session.spellingEvidence = literalIdentifiers(p.utterance).join(' ');
           session.seenTurns.add(p.itemId);
           let relevant: MemoryRecord[] = [];
           try {
@@ -133,6 +138,10 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
         const p = invocation.parse(input);
         // Model-facing requests cannot forge provenance used by automatic extraction.
         if (p.toolId === 'memory.ingest') throw new Error();
+        if ((p.toolId === 'memory.update' || p.toolId === 'memory.remember') && session.spellingEvidence) {
+          const candidate = candidateSchema.parse((p.input as { candidate?: unknown })?.candidate);
+          validateSpelling(candidate, session.spellingEvidence);
+        }
         if (p.toolId === 'memory.forget' || p.toolId === 'memory.update') ++session.memoryGeneration;
         trace({ event: 'server POST /invoke', reason: 'request' }); send(200, await session.executor.invoke(p.invocationId, p.toolId, p.input));
       } else if (path === '/api/tools/intent') {
