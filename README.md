@@ -750,3 +750,62 @@ aclaración; corregí un nombre de plataforma literalmente y deletreándolo,
 revisá el summary antes de aprobar y verificá el nuevo valor tras reiniciar.
 Probá después un seguimiento de la inspección de memoria y una petición
 explícita de búsqueda web. No es necesario modificar el JSON privado a mano.
+
+### V0.4.2: operaciones locales y diagnósticos de memoria
+
+En Windows, cada invocación del verificador ACL abre PowerShell. V0.4.1 podía
+abrir 21 procesos para una búsqueda: lectura de candidatos, otra lectura para
+el ranking y una transacción para guardar `lastAccessedAt`, con comprobaciones
+repetidas de directorios/archivo. Las búsquedas concurrentes se convertían así
+en escrituras en cola. Los tests con almacenes falsos o permisos POSIX no
+representaban este coste de arranque.
+
+Ahora `memory.search` obtiene candidatos y ranking de un único snapshot, y
+`memory.get`/las recuperaciones contextuales son lecturas sin bloqueo de
+escritura. Las ACL del snapshot se validan en una sola invocación de PowerShell,
+comprobando directorios, propietario, permisos y reparse points antes de leer
+contenido. No hay caché de autorizaciones ni se omiten comprobaciones. Las
+marcas de acceso se actualizan en memoria y se persisten con la siguiente
+mutación, evitando reescribir el JSON por cada búsqueda; si se reinicia sin
+otra mutación, esa última marca de acceso puede perderse, pero los recuerdos
+persistidos se conservan.
+
+Las mutaciones siguen serializadas por ruta y utilizan un lock exclusivo,
+fichero temporal privado, fsync y reemplazo atómico. Se validan los directorios
+antes de crear el lock, el snapshot/lock, el temporal antes de escribir y los
+permisos de nuevo antes del commit. En Windows cada fase agrupa sus controles
+en un proceso, sin cambiar las reglas ACL ni aumentar los timeouts. Una
+transacción usa una lectura privada no encolada; su callback debe ser síncrono.
+Los lectores pueden observar el snapshot anterior o el nuevo, sin esperar al
+lock del escritor. Un lock extranjero/huérfano sigue fallando de forma segura.
+
+La señal de cancelación del ejecutor llega a las operaciones locales y al
+verificador ACL por lotes. Un trabajo cancelado en cola o antes del commit no
+puede guardar más tarde; el cleanup mantiene el lock hasta terminar. Como en
+cualquier escritura, un timeout después de iniciarse el reemplazo atómico
+puede tener resultado incierto: verificá el estado antes de repetirla.
+
+`memory.search`, `memory.get`, `memory.remember`, preparación/ejecución de
+`memory.update` y preparación de `memory.forget` no llaman a OpenAI. La
+extracción automática sí puede usar Responses, pero espera la red fuera de la
+transacción y del bloqueo de herramientas. La confirmación por voz sigue
+usando el clasificador semántico existente; eso es independiente de la
+preparación local. Una propuesta del modelo mantiene su procedencia de
+inferencia; para reemplazar un dato explícito existente se usa la corrección
+confirmada, sin depender de extracción automática.
+
+Durante `npm run dev`, los fallos producen entradas `[JARVIS memory]` con
+`operation`, `stage`, `code` y `elapsedMs`. Incluyen cola, seguridad, snapshot,
+validación, commit y operaciones públicas. No contienen rutas, nombres,
+argumentos, IDs, contenido de memoria, mensajes originales, stacks ni secretos.
+Los errores de producción permanecen normalizados y estos diagnósticos están
+apagados. No hace falta activar `JARVIS_CONFIRMATION_TRACE` para verlos.
+
+Las regresiones usan snapshots reales y latencia simulada por arranque ACL,
+con límites de tiempo, llamadas directas sin red, lecturas/escrituras
+concurrentes, cancelación y extracción automática bloqueada. Hay pruebas
+nativas de ACL/reparse points que se ejecutan únicamente en Windows. Las
+mediciones simuladas no sustituyen la aceptación en Windows: después de
+actualizar, inspeccioná un recuerdo, guardá una nueva preferencia y corregí
+una existente con confirmación. Si falla, compartí únicamente la línea de
+metadatos `[JARVIS memory]`, nunca el JSON privado ni credenciales.

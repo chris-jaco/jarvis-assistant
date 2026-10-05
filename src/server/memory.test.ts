@@ -9,11 +9,11 @@ import { MemoryService } from '../memory/service.js';
 import { MemoryAdapter } from '../memory/adapter.js';
 import { candidate, FakeMemoryStore } from '../memory/test-fixtures.js';
 import { createMemoryRuntime } from '../memory/runtime.js';
-async function fixture() {
+async function fixture(diagnostics: Parameters<typeof createToolsHandler>[1] = {}) {
   const store = new FakeMemoryStore(); const service = new MemoryService(store); const registry = new ToolRegistry(); registry.add(new MemoryAdapter(service));
   let release!: () => void; let started!: () => void; let finished!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; }); const start = new Promise<void>(resolve => { started = resolve; }); const finish = new Promise<void>(resolve => { finished = resolve; });
-  const runtime = createToolsHandler({}, {}, { runtime: { registry, timezone: 'Europe/Madrid', memory: { service, budget: 1000, limit: 5, automatic: true, extraction: { extract: async utterance => { started(); await gate; finished(); return [{ candidate: candidate(), sourceKind: 'explicit_user', evidence: utterance }]; } } } } });
+  const runtime = createToolsHandler({}, diagnostics, { runtime: { registry, timezone: 'Europe/Madrid', memory: { service, budget: 1000, limit: 5, automatic: true, extraction: { extract: async utterance => { started(); await gate; finished(); return [{ candidate: candidate(), sourceKind: 'explicit_user', evidence: utterance }]; } } } } });
   registry.register({ id: 'sensitive.test', name: 'Sensitive', description: 'Sensitive', integration: 'test', capability: 'test', permission: 'SENSITIVE', schema: z.object({}), execute: async () => ({ executed: true }) });
   const server = createServer(async (req, res) => { await runtime.handle(req, res); }); await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/tools/`;
@@ -89,4 +89,35 @@ test('verified latest voice spelling rejects model rewriting before a frozen mem
     const executed = await f.post('decision', { confirmationId: correct.data.confirmationId, approved: true }); assert.equal(executed.data.status, 'success');
     assert.equal(f.store.records.find(r => r.status === 'current')!.value.platform, 'Onabox.ai');
   } finally { await f.close(); }
+});
+
+test('blocked automatic extraction cannot hold a store lock or delay explicit memory tools', { timeout: 3000 }, async () => {
+  const f = await fixture(); try {
+    const existing = await f.service.remember(candidate(), { kind: 'explicit_user', evidence: 'Frekuent is a client.', observedAt: new Date().toISOString() });
+    await f.post('memory-turn', { itemId: 'blocked-extraction', utterance: 'Frekuent is a client.' }); await f.start;
+    assert.equal((await f.post('invoke', { invocationId: 'read', toolId: 'memory.search', input: { query: 'Frekuent' } })).data.status, 'success');
+    assert.equal((await f.post('invoke', { invocationId: 'get', toolId: 'memory.get', input: { id: existing!.id } })).data.status, 'success');
+    const preference = candidate('Keep responses short.', { type: 'PREFERENCE', subject: { id: 'user', name: 'User', aliases: [] }, key: 'response_length' });
+    assert.equal((await f.post('invoke', { invocationId: 'remember', toolId: 'memory.remember', input: { candidate: preference, evidence: 'Keep responses short.' } })).data.status, 'success');
+    const update = await f.post('invoke', { invocationId: 'update', toolId: 'memory.update', input: { target: { id: existing!.id }, candidate: candidate('Updated client.') } });
+    assert.equal(update.data.status, 'pending'); assert.equal((await f.post('decision', { confirmationId: update.data.confirmationId, approved: true })).data.status, 'success');
+    const current = f.store.records.find(r => r.status === 'current' && r.key === existing!.key)!;
+    const forget = await f.post('invoke', { invocationId: 'forget', toolId: 'memory.forget', input: { id: current.id } }); assert.equal(forget.data.status, 'pending');
+    // Extraction is still gated: none of the foreground operations waited for it.
+    f.release(); await f.finish;
+    assert.equal((await f.post('decision', { confirmationId: forget.data.confirmationId, approved: false })).data.status, 'error');
+  } finally { await f.close(); }
+});
+
+test('HTTP memory failures are diagnosed in development without private details; production remains silent', { timeout: 3000 }, async () => {
+  for (const development of [true, false]) {
+    const rows: unknown[] = []; const f = await fixture({ development, memorySink: row => rows.push(row) });
+    try {
+      f.store.failure = true;
+      const result = await f.post('invoke', { invocationId: 'failed-search', toolId: 'memory.search', input: { query: 'Private person' } });
+      assert.equal(result.data.status, 'error'); assert.ok(!JSON.stringify(result.data).includes('private path'));
+      if (development) { assert.equal(rows.length, 1); const row = rows[0] as { operation: string; stage: string; elapsedMs: number }; assert.equal(row.operation, 'search'); assert.equal(row.stage, 'execute'); assert.ok(row.elapsedMs >= 0); assert.ok(!JSON.stringify(rows).includes('Private person')); }
+      else assert.deepEqual(rows, []);
+    } finally { await f.close(); }
+  }
 });

@@ -41,7 +41,9 @@ test('retrieval combines entity, importance, confidence, recency and bounded rel
   await f.service.remember(candidate('Other organization', { subject: { id: 'other', name: 'Other', aliases: [] } }), source('Other organization'));
   for (let i = 0; i < 9; i++) { f.tick(); await f.service.remember(candidate(`Portugal project ${i}`, { key: 'project-' + i, importance: i / 10 }), source('Portugal ' + i, 'explicit_user', f.now())); }
   const found = await f.service.search('What are we doing with Frekuent?', 5); assert.equal(found.length, 5); assert.ok(found.every(r => r.subject.name === 'Frekuent'));
-  assert.ok(found[0]!.lastAccessedAt === null); // returned snapshot; persisted access metadata follows
+  assert.ok(found[0]!.lastAccessedAt); // Reads update metadata in memory, not the write queue.
+  assert.ok(f.store.records.every(r => r.lastAccessedAt === null));
+  await f.service.remember(candidate('Later fact', { key: 'later' }), source('Later fact'));
   assert.ok(f.store.records.some(r => r.lastAccessedAt)); const context = f.service.context(found, 750); assert.ok(context.length <= 750); assert.ok(!context.includes('Other organization'));
 });
 test('two same-name people do not resolve or mutate ambiguously', async () => {

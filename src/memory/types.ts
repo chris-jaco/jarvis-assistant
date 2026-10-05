@@ -18,6 +18,6 @@ export const recordSchema = candidateFields.extend({ id: z.string().uuid(), sour
   status: z.enum(['current', 'superseded']), supersedes: z.string().uuid().optional(), supersededBy: z.string().uuid().optional(), corroborations: z.number().int().min(1),
 }).strict();
 export type MemoryRecord = z.infer<typeof recordSchema>;
-export interface MemoryStore { read(): Promise<MemoryRecord[]>; transaction<T>(change: (records: MemoryRecord[]) => T): Promise<T> }
+export interface MemoryStore { read(signal?: AbortSignal): Promise<MemoryRecord[]>; transaction<T>(change: (records: MemoryRecord[]) => T, signal?: AbortSignal): Promise<T> }
 export interface MemoryExtraction { extract(utterance: string, context: MemoryRecord[], now: string): Promise<Array<{ candidate: MemoryCandidate; sourceKind: 'explicit_user' | 'conversation_inference'; evidence: string }>> }
 export interface MemoryRelevance { score(query: string, record: MemoryRecord): number }

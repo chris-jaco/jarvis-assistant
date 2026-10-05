@@ -1,4 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { MemoryDiagnostics } from '../diagnostics/memory.js';
+import { ToolError } from '../tools/types.js';
+import type { MemoryOperation } from '../diagnostics/memory.js';
+import type { MemoryDiagnosticSink } from '../diagnostics/memory.js';
 import { confirmationTracer } from '../diagnostics/confirmation.js';
 import type { TraceSink } from '../diagnostics/confirmation.js';
 import { randomBytes } from 'node:crypto';
@@ -20,7 +24,7 @@ import { GmailAccountStore } from '../tools/adapters/gmail-accounts.js';
 import { GmailAdapter } from '../tools/adapters/gmail.js';
 import { GoogleGmailTransport } from '../tools/adapters/gmail-transport.js';
 import { validateTimezone } from '../tools/adapters/time.js';
-export function createToolRuntime(env: NodeJS.ProcessEnv = process.env) {
+export function createToolRuntime(env: NodeJS.ProcessEnv = process.env, diagnostics = new MemoryDiagnostics()) {
   const timezone = validateTimezone(env.USER_TIMEZONE ?? 'Europe/Madrid');
   const writePolicy = env.TOOL_CONFIRM_WRITES ?? 'true';
   if (!['true', 'false'].includes(writePolicy)) throw new Error('TOOL_CONFIRM_WRITES must be true or false');
@@ -30,7 +34,7 @@ export function createToolRuntime(env: NodeJS.ProcessEnv = process.env) {
   registry.add(new CalendarAdapter(new GoogleCalendarTransport(() => auth.token()), timezone, env.GOOGLE_CALENDAR_ID ?? 'primary', writePolicy === 'true'));
   const gmail = new GmailAccountStore(env);
   registry.add(new GmailAdapter(gmail, new GoogleGmailTransport(gmail), timezone, writePolicy === 'true'));
-  const memory = createMemoryRuntime(env); registry.add(new MemoryAdapter(memory.service, memory.budget));
+  const memory = createMemoryRuntime(env, diagnostics); registry.add(new MemoryAdapter(memory.service, memory.budget, diagnostics));
   return { registry, timezone, memory };
 }
 const invocation = z.object({ invocationId: z.string().min(1).max(128), toolId: z.string().max(80), input: z.unknown() }).strict();
@@ -43,10 +47,11 @@ async function body(req: IncomingMessage): Promise<unknown> {
   for await (const chunk of req) { bytes += chunk.length; if (bytes > 16_384) throw new Error(); chunks.push(Buffer.from(chunk)); }
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
-export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnostics: { development?: boolean; sink?: TraceSink } = {}, dependencies: { runtime?: { registry: ToolRegistry; timezone: string; memory?: MemoryRuntime }; classifier?: Pick<ConfirmationIntentClassifier, 'classify'>; now?: () => number } = {}) {
+export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnostics: { development?: boolean; sink?: TraceSink; memorySink?: MemoryDiagnosticSink } = {}, dependencies: { runtime?: { registry: ToolRegistry; timezone: string; memory?: MemoryRuntime }; classifier?: Pick<ConfirmationIntentClassifier, 'classify'>; now?: () => number } = {}) {
   const confirmationTrace = diagnostics.development === true && env.JARVIS_CONFIRMATION_TRACE === 'true';
   const trace = confirmationTracer(confirmationTrace, diagnostics.sink);
-  const { registry, timezone, memory } = dependencies.runtime ?? createToolRuntime(env);
+  const memoryDiagnostics = new MemoryDiagnostics(diagnostics.development === true, diagnostics.memorySink);
+  const { registry, timezone, memory } = dependencies.runtime ?? createToolRuntime(env, memoryDiagnostics);
   const classifier = dependencies.classifier ?? new ConfirmationIntentClassifier(env.OPENAI_API_KEY);
   const sessions = new Map<string, { executor: ToolExecutor; expiresAt: number; busy: boolean; seenTurns: Set<string>; workingIds: string[]; memoryGeneration: number; lastMemorySequence: number; spellingEvidence: string; jobs: Set<Promise<void>>; closed: boolean }>();
   const lifetime = 30 * 60_000;
@@ -83,10 +88,10 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
       const input = await body(req);
       if (path === '/api/tools/memory-context') {
         const p = z.object({ query: z.string().min(1).max(500) }).strict().parse(input);
-        let context = '';
+        let context = ''; const lookupStarted = performance.now();
         if (memory && !session.executor.pendingState()) {
           try { context = memory.service.context(await memory.service.search(p.query, memory.limit), memory.budget);
-          } catch { /* Optional memory unavailable. */ }
+          } catch (error) { memoryDiagnostics.failure('context', 'lookup', error, lookupStarted); }
         }
         send(200, { context });
       } else if (path === '/api/tools/memory-turn') {
@@ -98,16 +103,13 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
           // a conversation archive. Model-supplied evidence cannot override them.
           session.spellingEvidence = literalIdentifiers(p.utterance).join(' ');
           session.seenTurns.add(p.itemId);
-          let relevant: MemoryRecord[] = [];
+          let relevant: MemoryRecord[] = []; const lookupStarted = performance.now();
+          const working = /\b(it|that|they|eso|esto|ella|ellos|entrega|delivery)\b/i.test(p.utterance) ? session.workingIds : [];
           try {
             // Contextual reads are optional storage retrieval, not model tool
             // invocations; they cannot hold the foreground tool/approval lock.
-            relevant = await memory.service.search(p.utterance.slice(0, 500), memory.limit);
-          } catch { /* Memory failure does not break voice. */ }
-          const working = /\b(it|that|they|eso|esto|ella|ellos|entrega|delivery)\b/i.test(p.utterance) ? session.workingIds : [];
-          for (const recordId of working) {
-            try { const r = await memory.service.get(recordId); if (!relevant.some(record => record.id === r.id)) relevant.push(r); } catch { /* Deleted/expired records are never reused. */ }
-          }
+            relevant = await memory.service.contextualSearch(p.utterance.slice(0, 500), memory.limit, working);
+          } catch (error) { memoryDiagnostics.failure('context', 'lookup', error, lookupStarted); }
           send(200, { context: memory.service.context(relevant.slice(0, memory.limit), memory.budget) });
           if (memory.automatic && session.jobs.size < 2) {
             const observedAt = new Date(Math.min(Date.parse(p.observedAt), Date.now())).toISOString();
@@ -143,7 +145,14 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
           validateSpelling(candidate, session.spellingEvidence);
         }
         if (p.toolId === 'memory.forget' || p.toolId === 'memory.update') ++session.memoryGeneration;
-        trace({ event: 'server POST /invoke', reason: 'request' }); send(200, await session.executor.invoke(p.invocationId, p.toolId, p.input));
+        trace({ event: 'server POST /invoke', reason: 'request' });
+        const started = performance.now(); const result = await session.executor.invoke(p.invocationId, p.toolId, p.input);
+        if (p.toolId.startsWith('memory.') && result.status === 'error') {
+          const capability = registry.resolve(p.toolId)?.capability;
+          const operation: MemoryOperation = ['search', 'get', 'remember', 'update', 'forget'].includes(capability ?? '') ? capability as MemoryOperation : 'context';
+          memoryDiagnostics.failure(operation, result.category === 'INVALID_INPUT' ? 'validation' : 'execute', new ToolError(result.category), started);
+        }
+        send(200, result);
       } else if (path === '/api/tools/intent') {
         const p = voiceIntent.parse(input); const pending = session.executor.pendingState();
         if (!pending || pending.confirmationId !== p.confirmationId) { send(200, { confirmationId: p.confirmationId, intent: 'ambiguous' }); }
