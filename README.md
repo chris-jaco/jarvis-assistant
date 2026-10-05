@@ -1003,3 +1003,123 @@ independiente del accent, con la misma silueta y transparencia.
 La tarjeta de confirmación sólo cambia superficie, borde, radio, sombra y
 padding. Voz, IDs, payload congelado, botones, foco y protección de carreras se
 mantienen en los módulos validados sin cambios.
+
+## ATLAS V0.5 Browser Control — Foundation
+
+Browser Control controla un navegador **visible en la máquina que ejecuta el
+backend**, no en el dispositivo que sólo abre la UI. No sustituye `web.search`:
+para información actual basta esa herramienta; «abrí YouTube y buscá Arctic
+Monkeys» implica acciones sobre el navegador y usa `browser.*`.
+
+### Arquitectura y arranque
+
+`Realtime → Universal Tool Registry → BrowserAdapter → BrowserProvider →
+LocalBrowserProvider → Playwright → Chrome/Edge visible`.
+El contrato `src/browser/provider.ts` no contiene tipos de Playwright ni permite
+JavaScript/selectores del modelo. Un futuro Cloud/Android provider implementará
+ese contrato sin cambiar las tools. Las tools pasan por el executor, validación,
+timeouts, replay protection y telemetry existentes. No se crea otro flujo de
+confirmación ni se toca el validado de Calendar/Gmail/Memory.
+
+1. `npm install` (Node >=22.12); Playwright 1.63.0 queda fijado en el lockfile.
+2. Instalá Chrome o Edge normal. En `.env`, configurá `BROWSER_ENABLED=true` y
+   `BROWSER_CHANNEL=msedge` (Windows) o `chrome` (macOS/Linux). Para Chromium:
+   `npx playwright install chromium` y `BROWSER_CHANNEL=chromium`.
+3. `npm run dev`. El navegador se lanza al primer uso de `browser.tabs/open/...`,
+   siempre con `headless:false`. `browser.status` sólo informa, sin lanzarlo.
+   Se requiere una sesión gráfica local; no hace falta puerto CDP ni extensión.
+4. Decí «Atlas, abrí YouTube y buscá Arctic Monkeys». Después probá otra pestaña,
+   volver a YouTube, abrir un resultado y pausar el video.
+
+Se eligió `chromium.launchPersistentContext` con un perfil **dedicado** en
+`.local/browser-profile/`, nunca el perfil personal. No copiamos cookies ni
+credenciales, ni adjuntamos una instancia arbitraria por CDP. Playwright advierte
+que el perfil principal de Chrome moderno no admite esta automatización:
+[API oficial](https://playwright.dev/docs/api/class-browsertype#browser-type-launch-persistent-context),
+[cambio oficial de Chrome](https://developer.chrome.com/blog/remote-debugging-port).
+No se modifican flags de seguridad del navegador en producción.
+
+`.local` y el directorio del perfil se validan sin symlinks, con permisos privados
+POSIX o la validación ACL Windows existente. El perfil contiene datos privados
+persistentes del navegador, está ignorado por Git y no se sirve al frontend.
+Sólo una instancia puede utilizarlo a la vez. No cambies su ubicación al perfil
+normal. Al apagar el backend se cierra el contexto administrado; al reconectar
+la voz, el navegador existente permanece. Los IDs opacos de pestañas duran el
+contexto del navegador, no son índices ni recuerdos semánticos. La pestaña activa
+es la seleccionada por Atlas; cambiarla a mano en Chrome no cambia esa selección.
+
+### Tools y observación
+
+`browser.status`, `tabs`, `open`, `navigate`, `switch`, `close`, `observe`, `click`,
+`type`, `press`, `scroll`, `back`, `forward`, `reload`.
+Todas usan schemas estrictos. Observación y listado son READ; las interacciones
+reversibles son WRITE sin confirmación en esta versión. **Esta clasificación no
+habilita acciones consecuenciales**: el provider aplica su política además del
+executor. V0.5.1 podrá preparar acciones con el sistema de aprobación existente;
+V0.5.0 no contiene una vía para aprobar/enviar/comprar.
+
+`observe` devuelve URL sin query/fragment, título acotado y hasta 40 controles
+visibles (10.000 caracteres de elementos), con role/nombre/tipo/estado/ref y clase
+`navigation/search/media/blocked`. Se usan etiquetas/ARIA y controles visibles,
+no HTML completo, screenshots ni dumps. Las refs se invalidan tras una acción,
+navegación, cambio de pestaña o mutación DOM. `CONFLICT` requiere observar otra
+vez. `type` distingue `replace/append`; las teclas están enumeradas y su uso se
+restringe según el control. No hay `evaluate`, CSS libre ni tools por sitio.
+
+### Seguridad, privacidad y límites V0.5.0
+
+La política es conservadora: links de navegación se siguen por GET directo,
+sin ejecutar su `onclick`; sólo se permite escribir en búsquedas identificadas,
+activar sus botones y controlar elementos HTML audio/video. Controles ambiguos,
+credenciales, formularios generales y acciones de enviar/publicar/comprar/pagar/
+reservar/eliminar/cancelar/modificar cuentas quedan bloqueados antes de accionar.
+Se rechazan esquemas no http(s), URLs con credenciales o parámetros de secretos,
+destinos locales literales y rutas/consultas evidentemente consecuenciales.
+No se ejecutan retries automáticos. El provider bloquea métodos distintos de
+GET/HEAD/OPTIONS, WebSockets, service workers, descargas y diálogos de página.
+Esto puede limitar páginas que requieren POST incluso para funciones de lectura.
+
+La clasificación semántica de una web no es una garantía universal: una web
+maliciosa podría causar efectos mediante GET o etiquetar engañosamente un
+control. Usá este navegador para navegación/búsqueda en sitios de confianza;
+no lo uses para flujos de cuentas, operaciones financieras o mensajes. Los
+controles no reconocidos fallan cerrados; no intentes habilitarlos con prompts.
+El usuario conserva el control manual del navegador, fuera de las tools de Atlas.
+Cookie banners/consentimientos no reconocidos deben resolverse manualmente.
+
+No leemos cookies, headers, localStorage/sessionStorage ni valores de inputs.
+Se excluyen passwords, OTP y campos de tarjeta; se redaccionan nombres que
+parecen credenciales. No se registran contenidos de páginas, URLs de tools,
+screenshots ni errores crudos de Playwright. Sólo sale al modelo la observación
+compacta solicitada; aun así los títulos/nombres de controles pueden ser datos
+privados: observá únicamente páginas cuyo contenido quieras compartir con Atlas.
+Los resultados de browser nunca ingresan automáticamente a Memory. El estado de
+pestañas es transitorio y separado de la memoria semántica.
+
+### Troubleshooting y aceptación
+
+- Deshabilitado: `browser.status` indica `reason:disabled`; voz, Calendar, Gmail,
+  Memory y web search siguen disponibles. Activá la variable y reiniciá.
+- No instalado/sin display/perfil ocupado/permisos inseguros: la operación falla
+  con `UNCONFIGURED`, y status indica `unavailable`; no devuelve rutas privadas ni
+  errores crudos. Instalá el canal elegido, cerrá la otra instancia del perfil y
+  verificá permisos. No cambies permisos a públicos para hacerla funcionar.
+- Ref caducada: nueva observación; no reutilices una ref tras escribir/click.
+- Elemento no visible/iframe/DOM muy dinámico/consentimiento: puede necesitar
+  interacción manual. Esta foundation observa sólo el documento principal;
+  no promete resolver todos los sitios. El título y URL ayudan a elegir tabs;
+  si hay varias coincidencias, Atlas debe preguntar.
+- Los tests usan fixtures deterministas con Chromium, no YouTube ni cuentas
+  reales. `npx playwright install chromium` instala el navegador de test; en esta
+  nube se usó `/usr/bin/chromium`. `TEST_BROWSER_EXECUTABLE` es sólo para tests.
+  Si falta un ejecutable se marca explícitamente omitida esa prueba, no aprobada.
+  Los tests pueden correr headless; el provider de producción siempre es visible.
+
+Aceptación local Windows: comprobá voz/transcript/barge-in primero. Pedí abrir
+YouTube y buscar Arctic Monkeys; verificá ventana visible, texto y resultados.
+Pedí «abrí otra pestaña y buscá la web de OpenAI», «volvé a YouTube», «abrí el
+primer resultado» y «pausalo»; verificá selección por IDs y pausa real. Probá una
+acción de envío/compra: debe detenerse sin ejecutarla. Apagá Browser Control y
+verificá que conversación y herramientas anteriores siguen funcionando. Estos
+pasos en Windows con voz/sitios reales requieren aceptación manual; los tests de
+fixtures no certifican la voz ni la UI de YouTube actual.

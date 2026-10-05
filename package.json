@@ -1,6 +1,6 @@
 {
   "name": "jarvis-assistant",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -24,6 +24,7 @@
     "google-auth-library": "11.1.0",
     "mailparser": "^3.9.34",
     "nodemailer": "^10.0.14",
+    "playwright": "1.63.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {

@@ -1,3 +1,5 @@
+import { LocalBrowserProvider, browserOptions } from '../browser/local.js';
+import { BrowserAdapter } from '../tools/adapters/browser.js';
 import { preferenceSchema } from '../memory/preferences.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { MemoryDiagnostics } from '../diagnostics/memory.js';
@@ -31,13 +33,14 @@ export function createToolRuntime(env: NodeJS.ProcessEnv = process.env, diagnost
   const writePolicy = env.TOOL_CONFIRM_WRITES ?? 'true';
   if (!['true', 'false'].includes(writePolicy)) throw new Error('TOOL_CONFIRM_WRITES must be true or false');
   const registry = new ToolRegistry();
+  const browser = new BrowserAdapter(new LocalBrowserProvider(browserOptions(env))); registry.add(browser);
   registry.add(new WebSearchAdapter(env.OPENAI_API_KEY, env.OPENAI_SEARCH_MODEL ?? 'gpt-4.1'));
   const auth = new GoogleAuth(googleConfig(env));
   registry.add(new CalendarAdapter(new GoogleCalendarTransport(() => auth.token()), timezone, env.GOOGLE_CALENDAR_ID ?? 'primary', writePolicy === 'true'));
   const gmail = new GmailAccountStore(env);
   registry.add(new GmailAdapter(gmail, new GoogleGmailTransport(gmail), timezone, writePolicy === 'true'));
   const memory = createMemoryRuntime(env, diagnostics); registry.add(new MemoryAdapter(memory.service, memory.budget, diagnostics));
-  return { registry, timezone, memory };
+  return { registry, timezone, memory, browser };
 }
 const invocation = z.object({ invocationId: z.string().min(1).max(128), toolId: z.string().max(80), input: z.unknown() }).strict();
 const cancellation = z.object({ confirmationId: z.string().uuid().optional() }).strict();
@@ -49,11 +52,11 @@ async function body(req: IncomingMessage): Promise<unknown> {
   for await (const chunk of req) { bytes += chunk.length; if (bytes > 16_384) throw new Error(); chunks.push(Buffer.from(chunk)); }
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
-export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnostics: { development?: boolean; sink?: TraceSink; memorySink?: MemoryDiagnosticSink } = {}, dependencies: { runtime?: { registry: ToolRegistry; timezone: string; memory?: MemoryRuntime }; classifier?: Pick<ConfirmationIntentClassifier, 'classify'>; now?: () => number } = {}) {
+export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnostics: { development?: boolean; sink?: TraceSink; memorySink?: MemoryDiagnosticSink } = {}, dependencies: { runtime?: { registry: ToolRegistry; timezone: string; memory?: MemoryRuntime; browser?: BrowserAdapter }; classifier?: Pick<ConfirmationIntentClassifier, 'classify'>; now?: () => number } = {}) {
   const confirmationTrace = diagnostics.development === true && env.JARVIS_CONFIRMATION_TRACE === 'true';
   const trace = confirmationTracer(confirmationTrace, diagnostics.sink);
   const memoryDiagnostics = new MemoryDiagnostics(diagnostics.development === true, diagnostics.memorySink, env.JARVIS_MEMORY_PROFILE === 'true');
-  const { registry, timezone, memory } = dependencies.runtime ?? createToolRuntime(env, memoryDiagnostics);
+  const { registry, timezone, memory, browser } = dependencies.runtime ?? createToolRuntime(env, memoryDiagnostics);
   const classifier = dependencies.classifier ?? new ConfirmationIntentClassifier(env.OPENAI_API_KEY);
   const sessions = new Map<string, { executor: ToolExecutor; expiresAt: number; busy: boolean; seenTurns: Set<string>; workingIds: string[]; memoryGeneration: number; lastMemorySequence: number; spellingEvidence: string; jobs: Set<Promise<void>>; closed: boolean }>();
   const lifetime = 30 * 60_000;
@@ -186,5 +189,5 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
     finally { if (!contextualRead) session.busy = false; }
     return true;
   };
-  return { handle, close: () => { clearInterval(timer); for (const session of sessions.values()) { session.closed = true; session.executor.close(); } sessions.clear(); } };
+  return { handle, close: () => { void browser?.close().catch(() => undefined); clearInterval(timer); for (const session of sessions.values()) { session.closed = true; session.executor.close(); } sessions.clear(); } };
 }
