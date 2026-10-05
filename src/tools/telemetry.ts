@@ -1,7 +1,7 @@
 import type { Permission, ErrorCategory } from './types.js';
 export interface ToolActivity {
   invocationId: string; toolId: string; integration: string; permission: Permission;
-  startedAt: number; endedAt?: number; durationMs?: number;
+  startedAt: number; endedAt?: number; durationMs?: number; preparationMs?: number; confirmationWaitMs?: number; executionMs?: number;
   status: 'running' | 'pending' | 'success' | 'error'; confirmationRequired: boolean;
   confirmation: 'not_required' | 'waiting' | 'granted' | 'rejected' | 'expired'; errorCategory?: ErrorCategory;
 }

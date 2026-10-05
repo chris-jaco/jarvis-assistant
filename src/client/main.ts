@@ -28,7 +28,7 @@ const provider = new OpenAIVoiceProvider({
   tools(rows, pending) {
     element('tool-activity').replaceChildren(...rows.slice(-8).map(row => {
       const item = document.createElement('li');
-      item.textContent = `${row.toolId} · ${row.status === 'pending' ? 'esperando confirmación' : row.status === 'success' ? '✓' : row.status} ${row.durationMs === undefined ? '' : `${row.durationMs} ms`}${row.errorCategory ? ` · ${row.errorCategory}` : ''}`;
+      item.textContent = `${row.toolId} · ${row.status === 'pending' ? 'esperando confirmación' : row.status === 'success' ? '✓' : row.status} ${row.durationMs === undefined ? '' : `${row.durationMs} ms total${row.executionMs === undefined ? '' : ` · ejecución ${row.executionMs} ms`}${row.confirmationWaitMs === undefined ? '' : ` · espera ${row.confirmationWaitMs} ms`}`}${row.errorCategory ? ` · ${row.errorCategory}` : ''}`;
       return item;
     }));
     element('tool-confirmation').textContent = pending?.summary ?? '';

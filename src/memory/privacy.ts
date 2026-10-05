@@ -1,3 +1,5 @@
+import { MemoryValidationError } from './validation.js';
+import type { MemoryRecord } from './types.js';
 // Deliberately conservative. Run on RAW input before extraction and on every
 // serialized candidate/source before persistence. Never echo rejected content.
 const secrets = [
@@ -16,4 +18,23 @@ export function containsSecret(value: unknown): boolean {
   // UUIDs are internal opaque IDs, not card numbers; credential-labelled UUIDs
   // remain blocked by the label patterns before this card-only normalization.
   return secrets.some(pattern => pattern.test(text)) || cardDigits.test(text.replace(/\b[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\b/gi, ''));
+}
+
+// Metadata is validated by recordSchema first. Mask ONLY typed internal IDs,
+// never values, content, evidence, names or untrusted input. A generated hex ID
+// can look like an IBAN; it is an opaque identifier, not account information.
+export function containsMemorySecrets(records: import('./types.js').MemoryRecord[]): boolean {
+  const identity = (id: string) => /^entity-[a-f0-9]{24}$/.test(id) ? '[internal entity]' : id;
+  return containsSecret(records.map(record => ({ ...record, subject: { ...record.subject, id: identity(record.subject.id) }, relationships: record.relationships.map(link => ({ ...link, target: { ...link.target, id: identity(link.target.id) } })) })));
+}
+
+export function memorySecretError(records: MemoryRecord[]): MemoryValidationError | null {
+  if (!containsMemorySecrets(records)) return null;
+  for (const record of records) {
+    const fields = [
+      ['subject.name', record.subject.name], ['subject.aliases', record.subject.aliases], ['key', record.key], ['content', record.content], ['value.*', record.value], ['source.evidence', record.source.evidence], ['relationships.*', record.relationships.map(link => ({ ...link, target: { ...link.target, id: /^entity-[a-f0-9]{24}$/.test(link.target.id) ? '[internal entity]' : link.target.id } }))],
+    ] as const;
+    for (const [field, value] of fields) if (containsSecret({ data: value })) return new MemoryValidationError(field, 'secret_filter');
+  }
+  return new MemoryValidationError('record', 'secret_filter');
 }

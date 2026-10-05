@@ -7,9 +7,10 @@ import { TokenFileSecurity } from '../tools/adapters/token-security.js';
 import type { FileSecurityEntry } from '../tools/adapters/token-security.js';
 import { MemoryDiagnostics } from '../diagnostics/memory.js';
 import { ToolError } from '../tools/types.js';
+import { MemoryValidationError, validationField } from './validation.js';
 import { recordSchema } from './types.js';
 import type { MemoryRecord, MemoryStore } from './types.js';
-import { containsSecret } from './privacy.js';
+import { containsMemorySecrets, memorySecretError } from './privacy.js';
 const snapshot = z.object({ version: z.literal(1), records: z.array(recordSchema).max(2000) }).strict();
 const queues = new Map<string, Promise<unknown>>();
 export class PrivateJsonMemoryStore implements MemoryStore {
@@ -56,7 +57,7 @@ export class PrivateJsonMemoryStore implements MemoryStore {
       if (opened.size > 8 * 1024 * 1024) throw new ToolError('LIMIT');
       return await this.diagnostics.run(operation, 'snapshot', async () => {
         const records = snapshot.parse(JSON.parse(await handle.readFile('utf8'))).records;
-        if (containsSecret(records)) throw new ToolError('INVALID_INPUT'); return records;
+        if (containsMemorySecrets(records)) throw new ToolError('INVALID_INPUT'); return records;
       }, signal);
     } finally { await handle.close(); }
   }
@@ -84,7 +85,9 @@ export class PrivateJsonMemoryStore implements MemoryStore {
         signal?.throwIfAborted(); const result = change(records);
         if (result && typeof (result as { then?: unknown }).then === 'function') throw new ToolError('INVALID_INPUT');
         const serialized = await this.diagnostics.run('write', 'validation', async () => {
-          const data = snapshot.parse({ version: 1, records }); if (containsSecret(data)) throw new ToolError('INVALID_INPUT');
+          const parsed = snapshot.safeParse({ version: 1, records });
+          if (!parsed.success) throw new MemoryValidationError(validationField(parsed.error.issues[0]?.path.slice(2) ?? []), 'schema');
+          const data = parsed.data; const secret = memorySecretError(data.records); if (secret) throw secret;
           const text = JSON.stringify(data); if (Buffer.byteLength(text) > 8 * 1024 * 1024) throw new ToolError('LIMIT'); return text;
         }, signal);
         const temporary = `${this.path}.${randomUUID()}.tmp`; let handle;
@@ -104,7 +107,7 @@ export class PrivateJsonMemoryStore implements MemoryStore {
           signal?.throwIfAborted();
           const checked = await lstat(temporary); this.security.validateStructure(await handle.stat());
           if (checked.dev !== temporaryInfo.dev || checked.ino !== temporaryInfo.ino) throw new ToolError('UNCONFIGURED');
-          await handle.writeFile(serialized); await handle.sync(); await handle.close(); handle = undefined;
+          await this.diagnostics.run('write', 'write', () => handle!.writeFile(serialized), signal); await this.diagnostics.run('write', 'sync', () => handle!.sync(), signal); await handle.close(); handle = undefined;
           await this.audit('write', await fresh(), signal); // Revalidate before atomic replacement; no ACL cache.
           signal?.throwIfAborted();
           const final = await lstat(temporary); this.security.validateStructure(final);

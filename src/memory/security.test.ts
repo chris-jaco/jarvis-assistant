@@ -43,3 +43,23 @@ test('native Windows batched memory ACLs reject broad permissions and reparse pa
     await symlink(dirname(file), linked, 'junction'); await assert.rejects(new PrivateJsonMemoryStore(join(linked, 'memories.json')).read(), /UNCONFIGURED/);
   } finally { await rm(linked, { force: true, recursive: true }); await rm(dirname(file), { recursive: true, force: true }); }
 });
+
+test('local reads audit once and mutations retain four fresh security batches with stage profiling', async () => {
+  const file = resolve('.local', 'memory-tests', randomUUID(), 'memories.json');
+  let audits = 0; const stages: import('../diagnostics/memory.js').MemoryDiagnostic[] = [];
+  const { MemoryDiagnostics } = await import('../diagnostics/memory.js');
+  const security = new TokenFileSecurity('win32', async () => { throw new Error('unexpected single audit'); }, async () => { audits++; });
+  const diagnostics = new MemoryDiagnostics(true, entry => stages.push(entry), true);
+  const store = new PrivateJsonMemoryStore(file, security, diagnostics);
+  try {
+    await store.read(); assert.equal(audits, 1); audits = 0;
+    const service = new MemoryService(store); await service.remember(candidate(), source()); assert.equal(audits, 4);
+    audits = 0; stages.length = 0;
+    const record = (await store.read())[0]!; audits = 0;
+    await service.remember(candidate('Updated local fact'), source('Updated local fact'), { id: record.id, updatedAt: record.updatedAt });
+    assert.equal(audits, 4);
+    for (const stage of ['queue', 'lock', 'security', 'snapshot', 'validation', 'write', 'sync', 'commit']) assert.ok(stages.some(e => e.stage === stage && e.code === 'OK'), stage);
+    assert.ok(stages.every(e => Object.keys(e).every(key => ['operation', 'stage', 'code', 'elapsedMs'].includes(key))));
+    assert.ok(!JSON.stringify(stages).includes('Updated local fact'));
+  } finally { await rm(dirname(file), { recursive: true, force: true }); }
+});

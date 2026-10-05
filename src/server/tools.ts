@@ -1,3 +1,4 @@
+import { preferenceSchema } from '../memory/preferences.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { MemoryDiagnostics } from '../diagnostics/memory.js';
 import { ToolError } from '../tools/types.js';
@@ -12,6 +13,7 @@ import { createMemoryRuntime } from '../memory/runtime.js';
 import type { MemoryRuntime } from '../memory/runtime.js';
 import { MemoryAdapter } from '../memory/adapter.js';
 import { literalIdentifiers, validateSpelling } from '../memory/spelling.js';
+import { MemoryValidationError, validationField } from '../memory/validation.js';
 import { candidateSchema } from '../memory/types.js';
 import { containsSecret } from '../memory/privacy.js';
 import type { MemoryRecord } from '../memory/types.js';
@@ -50,7 +52,7 @@ async function body(req: IncomingMessage): Promise<unknown> {
 export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnostics: { development?: boolean; sink?: TraceSink; memorySink?: MemoryDiagnosticSink } = {}, dependencies: { runtime?: { registry: ToolRegistry; timezone: string; memory?: MemoryRuntime }; classifier?: Pick<ConfirmationIntentClassifier, 'classify'>; now?: () => number } = {}) {
   const confirmationTrace = diagnostics.development === true && env.JARVIS_CONFIRMATION_TRACE === 'true';
   const trace = confirmationTracer(confirmationTrace, diagnostics.sink);
-  const memoryDiagnostics = new MemoryDiagnostics(diagnostics.development === true, diagnostics.memorySink);
+  const memoryDiagnostics = new MemoryDiagnostics(diagnostics.development === true, diagnostics.memorySink, env.JARVIS_MEMORY_PROFILE === 'true');
   const { registry, timezone, memory } = dependencies.runtime ?? createToolRuntime(env, memoryDiagnostics);
   const classifier = dependencies.classifier ?? new ConfirmationIntentClassifier(env.OPENAI_API_KEY);
   const sessions = new Map<string, { executor: ToolExecutor; expiresAt: number; busy: boolean; seenTurns: Set<string>; workingIds: string[]; memoryGeneration: number; lastMemorySequence: number; spellingEvidence: string; jobs: Set<Promise<void>>; closed: boolean }>();
@@ -140,7 +142,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
         const p = invocation.parse(input);
         // Model-facing requests cannot forge provenance used by automatic extraction.
         if (p.toolId === 'memory.ingest') throw new Error();
-        if ((p.toolId === 'memory.update' || p.toolId === 'memory.remember') && session.spellingEvidence) {
+        if ((p.toolId === 'memory.update' || (p.toolId === 'memory.remember' && !(p.input as { preference?: unknown })?.preference)) && session.spellingEvidence) {
           const candidate = candidateSchema.parse((p.input as { candidate?: unknown })?.candidate);
           validateSpelling(candidate, session.spellingEvidence);
         }
@@ -150,7 +152,12 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
         if (p.toolId.startsWith('memory.') && result.status === 'error') {
           const capability = registry.resolve(p.toolId)?.capability;
           const operation: MemoryOperation = ['search', 'get', 'remember', 'update', 'forget'].includes(capability ?? '') ? capability as MemoryOperation : 'context';
-          memoryDiagnostics.failure(operation, result.category === 'INVALID_INPUT' ? 'validation' : 'execute', new ToolError(result.category), started);
+          const parsed = result.category === 'INVALID_INPUT' ? registry.resolve(p.toolId)?.schema.safeParse(p.input) : undefined;
+          const preference = p.toolId === 'memory.remember' && (p.input as { preference?: unknown })?.preference;
+          const preferenceResult = preference ? preferenceSchema.safeParse(preference) : undefined;
+          const field = preferenceResult && !preferenceResult.success ? validationField(['preference', ...(preferenceResult.error.issues[0]?.path ?? [])]) : validationField(parsed && !parsed.success ? parsed.error.issues[0]?.path ?? [] : []);
+          const issue = parsed && !parsed.success ? new MemoryValidationError(field, 'schema') : new ToolError(result.category);
+          memoryDiagnostics.failure(operation, result.category === 'INVALID_INPUT' ? 'validation' : 'execute', issue, started);
         }
         send(200, result);
       } else if (path === '/api/tools/intent') {
@@ -158,7 +165,9 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
         if (!pending || pending.confirmationId !== p.confirmationId) { send(200, { confirmationId: p.confirmationId, intent: 'ambiguous' }); }
         else {
           trace({ event: 'server POST /intent', reason: 'classifying', pendingId: p.confirmationId });
-          const intent = await classifier.classify(pending.summary, p.utterance);
+          const toolId = session.executor.pendingToolId();
+          const capability = toolId?.startsWith('memory.') ? registry.resolve(toolId)?.capability : undefined;
+          const intent = capability ? await memoryDiagnostics.run(capability as MemoryOperation, 'confirmation', () => classifier.classify(pending.summary, p.utterance)) : await classifier.classify(pending.summary, p.utterance);
           // A classification arriving after expiry, close or replacement has no authority.
           const current = session.executor.pendingState();
           const boundIntent = current?.confirmationId === p.confirmationId ? intent : 'ambiguous';

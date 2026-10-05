@@ -809,3 +809,82 @@ mediciones simuladas no sustituyen la aceptación en Windows: después de
 actualizar, inspeccioná un recuerdo, guardá una nueva preferencia y corregí
 una existente con confirmación. Si falla, compartí únicamente la línea de
 metadatos `[JARVIS memory]`, nunca el JSON privado ni credenciales.
+
+### V0.4.3 — preferencias y rendimiento en Windows
+
+Para una preferencia explícita sobre la longitud de respuesta, `memory.remember`
+acepta `{preference:{responseLength:"minimal"},evidence:"frase del usuario"}`.
+Las opciones son `minimal`, `short`, `normal` y `detailed`. El backend construye
+el sujeto genérico `{id:"user",name:"User",aliases:[]}`; no se necesita un
+nombre ni ID personal. Este modo congela la propuesta y pide una confirmación
+breve mediante el bridge existente antes de guardarla con procedencia
+`explicit_user`. No cambia la extracción automática ni los permisos de otros
+recuerdos. Nunca se afirma que se guardó antes de recibir éxito.
+
+La preferencia actual de respuestas se busca por el sujeto canónico y la clave
+existente (`spoken_communication`, `response_style`, `response_length` o un valor
+`response_length`). Se conservan los otros ajustes estructurados y relaciones;
+una preferencia equivalente reutiliza el registro y una nueva explícita crea
+una versión que sustituye la anterior con enlaces de historial. Si hay varios
+registros candidatos, se rechaza como ambiguo. Si cambia el registro mientras
+se espera confirmación, se rechaza por conflicto. No se migra ni reescribe el
+JSON privado durante el despliegue.
+
+El fallo `write / validation / INVALID_INPUT` se reproduce con datos sintéticos:
+algunos hashes hexadecimales de entidades parecen un IBAN al filtro conservador.
+Después de validar el esquema del snapshot, el filtro omite exclusivamente los
+IDs opacos `entity-<24 hex>` en los campos de identidad. El contenido, valores,
+nombres, evidencia y entrada original siguen pasando por el filtro completo.
+El payload original del fallo en vivo no está disponible: no se puede afirmar
+qué ID concreto produjo el hash. Los errores ahora pueden indicar un campo de
+una lista fija y una regla (`schema` o `secret_filter`), nunca el valor, payload,
+ruta o nombre de una clave privada. `INVALID_INPUT` no justifica pedir un ID
+personal ni repetir el mismo payload inválido.
+
+En Windows, las auditorías por lotes usan un proceso PowerShell reutilizable,
+con peticiones serializadas y respuestas fijas `OK`/`FAIL`. **No es una caché de
+seguridad**: cada petición vuelve a comprobar propietario, ACL y reparse points
+en toda la ruta. Un read mantiene una auditoría y una transacción mantiene las
+cuatro auditorías de V0.4.2, incluidas las comprobaciones del temporal y antes
+del reemplazo. Antes se iniciaban uno/cuatro procesos respectivamente; ahora
+se inicia uno en frío y cero adicionales en caliente, hasta cierre por 60 s de
+inactividad, error de protocolo, cancelación o timeout. El timeout sigue siendo
+10 s. Un error de auditoría normal no concede acceso en peticiones posteriores.
+La validación individual de archivos OAuth conserva su transporte original.
+No se emplea una caché de ACL porque cambios de permisos/reparse points pueden
+ocurrir sin un cambio fiable del tamaño o fecha del archivo.
+
+Para medir en Windows, antes de `npm run dev` en PowerShell:
+
+```powershell
+$env:JARVIS_MEMORY_PROFILE="true"
+npm run dev
+```
+
+En desarrollo se emiten tiempos sin contenido para `prepare`, `lookup`,
+`execute`, `confirmation` (clasificación semántica), y para las etapas de store:
+`queue`, `directory`, `lock`, `security`, `snapshot`, `validation`, `write`,
+`sync`, `commit`. Son intervalos anidados: **no deben sumarse todos**.
+`security` incluye arranque de PowerShell en frío y auditoría; comparar el
+primer acceso con los siguientes permite observar el coste del proceso sin
+omitir comprobaciones. No se registra el contenido ni se llama al modelo para
+perfilar. En producción los diagnósticos de memoria permanecen desactivados.
+
+La actividad de herramientas mantiene `durationMs` como tiempo total y añade
+`preparationMs`, `confirmationWaitMs`, `executionMs`; la UI distingue ejecución
+local y espera. La espera incluye la pregunta hablada, al usuario y la
+clasificación semántica. El registro histórico de 37.667 ms no contiene este
+reparto: no equivale a una escritura JSON de 37.667 ms ni permite reconstruir un
+reparto exacto. La ejecución local no requiere red; la confirmación semántica
+puede usar OpenAI. Linux valida la seguridad POSIX directamente. El entorno de
+Codex no proporciona Windows nativo: las pruebas de ACL nativas siguen siendo
+necesarias en Windows antes de afirmar tiempos reales en esa plataforma.
+
+Prueba local: pedir «¿Podrías guardar y recordar para el futuro que tus respuestas
+sean lo más cortas posible?», confirmar la propuesta, reiniciar y preguntar qué
+preferencia recuerda. Repetir en inglés no debe crear otro registro actual.
+Pedir luego respuestas detalladas debe sustituir la preferencia y conservar su
+historial. Repetir la corrección `onavox.ai` → `onabox.ai` y comprobar que el
+summary, contenido y valor son literales. Con profiling activo, comparar lectura
+fría/caliente y la ejecución de la corrección **después** de la aprobación; no
+editar manualmente `.local` ni pegar contenido privado para diagnosticar tiempos.

@@ -121,3 +121,19 @@ test('HTTP memory failures are diagnosed in development without private details;
     } finally { await f.close(); }
   }
 });
+
+test('HTTP preference needs no personal ID; invalid field diagnostics remain private and approval stays backend-owned', async () => {
+  const entries: import('../diagnostics/memory.js').MemoryDiagnostic[] = [];
+  const f = await fixture({ development: true, memorySink: entry => entries.push(entry) });
+  try {
+    const bad = await f.post('invoke', { invocationId: 'bad-preference', toolId: 'memory.remember', input: { preference: { responseLength: 'private-invalid-value' }, evidence: 'private evidence' } });
+    assert.equal(bad.data.status, 'error'); assert.equal(bad.data.category, 'INVALID_INPUT');
+    assert.ok(entries.some(e => e.field === 'preference.responseLength' && e.rule === 'schema'));
+    assert.ok(!JSON.stringify(entries).includes('private-invalid-value')); assert.ok(!JSON.stringify(entries).includes('private evidence'));
+    const prepared = await f.post('invoke', { invocationId: 'good-preference', toolId: 'memory.remember', input: { preference: { responseLength: 'minimal' }, evidence: 'Remember that I prefer very short answers.' } });
+    assert.equal(prepared.data.status, 'pending'); assert.equal(f.store.records.length, 0);
+    const done = await f.post('decision', { confirmationId: prepared.data.confirmationId, approved: true });
+    assert.equal(done.data.status, 'success'); assert.equal(f.store.records[0]!.subject.name, 'User'); assert.equal(f.store.records[0]!.source.kind, 'explicit_user');
+    const replay = await f.post('decision', { confirmationId: prepared.data.confirmationId, approved: true }); assert.equal(replay.data.status, 'error'); assert.equal(f.store.records.length, 1);
+  } finally { await f.close(); }
+});

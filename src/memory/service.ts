@@ -3,6 +3,8 @@ import { containsSecret } from './privacy.js';
 import { candidateSchema, sourceSchema } from './types.js';
 import type { MemoryCandidate, MemoryRecord, MemorySource, MemoryStore, MemoryRelevance } from './types.js';
 import { normalize, entityKey, entities, mentions, nearNames } from './entities.js';
+import { responsePreference, responsePreferenceKeys } from './preferences.js';
+import type { ResponsePreference } from './preferences.js';
 import { validateSpelling } from './spelling.js';
 export { normalize } from './entities.js';
 const concepts = [ ['pending', 'pendiente', 'pendientes', 'remaining', 'todo', 'next', 'estado', 'status'], ['delivery', 'entrega', 'deadline', 'plazo'], ['client', 'cliente', 'clientes', 'customer'], ['project', 'proyecto', 'projects', 'proyectos'], ['preference', 'preferencia', 'preferences', 'preferencias'], ['skill', 'habilidad', 'expertise', 'capacidad'], ['partner', 'pareja'], ['email', 'correo'], ['short', 'breve', 'corto'] ];
@@ -28,8 +30,8 @@ export class MemoryService {
   get mutationGeneration(): number { return this.generation; }
   constructor(readonly store: MemoryStore, private readonly now = Date.now, private readonly relevance: MemoryRelevance = new LexicalMemoryRelevance()) {}
   private current(record: MemoryRecord): boolean { return record.status === 'current' && (!record.expiresAt || Date.parse(record.expiresAt) > this.now()); }
-  async remember(raw: unknown, rawSource: MemorySource, expected?: { id: string; updatedAt: string }, guardGeneration?: number, signal?: AbortSignal): Promise<MemoryRecord | null> {
-    if (expected) ++this.generation;
+  async remember(raw: unknown, rawSource: MemorySource, expected?: { id: string; updatedAt: string } | null, guardGeneration?: number, signal?: AbortSignal): Promise<MemoryRecord | null> {
+    if (expected !== undefined) ++this.generation;
     if (containsSecret(raw) || containsSecret(rawSource)) throw new ToolError('INVALID_INPUT');
     const candidate = candidateSchema.parse(raw); const source = sourceSchema.parse(rawSource);
     validateSpelling(candidate, source.evidence);
@@ -66,6 +68,7 @@ export class MemoryService {
       const existing = records.filter(r => r.status === 'current' && r.subject.id === candidate.subject.id && normalize(r.key) === normalize(candidate.key));
       if (existing.length > 1) throw new ToolError('AMBIGUOUS');
       const old = existing[0];
+      if (expected === null && old) throw new ToolError('CONFLICT');
       if (expected && (!old || old.id !== expected.id || old.updatedAt !== expected.updatedAt)) throw new ToolError('CONFLICT');
       if (old && authority[source.kind] < authority[old.source.kind]) return old;
       if (source.kind === 'conversation_inference' && candidate.confidence < 0.75) return null;
@@ -83,6 +86,16 @@ export class MemoryService {
       if (old) { old.status = 'superseded'; old.supersededBy = record.id; old.updatedAt = stamp; }
       records.push(record); return record;
     }, signal);
+  }
+  async preparePreference(input: ResponsePreference, signal?: AbortSignal): Promise<{ candidate: MemoryCandidate; expected: { id: string; updatedAt: string } | null }> {
+    const candidate = responsePreference(input);
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('user'));
+    const userId = 'entity-' + [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 24);
+    const rows = (await this.store.read(signal)).filter(r => r.status === 'current' && r.type === 'PREFERENCE' && ['user', userId].includes(r.subject.id) && (responsePreferenceKeys.has(r.key) || r.value.response_length !== undefined));
+    if (rows.length > 1) throw new ToolError('AMBIGUOUS');
+    const old = rows[0];
+    if (old) { candidate.subject = old.subject; candidate.key = old.key; candidate.value = { ...old.value, ...candidate.value }; candidate.relationships = old.relationships; }
+    return { candidate, expected: old ? { id: old.id, updatedAt: old.updatedAt } : null };
   }
   async get(id: string, historical = false, signal?: AbortSignal): Promise<MemoryRecord> {
     const record = (await this.store.read(signal)).find(r => r.id === id && (historical || this.current(r)));

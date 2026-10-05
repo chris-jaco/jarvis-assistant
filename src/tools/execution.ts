@@ -17,7 +17,7 @@ export function safeError(error: unknown): ToolResult {
   const category = error instanceof ToolError ? error.category : 'UPSTREAM';
   return { status: 'error', category, message: messages[category] };
 }
-interface Pending { id: string; tool: ToolDefinition; input: unknown; expiresAt: number; row: ToolActivity }
+interface Pending { id: string; tool: ToolDefinition; input: unknown; expiresAt: number; pendingAt: number; row: ToolActivity }
 export class ToolExecutor {
   private pending?: Pending;
   private calls = new Map<string, { fingerprint: string; result: Promise<ToolResult> }>();
@@ -68,12 +68,13 @@ export class ToolExecutor {
       const parsed = tool.schema.safeParse(raw);
       if (!parsed.success) throw new ToolError('INVALID_INPUT');
       const input = tool.prepare ? await this.bounded(tool, signal => tool.prepare!(parsed.data, signal)) : parsed.data;
+      row.preparationMs = this.now() - row.startedAt;
       if (this.closed || revision !== this.revision) throw new ToolError('EXPIRED');
       row.confirmationRequired = requiresConfirmation(tool, input);
       row.confirmation = row.confirmationRequired ? 'waiting' : 'not_required';
       if (row.confirmationRequired) {
         this.invalidate('rejected');
-        const pending = { id: randomUUID(), tool, input, expiresAt: this.now() + this.confirmationMs, row };
+        const pending = { id: randomUUID(), tool, input, expiresAt: this.now() + this.confirmationMs, pendingAt: this.now(), row };
         this.trace({ event: 'executor.prepare', reason: 'prepared', pendingId: pending.id });
         this.pending = pending; row.status = 'pending';
         return { status: 'pending', confirmationId: pending.id, summary: tool.summarize?.(input) ?? `¿Confirmas ${tool.name}?`, expiresAt: pending.expiresAt };
@@ -86,10 +87,12 @@ export class ToolExecutor {
     const p = this.pending;
     return p ? { confirmationId: p.id, summary: p.tool.summarize?.(p.input) ?? p.tool.name, expiresAt: p.expiresAt } : null;
   }
+  pendingToolId(): string | undefined { return this.pending?.tool.id; }
   async decide(id: string, approved: boolean): Promise<ToolResult> {
     const pending = this.pending;
     this.trace({ event: 'executor.decision', reason: approved ? 'approved' : 'rejected', pendingId: id });
     if (!pending || pending.id !== id || this.closed) return safeError(new ToolError('EXPIRED'));
+    pending.row.confirmationWaitMs = this.now() - pending.pendingAt;
     this.pending = undefined; // Consume before awaiting: concurrent/replayed decisions cannot execute twice.
     if (pending.expiresAt <= this.now()) { pending.row.confirmation = 'expired'; return this.finishError(pending.row, new ToolError('EXPIRED')); }
     if (!approved) { pending.row.confirmation = 'rejected'; return this.finishError(pending.row, new ToolError('REJECTED')); }
@@ -97,11 +100,11 @@ export class ToolExecutor {
     return this.run(pending.tool, pending.input, pending.row);
   }
   private async run(tool: ToolDefinition, input: unknown, row: ToolActivity): Promise<ToolResult> {
-    row.status = 'running';
+    row.status = 'running'; const started = this.now();
     try {
       const data = await this.bounded(tool, signal => tool.execute(input, signal));
-      row.status = 'success'; this.end(row); return { status: 'success', data };
-    } catch (error) { return this.finishError(row, error); }
+      row.executionMs = this.now() - started; row.status = 'success'; this.end(row); return { status: 'success', data };
+    } catch (error) { row.executionMs = this.now() - started; return this.finishError(row, error); }
   }
   private end(row: ToolActivity): void { row.endedAt = this.now(); row.durationMs = row.endedAt - row.startedAt; }
   private finishError(row: ToolActivity, error: unknown): ToolResult {
@@ -112,7 +115,7 @@ export class ToolExecutor {
   invalidate(reason: 'rejected' | 'expired' = 'rejected'): void {
     this.trace({ event: 'executor.invalidate', reason, pendingId: this.pending?.id });
     ++this.revision;
-    if (this.pending) { this.pending.row.confirmation = reason; this.finishError(this.pending.row, new ToolError(reason === 'expired' ? 'EXPIRED' : 'REJECTED')); this.pending = undefined; }
+    if (this.pending) { this.pending.row.confirmationWaitMs = this.now() - this.pending.pendingAt; this.pending.row.confirmation = reason; this.finishError(this.pending.row, new ToolError(reason === 'expired' ? 'EXPIRED' : 'REJECTED')); this.pending = undefined; }
   }
   close(): void { this.trace({ event: 'executor.close', reason: 'session_closed', pendingId: this.pending?.id }); this.closed = true; this.invalidate(); for (const controller of this.controllers) controller.abort(); }
 }

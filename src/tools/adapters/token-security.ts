@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import type { Stats } from 'node:fs';
+import { AclWorker } from './acl-worker.js';
 import { ToolError } from '../types.js';
 
 // Fixed script; only a path and operation travel over stdin. Never tokens, arguments
@@ -54,13 +55,15 @@ try {
 `;
 const BATCH_ACL_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
-try {
-  $requests = [Console]::In.ReadToEnd() | ConvertFrom-Json
-  foreach ($request in $requests) {
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+  try {
+    $requests = $line | ConvertFrom-Json
+    foreach ($request in $requests) {
 ` + ACL_VALIDATION + String.raw`
-  }
-  [Console]::Out.Write('OK')
-} catch { exit 1 }
+    }
+    [Console]::Out.WriteLine('OK')
+  } catch { [Console]::Out.WriteLine('FAIL') }
+}
 `;
 export type WindowsAclOperation = 'initializeDirectory' | 'validate';
 export type WindowsAclCheck = (path: string, operation: WindowsAclOperation) => Promise<void>;
@@ -90,7 +93,12 @@ async function runAcl(script: string, payload: string, signal?: AbortSignal): Pr
   });
 }
 export const windowsAclCheck: WindowsAclCheck = (path, operation) => runAcl(ACL_SCRIPT, windowsAclPayload(path, operation));
-export const windowsAclBatchCheck: WindowsAclBatchCheck = (requests, signal) => runAcl(BATCH_ACL_SCRIPT, JSON.stringify(requests).replace(/[^\x00-\x7f]/g, character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`), signal);
+const batchWorker = new AclWorker(() => {
+  const executable = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return spawn(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', BATCH_ACL_SCRIPT], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+});
+process.once('exit', () => batchWorker.close());
+export const windowsAclBatchCheck: WindowsAclBatchCheck = (requests, signal) => batchWorker.check(JSON.stringify(requests).replace(/[^\x00-\x7f]/g, character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`), signal);
 
 export interface FileSecurityEntry { path: string; info: Stats; directory?: boolean; newlyCreated?: boolean }
 export class TokenFileSecurity {
