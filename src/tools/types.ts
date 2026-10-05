@@ -9,6 +9,6 @@ export interface ToolDefinition {
   execute(input: unknown, signal: AbortSignal): Promise<unknown>;
 }
 export interface ToolAdapter { integration: string; transport: Transport; tools(): ToolDefinition[]; close?(): Promise<void> }
-export type ErrorCategory = 'INVALID_INPUT' | 'UNCONFIGURED' | 'UPSTREAM' | 'TIMEOUT' | 'AMBIGUOUS' | 'CONFLICT' | 'EXPIRED' | 'REJECTED' | 'LIMIT';
+export type ErrorCategory = 'INVALID_INPUT' | 'UNCONFIGURED' | 'UPSTREAM' | 'TIMEOUT' | 'AMBIGUOUS' | 'CONFLICT' | 'EXPIRED' | 'REJECTED' | 'LIMIT' | 'EXECUTION_UNKNOWN';
 export class ToolError extends Error { constructor(readonly category: ErrorCategory) { super(category); } }
 export type ToolResult = { status: 'success'; data: unknown } | { status: 'error'; category: ErrorCategory; message: string } | { status: 'pending'; confirmationId: string; summary: string; expiresAt: number };

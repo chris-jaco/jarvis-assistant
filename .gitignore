@@ -12,3 +12,7 @@ artifacts/
 
 # Gmail secure account files, including custom storage locations.
 g_*.json
+
+# Native host build products
+native/**/bin/
+native/**/obj/

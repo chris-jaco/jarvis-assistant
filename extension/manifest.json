@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Atlas Browser Bridge",
+  "version": "0.5.1",
+  "minimum_chrome_version": "120",
+  "permissions": ["activeTab", "scripting", "nativeMessaging"],
+  "background": { "service_worker": "service-worker.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "Autorizar Atlas en esta pestaña" },
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'self'" }
+}

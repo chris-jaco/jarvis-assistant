@@ -7,6 +7,7 @@ import { ToolError } from './types.js';
 import type { ToolDefinition, ToolResult, ErrorCategory } from './types.js';
 import type { ToolRegistry } from './registry.js';
 const messages: Record<ErrorCategory, string> = {
+  EXECUTION_UNKNOWN: 'Se perdió el resultado de la operación. No afirmes éxito ni la repitas automáticamente; verifica el estado con el usuario.',
   INVALID_INPUT: 'Datos inválidos. Aclara la solicitud.', UNCONFIGURED: 'Esta integración no está configurada.',
   UPSTREAM: 'No se pudo recuperar información o completar la acción. No asumas que se realizó.',
   TIMEOUT: 'La operación tardó demasiado. Su resultado puede ser incierto; comprueba el estado antes de repetir una escritura.',

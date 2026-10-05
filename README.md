@@ -1184,3 +1184,19 @@ dejando apenas 4,2 s para navegación. El cambio elimina arranques redundantes
 y el watcher del perfil, pero las mejoras exactas deben medirse nuevamente en
 Windows con `BROWSER_TRACE=true` (desactivado por defecto). No se atribuye toda
 la duración de launch al watcher sin una medición posterior.
+
+## V0.5.1 — Attached Chrome (acceptance Windows pendiente)
+
+Atlas puede usar una pestaña de tu Chrome habitual mediante extensión MV3 y
+Native Messaging, con autorización explícita por tarea/sesión y revocable.
+No copia perfiles ni lee cookies, passwords, storage o headers. El proveedor
+aislado sigue siendo el default (`BROWSER_PROVIDER=isolated`); attached es opt-in,
+sin fallback automático. La extensión solicita sólo `activeTab`, `scripting` y
+`nativeMessaging`. No cierra Chrome ni tus tabs al desconectar Atlas.
+
+La instalación manual Windows, configuración, protocolo, límites de seguridad,
+reconexión, uninstall y pruebas A–L están en
+[docs/browser-attached.md](docs/browser-attached.md). Los tests automatizados no
+constituyen acceptance de tu Chrome real; V0.5.1 todavía no está publicada como
+release. Una autorización de tab y una reanudación “listo” nunca sustituyen las
+confirmaciones de acciones consecuenciales existentes.

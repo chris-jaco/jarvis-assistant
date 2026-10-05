@@ -1,3 +1,4 @@
+import { BrowserContinuation } from './browser-continuation.js';
 import { browserTracer, browserCode, isBrowserTool } from '../diagnostics/browser.js';
 import type { BrowserDiagnosticSink } from '../diagnostics/browser.js';
 import { tool, setSensitiveDataLoggingEnabled } from '@openai/agents-realtime';
@@ -33,6 +34,7 @@ export class VoiceToolBridge {
   private trace: TraceSink = () => {};
   private browserTrace: BrowserDiagnosticSink = () => {};
   private browserSequence = 0;
+  private browserContinuation = new BrowserContinuation((handoffId, utterance) => toolRequest('browser-resume', { handoffId, utterance }), message => { if (!this.closed) this.notify(message); });
   private diagnostic(event: string, reason: string, extra: Partial<ConfirmationTrace> = {}): void {
     this.trace({ event, reason, pendingId: this.pending?.confirmationId, armed: this.armed, promptResponseId: this.promptPlayback?.responseId, ...extra });
   }
@@ -140,6 +142,7 @@ export class VoiceToolBridge {
     }
   }
   speechStarted(itemId: string): void {
+    this.browserContinuation.speechStarted(itemId, this.confirmationActive);
     // A new turn supersedes an unresolved semantic decision. Old classification
     // must not execute while the user is already correcting or changing intent.
     if (this.intentInFlight && !this.captured.has(itemId)) ++this.intentRevision;
@@ -148,6 +151,7 @@ export class VoiceToolBridge {
     this.diagnostic('speech.capture', capture ? 'captured' : 'not_captured', { itemId, capturedId: capture?.id, capturedApprovable: capture?.approvable });
   }
   async transcript(itemId: string, text: string): Promise<void> {
+    if (!this.confirmationActive) await this.browserContinuation.transcript(itemId, text, false);
     if (!this.pending || this.closed) { this.diagnostic('transcript.classify', 'no_pending_or_closed', { itemId }); return; }
     const capture = this.captured.get(itemId); this.captured.delete(itemId);
     const pendingId = this.pending.confirmationId;
@@ -213,11 +217,12 @@ export class VoiceToolBridge {
   private async refresh(): Promise<void> {
     if (this.closed) return;
     const expectedId = this.pending?.confirmationId;
-    try { const data = await toolRequest('activity', undefined, 'GET') as { activity: ToolActivity[]; pending: PendingConfirmation | null };
+    try { const data = await toolRequest('activity', undefined, 'GET') as { activity: ToolActivity[]; pending: PendingConfirmation | null; browser?: unknown };
       if (this.closed) return;
       if (this.pending && this.pending.confirmationId === expectedId && (!data.pending || data.pending.confirmationId !== this.pending.confirmationId)) { this.diagnostic('activity.refresh', 'backend_pending_missing_or_changed'); this.pending = null; this.armed = false; }
       this.activity(data.activity, this.pending);
+      if (data.browser) this.browserContinuation.update(data.browser, this.confirmationActive);
     } catch { /* Polling never breaks voice playback. Tool requests report failures. */ }
   }
-  close(): void { this.diagnostic('bridge.close', 'session_closed'); this.closed = true; this.observedResponses.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE').catch(() => undefined); }
+  close(): void { this.diagnostic('bridge.close', 'session_closed'); this.closed = true; this.browserContinuation.close(); this.observedResponses.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE').catch(() => undefined); }
 }
