@@ -5,6 +5,51 @@ import { chromium } from 'playwright';
 import { randomUUID } from 'node:crypto';
 import { parseRequest } from '../browser/attached/protocol.js';
 
+test('compiled generic SPA search → results → media, explicit ad skip and verified play/pause', async t => {
+  let executable = process.env.TEST_BROWSER_EXECUTABLE;
+  if (!executable) { try { await access(chromium.executablePath()); } catch { try { await access('/usr/bin/chromium'); executable = '/usr/bin/chromium'; } catch { t.skip('Install Chromium for compiled content integration'); return; } } }
+  const browser = await chromium.launch({ headless: true, executablePath: executable, args: process.getuid?.() === 0 ? ['--no-sandbox'] : [] });
+  try {
+    const page = await browser.newPage(); const extensionId = 'a'.repeat(32);
+    await page.addInitScript(extensionId => { const target = window as any; target.chrome = { runtime: { id: extensionId, onMessage: { addListener(listener: unknown) { target.fixtureListener = listener; } } } }; }, extensionId);
+    await page.route('https://fixture.example/**', route => route.fulfill({ contentType: 'text/html', body: route.request().url().endsWith('/watch')
+      ? '<main><figure aria-label="Player"><video muted autoplay width="320" height="180"></video><span role="status">Advertisement</span><button id="skip">Skip ad</button></figure></main>'
+      : '<main><div role="search"><input type="text" role="combobox" aria-label="Search"></div><section id="results"></section></main>' }));
+    await page.goto('https://fixture.example/');
+    const scopeId = randomUUID(), tabId = randomUUID(), session = randomUUID(), epoch = randomUUID(), task = randomUUID();
+    const send = (raw: unknown) => page.evaluate(({ raw, extensionId }) => new Promise<any>(resolve => { (window as any).fixtureListener(raw, { id: extensionId }, resolve); }), { raw, extensionId });
+    const install = async () => { await page.addScriptTag({ path: 'dist/extension/content.js' }); await send({ kind: 'init', access: { scopeId, tabId, session, epoch, origin: 'https://fixture.example', expiresAt: Date.now()+900_000 } }); };
+    const command = (operation: 'observe'|'type'|'press'|'click'|'media', args: Record<string, unknown> = {}) => send(parseRequest({ protocol:'atlas.browser', version:1, kind:'request', requestId:randomUUID(), backendSessionId:session, taskId:task, connectionEpoch:epoch, deadlineAt:Date.now()+10000, operation, args:{scopeId,tabId,...args} }));
+    const binding = (data:any, el:any) => ({ documentId:data.documentId, snapshotId:data.snapshotId, ref:el.ref });
+    await install();
+    await page.evaluate(() => { document.querySelector('input')!.addEventListener('keydown', e => { if ((e as KeyboardEvent).key==='Enter') { history.pushState({}, '', '/results'); document.querySelector('#results')!.innerHTML='<a href="/watch">Fixture song</a>'; } }); });
+    let result=await command('observe'); let input=result.data.elements.find((e:any)=>e.functionalKind==='SEARCH_INPUT');
+    assert.equal((await command('type',{...binding(result.data,input),text:'fixture music',mode:'replace'})).outcome,'OK');
+    result=await command('observe');input=result.data.elements.find((e:any)=>e.functionalKind==='SEARCH_INPUT');
+    assert.equal((await command('press',{...binding(result.data,input),key:'Enter'})).outcome,'OK');
+    result=await command('observe');const link=result.data.elements.find((e:any)=>e.functionalKind==='RESULT_LINK');assert.equal(link.name,'Fixture song');
+    await command('click',binding(result.data,link));await page.waitForURL('https://fixture.example/watch');await install();
+    await page.evaluate(async () => {
+      const video=document.querySelector('video')!;const canvas=document.createElement('canvas');canvas.width=320;canvas.height=180;
+      const ctx=canvas.getContext('2d')!;let count=0;
+      (window as any).fixtureFrames=setInterval(()=>{ctx.fillStyle=count++%2?'red':'blue';ctx.fillRect(0,0,320,180);},30);
+      video.srcObject=canvas.captureStream(30);await video.play();
+      document.querySelector('#skip')!.addEventListener('click',()=>{document.querySelector('[role="status"]')!.remove();document.querySelector('#skip')!.remove();});
+    });
+    await page.waitForFunction(()=>document.querySelector('video')!.readyState>=3);
+    result=await command('observe');assert.equal(result.data.media.playback,'PLAYING');assert.equal(result.data.media.advertisement,'DETECTED');
+    const skip=result.data.elements.find((e:any)=>e.functionalKind==='AD_SKIP');assert.ok(skip);
+    assert.equal((await command('click',binding(result.data,skip))).outcome,'OK');
+    result=await command('observe');assert.equal(result.data.media.playback,'PLAYING');assert.equal(result.data.media.advertisement,'UNKNOWN');
+    let media=result.data.elements.find((e:any)=>e.functionalKind==='MEDIA_ELEMENT');assert.ok(media);
+    assert.equal((await command('media',{...binding(result.data,media),action:'pause'})).outcome,'OK');
+    result=await command('observe');assert.equal(result.data.media.playback,'PAUSED');
+    media=result.data.elements.find((e:any)=>e.functionalKind==='MEDIA_ELEMENT');
+    assert.equal((await command('media',{...binding(result.data,media),action:'play'})).outcome,'OK');
+    result=await command('observe');assert.equal(result.data.media.playback,'PLAYING');
+  } finally { await browser.close(); }
+});
+
 test('compiled MV3 content script in real Chromium: scope, privacy, append, stale refs, manual CAPTCHA and revocation', async t => {
   let executable = process.env.TEST_BROWSER_EXECUTABLE;
   if (!executable) { try { await access(chromium.executablePath()); } catch { try { await access('/usr/bin/chromium'); executable = '/usr/bin/chromium'; } catch { t.skip('Install Chromium for compiled content integration'); return; } } }

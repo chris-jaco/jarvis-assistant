@@ -62,3 +62,7 @@ test('completed browser actions and fresh observations remain separate from reco
     assert.ok(JARVIS_INSTRUCTIONS.includes(instruction), instruction);
   }
 });
+
+test('search/media instructions require explicit capabilities, actual playback and one silent bounded ad poll', () => {
+  for (const instruction of ['TYPE_SEARCH', 'SUBMIT_SEARCH', 'formularios POST', 'media.playback es PLAYING', 'ese PLAYING puede ser el anuncio', 'UNKNOWN no significa ausencia de anuncio', 'browser.waitForMedia una sola vez', 'sin tres decisiones ni narraciones', 'No vuelvas a llamarlo para prolongar', 'no prometas saltarlo después', 'MEDIA_USER_GESTURE sólo indica rechazo real']) assert.ok(JARVIS_INSTRUCTIONS.includes(instruction), instruction);
+});

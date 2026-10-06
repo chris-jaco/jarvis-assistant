@@ -224,7 +224,7 @@ test('attached search labels never authorize POST/custom button clicks on person
     try {
       const observed: any = await f.run('observe'); const button = observed.data.elements.find((el: any) => el.role === 'button');
       const result: any = await f.run('click', { documentId: observed.data.documentId, snapshotId: observed.data.snapshotId, ref: button.ref });
-      assert.equal(result.outcome, 'REQUIRES_USER_INTERACTION'); assert.equal(result.reason, 'UNSUPPORTED_CONTROL'); assert.equal(clicks, 0);
+      assert.equal(button.action, 'blocked'); assert.equal(result.outcome, 'ERROR'); assert.equal(result.code, 'REJECTED'); assert.equal(clicks, 0);
     } finally { f.close(); }
   }
 });
@@ -539,5 +539,23 @@ test('tool telemetry keeps sanitized conflict reasons and stage durations withou
     assert.ok(typeof conflict.timings?.queueMs === 'number'); assert.ok(typeof conflict.timings?.transportMs === 'number');
     assert.equal(conflict.timings?.injectionMs, 3); assert.equal(conflict.timings?.initializationMs, 2); assert.equal(conflict.timings?.returnMs, 1);
     assert.ok(!JSON.stringify(rows).includes('PRIVATE')); assert.ok(!JSON.stringify(rows).includes('fixture.example'));
+  } finally { f.h.close(); }
+});
+
+test('production waitForMedia is reversible WRITE; skip uses Phase 1 once and returns verified auto-observe', async () => {
+  const operations: string[] = [];
+  const f = await grantedRuntime(base => ({ ...base, request: (connection, req, signal) => { operations.push(req.operation); return base.request(connection, req, signal); } }));
+  try {
+    f.h.f.dom.window.document.body.innerHTML = '<figure><video></video><span role="status">Advertisement</span><button>Skip ad</button></figure>';
+    const video = f.h.f.dom.window.document.querySelector('video')!;
+    Object.defineProperty(video,'readyState',{value:4});
+    let skips=0; f.h.f.dom.window.document.querySelector('button')!.addEventListener('click',()=>{++skips;f.h.f.dom.window.document.querySelector('span')!.remove();f.h.f.dom.window.document.querySelector('button')!.remove();});
+    operations.length=0; const result=await f.invoke('waitForMedia');
+    assert.equal(result.status,'success');assert.equal(result.data.skip.action.status,'COMPLETED');assert.equal(result.data.skip.observation.status,'OK');
+    assert.equal(result.data.skip.observation.data.media.advertisement,'UNKNOWN');assert.equal(skips,1);
+    assert.deepEqual(operations,['observe','click','observe']);
+    const row=f.executor.telemetry.snapshot().find(row=>row.toolId==='browser.waitForMedia')!;
+    assert.equal(row.permission,'WRITE');assert.equal(row.confirmationRequired,false);
+    assert.ok(!JSON.stringify(row).includes('Advertisement'));
   } finally { f.h.close(); }
 });

@@ -17,6 +17,7 @@ export function navigationUrl(raw: string): string {
 export function displayUrl(raw: string): string {
   try { const url = new URL(raw); if (!['http:', 'https:'].includes(url.protocol)) return 'about:blank'; return url.origin + (secret.test(url.pathname) ? '/[redacted]' : url.pathname.slice(0, 200)); } catch { return 'about:blank'; }
 }
+export function consequentialControl(name: string): boolean { return consequential.test(name); }
 export function classifyElement(element: { tag: string; role: string; name: string; type: string; href?: string; search: boolean; disabled: boolean; cookieDialog?: boolean }): BrowserActionClass {
   if (element.disabled || consequential.test(element.name) || ['password', 'file', 'email', 'tel', 'hidden'].includes(element.type)) return 'blocked';
   // Only decline optional tracking / accept necessary cookies in a detected cookie
