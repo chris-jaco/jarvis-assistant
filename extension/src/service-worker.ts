@@ -1,3 +1,6 @@
+import { PopupDiagnostics } from '../../src/diagnostics/popup.js';
+const accessDiagnostics=new PopupDiagnostics(undefined,true);
+void chrome.storage.local.get('atlasPopupDiagnostics').then(value=>{accessDiagnostics.enabled=value.atlasPopupDiagnostics===true;}).catch(()=>{accessDiagnostics.enabled=false;});
 import { SiteAuthorization } from './site-authorization.js';
 import { chromeSiteEnvironment } from './site-storage.js';
 import { popupSender } from './senders.js';
@@ -17,7 +20,7 @@ const controller = new ExtensionController({
   history: async (id, action) => { if (action === 'reload') await chrome.tabs.reload(id); else if (action === 'back') await chrome.tabs.goBack(id); else await chrome.tabs.goForward(id); },
   invalidate,
   content: (id, grant, request) => contentRequest(chrome, () => controller.epoch, id, grant, request)
-}, message => { if (port) { try { port.postMessage(message); } catch { /* Disconnect resets grants below. */ } } void badge(); }, Date.now, () => crypto.randomUUID(), sites);
+}, message => { if (port) { try { port.postMessage(message); } catch { /* Disconnect resets grants below. */ } } void badge(); }, Date.now, () => crypto.randomUUID(), sites,accessDiagnostics);
 async function badge() { await chrome.action.setBadgeText({ text: controller.pending().length ? '?' : controller.authorized().length ? 'ON' : '' }); await chrome.action.setBadgeBackgroundColor({ color: '#35E6D0' }); }
 function connect(): void {
   clearTimeout(reconnect);
@@ -44,23 +47,23 @@ function connect(): void {
   } catch { reconnect = setTimeout(connect, delay); delay = Math.min(delay * 2, 5000); }
 }
 const popupRequest = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('state') }).strict(),
-  z.object({ action: z.literal('approve'), id: z.string().uuid(), origin: z.string().url().max(300), always: z.boolean() }).strict(),
-  z.object({ action: z.literal('revokeSite'), origin: z.string().url().max(300) }).strict(),
-  ...['revoke','renew','deny'].map(action => z.object({ action: z.literal(action), id: z.string().uuid() }).strict())
+  z.object({ correlationId:z.string().uuid().optional(),action: z.literal('state') }).strict(),
+  z.object({ correlationId:z.string().uuid().optional(),action: z.literal('approve'), id: z.string().uuid(), origin: z.string().url().max(300), always: z.boolean() }).strict(),
+  z.object({ correlationId:z.string().uuid().optional(),action: z.literal('revokeSite'), origin: z.string().url().max(300) }).strict(),
+  ...['revoke','renew','deny'].map(action => z.object({ correlationId:z.string().uuid().optional(),action: z.literal(action), id: z.string().uuid() }).strict())
 ] as unknown as [z.ZodObject, z.ZodObject, ...z.ZodObject[]]);
 chrome.runtime.onMessage.addListener((raw, sender, send) => {
   // Only our packaged popup can authorize. Content scripts/pages cannot.
   if (!popupSender(sender, chrome.runtime.id, chrome.runtime.getURL('popup.html'))) return false;
-  void (async () => { try {
-    const message = popupRequest.parse(raw);
-    if (message.action === 'approve') await controller.approve(message.id as string, (message as {origin:string}).origin, (message as {always:boolean}).always);
+  void (async () => {const workerStarted=performance.now(); try {
+    const message = popupRequest.parse(raw);const correlationId=(message as {correlationId?:string}).correlationId;const started=performance.now();if(correlationId)accessDiagnostics.event(correlationId,'worker_handler_entered','START');
+    if (message.action === 'approve') await controller.approve(message.id as string, (message as {origin:string}).origin, (message as {always:boolean}).always,correlationId);
     if (message.action === 'revokeSite') await sites.revoke((message as {origin:string}).origin);
     if (message.action === 'revoke') await controller.revoke(message.id as string);
     if (message.action === 'renew') await controller.renew(message.id as string);
     if (message.action === 'deny') controller.deny(message.id as string);
-    await badge(); const [current] = await chrome.tabs.query({ active: true, currentWindow: true }); const currentOrigin = current?.url && /^https?:/.test(current.url) ? new URL(current.url).origin : 'Página no soportada'; send({ currentOrigin, connected: !!port && !!controller.epoch, pending: await controller.preparePending(), authorized: controller.authorized(), sites: await sites.list() });
-  } catch { send({ error: 'No se pudo completar el cambio de acceso. Revisá la pestaña, el permiso de Chrome y los sitios permitidos; no se asumió aprobación.' }); } })(); return true;
+    await badge(); const [current] = await chrome.tabs.query({ active: true, currentWindow: true }); const currentOrigin = current?.url && /^https?:/.test(current.url) ? new URL(current.url).origin : 'Página no soportada'; const response={ currentOrigin, connected: !!port && !!controller.epoch, pending: await controller.preparePending(), authorized: controller.authorized(), sites: await sites.list() };if(correlationId)accessDiagnostics.event(correlationId,'state_ready','OK',performance.now()-started);send(response);
+  } catch {if(typeof raw?.correlationId==='string')accessDiagnostics.event(raw.correlationId,'state_ready','FAILED',performance.now()-workerStarted); send({ error: 'No se pudo completar el cambio de acceso. Revisá la pestaña, el permiso de Chrome y los sitios permitidos; no se asumió aprobación.' }); } })(); return true;
 });
 chrome.tabs.onRemoved.addListener(id => { for (const grant of controller.grants.values()) if (grant.chromeId === id) void controller.revoke(grant.scopeId).then(badge); });
 chrome.tabs.onUpdated.addListener((id, change) => { if (change.status === 'loading') void controller.documentChanged(id); });

@@ -1,3 +1,6 @@
+import { PopupDiagnostics } from '../diagnostics/popup.js';
+import { actionOutcomeSchema, outcomeInstruction } from '../browser/action-outcome.js';
+import type { BrowserExecutionState } from '../browser/execution-state.js';
 import { browserExecutionStateSchema, executionInstruction } from '../browser/execution-state.js';
 import { BrowserContinuation } from './browser-continuation.js';
 import { browserTracer, browserCode, isBrowserTool } from '../diagnostics/browser.js';
@@ -11,7 +14,7 @@ import type { ToolResult } from '../tools/types.js';
 import type { ToolActivity } from '../tools/telemetry.js';
 setSensitiveDataLoggingEnabled(false);
 export interface PendingConfirmation { confirmationId: string; summary: string; expiresAt: number }
-interface Descriptor { id: string; description: string; inputSchema: unknown }
+interface Descriptor { permission?:'READ'|'WRITE'|'SENSITIVE'; id: string; description: string; inputSchema: unknown }
 export async function toolRequest(path: string, data?: unknown, method = 'POST', browserRequest?: { sequence: number; response(call: string): void }): Promise<unknown> {
   const response = await fetch(`/api/tools/${path}`, { method, headers: { 'Content-Type': 'application/json', ...(browserRequest ? { 'X-Atlas-Browser-Request': String(browserRequest.sequence) } : {}) },
     ...(data === undefined ? {} : { body: JSON.stringify(data) }), signal: AbortSignal.timeout(30_000) });
@@ -23,6 +26,8 @@ export async function toolRequest(path: string, data?: unknown, method = 'POST',
 export class VoiceToolBridge {
   pending: PendingConfirmation | null = null;
   get confirmationActive(): boolean { return Boolean(this.pending || this.decisionInFlight || this.intentInFlight); }
+  private presentationRevision=0;private browserInvocations=0;
+  private present(raw:unknown):void {const parsed=z.object({executionState:browserExecutionStateSchema,revision:z.number().int().positive().optional(),taskActive:z.boolean().optional()}).passthrough().safeParse(raw);if(!parsed.success)return;const state=parsed.data;if(state.revision!==undefined){if(state.revision<=this.presentationRevision)return;this.presentationRevision=state.revision;}if(state.taskActive!==false||state.executionState==='WAITING_CONFIRMATION')this.presentation?.state(state.executionState);}
   private armed = false;
   private decisionInFlight = false;
   private intentRevision = 0;
@@ -35,14 +40,16 @@ export class VoiceToolBridge {
   private trace: TraceSink = () => {};
   private browserTrace: BrowserDiagnosticSink = () => {};
   private browserSequence = 0;
-  private browserContinuation = new BrowserContinuation((handoffId, utterance) => toolRequest('browser-resume', { handoffId, utterance }), message => { if (!this.closed) this.notify(message); });
+  private readonly accessDiagnostics=new PopupDiagnostics();
+  private browserContinuation = new BrowserContinuation((handoffId, utterance) => toolRequest('browser-resume', { handoffId, utterance }), message => { if (!this.closed) this.notify(message); },this.accessDiagnostics);
   private diagnostic(event: string, reason: string, extra: Partial<ConfirmationTrace> = {}): void {
     this.trace({ event, reason, pendingId: this.pending?.confirmationId, armed: this.armed, promptResponseId: this.promptPlayback?.responseId, ...extra });
   }
   constructor(private readonly activity: (rows: ToolActivity[], pending: PendingConfirmation | null) => void,
-    private readonly notify: (message: string) => void, private readonly traceSink?: TraceSink, private readonly browserSink?: BrowserDiagnosticSink) {}
+    private readonly notify: (message: string) => void, private readonly traceSink?: TraceSink, private readonly browserSink?: BrowserDiagnosticSink, private readonly presentation?: {state(state:BrowserExecutionState):void;tool(browser:boolean):void}) {}
   async initialize() {
-    const config = await toolRequest('session', {}) as { tools: Descriptor[]; timezone: string; now: string; confirmationTrace?: boolean; browserTrace?: boolean };
+    const config = await toolRequest('session', {}) as { tools: Descriptor[]; timezone: string; now: string; confirmationTrace?: boolean; browserTrace?: boolean; accessTrace?:boolean;browserPresentation?:boolean };
+    this.accessDiagnostics.enabled=config.accessTrace===true;
     this.browserTrace = browserTracer(config.browserTrace === true, this.browserSink);
     this.trace = confirmationTracer(config.confirmationTrace === true, this.traceSink);
     this.diagnostic('bridge.initialize', 'trace_enabled');
@@ -54,11 +61,14 @@ export class VoiceToolBridge {
         parameters: z.object({ inputJson: z.string() }), timeoutMs: 30_000,
         execute: async ({ inputJson }, _context, details) => {
           if (this.closed) return { status: 'error', message: 'Sesión cerrada.' };
+
           // Realtime may request another tool before asynchronous user transcription.
           // Never let the model replace/execute a frozen action while it awaits a decision.
           if (this.decisionInFlight || this.intentInFlight) { this.diagnostic('tool.invoke', this.intentInFlight ? 'blocked_while_classifying' : 'blocked_while_deciding'); return { status: 'awaiting_execution', message: 'La decisión está en procesamiento. Espera el resultado del backend; todavía no hay éxito confirmado. No repitas la acción.' }; }
           if (this.pending) { this.diagnostic('tool.invoke', 'blocked_while_pending'); return { status: 'pending', ...this.pending }; }
           let input: unknown; try { input = JSON.parse(inputJson); } catch { return { status: 'error', message: 'JSON inválido.' }; }
+          this.presentation?.tool(descriptor.id.startsWith('browser.')&&config.browserPresentation!==false);
+          if(descriptor.id.startsWith('browser.'))++this.browserInvocations;
           const sequence = ++this.browserSequence; const browserTool = config.browserTrace === true && isBrowserTool(descriptor.id) ? descriptor.id : undefined;
           const browserStarted = performance.now(); let browserCall: string | undefined;
           if (browserTool) this.browserTrace({ stage: 'realtime_received', code: 'RUNNING', elapsedMs: 0, clientRequest: sequence, tool: browserTool });
@@ -69,15 +79,16 @@ export class VoiceToolBridge {
             if (this.closed) { browserResult('CLOSED'); return { status: 'error', message: 'Sesión cerrada.' }; }
             this.pending = result.status === 'pending' ? result : null; this.armed = false; this.promptPlayback = undefined; this.captured.clear();
             this.diagnostic('tool.result', result.status === 'pending' ? 'prepared' : 'not_pending');
+            const receivedState=browserExecutionStateSchema.safeParse((result as unknown as {browserExecutionState?:unknown}).browserExecutionState);if(receivedState.success){const meta=result as unknown as {browserRevision?:number;browserTaskActive?:boolean};this.present({executionState:receivedState.data,revision:meta.browserRevision,taskActive:meta.browserTaskActive});}if(result.status==='pending')this.presentation?.state('WAITING_CONFIRMATION');
             await this.refresh(); browserResult(result.status === 'error' ? browserCode(result.category) : 'OK');
             if (descriptor.id.startsWith('browser.') && result.status === 'error' && result.browserRecovery) {
               return { ...result, instruction: result.browserRecovery.recoverable
                 ? 'Sin hablar: usa browserObservation si status es OK y resuelve el mismo paso con una ref nueva. Si FAILED, sólo observa para obtener contexto; no repitas acciones completadas. SNAPSHOT_CONSUMED significa contexto consumido, no cambios rápidos de página. Máximo dos recuperaciones, según el backend.'
                 : 'Detente: no quedan recuperaciones para este paso. Da sólo un error final breve; no pidas intervención manual por un CONFLICT.' };
             }
-            if (descriptor.id.startsWith('browser.')) { const state = browserExecutionStateSchema.safeParse((result as unknown as {browserExecutionState?:unknown}).browserExecutionState); if (state.success) return {...result,instruction:executionInstruction(state.data)}; }
+            if (descriptor.id.startsWith('browser.')) { const state = browserExecutionStateSchema.safeParse((result as unknown as {browserExecutionState?:unknown}).browserExecutionState); if (state.success) {const relation=(result as unknown as {browserOutcomeRelation?:string}).browserOutcomeRelation;const read=descriptor.permission==='READ'||['browser.observe','browser.verify','browser.status','browser.tabs','browser.resume'].includes(descriptor.id);const outcome=actionOutcomeSchema.safeParse((result as unknown as {browserActionOutcome?:unknown}).browserActionOutcome);return {...result,...(outcome.success&&outcome.data.execution==='EXECUTED'&&result.status==='error'&&(relation!=='LAST_ACTION'||read)?{message:'La acción fue ejecutada; falló una lectura o la devolución posterior. No repitas la acción.'}:{}),instruction:executionInstruction(state.data)+(outcome.success?' '+(relation==='LAST_ACTION'?'Última acción registrada, distinta de esta invocación READ/control o fallo de validación: ':'')+outcomeInstruction(outcome.data):'')};} }
             return result;
-          } catch { browserResult('UPSTREAM'); return { status: 'error', message: 'La herramienta no respondió. No asumas que la acción se realizó; comprueba su estado antes de repetirla.' }; }
+          } catch { browserResult('UPSTREAM');if(descriptor.id.startsWith('browser.'))this.presentation?.state('FAILED'); return { status: 'error', message: 'La herramienta no respondió. No asumas que la acción se realizó; comprueba su estado antes de repetirla.' }; }finally{if(descriptor.id.startsWith('browser.'))--this.browserInvocations;}
         } })) };
   }
   private registerPromptResponse(responseId: string): void {
@@ -229,7 +240,7 @@ export class VoiceToolBridge {
       if (this.closed) return;
       if (this.pending && this.pending.confirmationId === expectedId && (!data.pending || data.pending.confirmationId !== this.pending.confirmationId)) { this.diagnostic('activity.refresh', 'backend_pending_missing_or_changed'); this.pending = null; this.armed = false; }
       this.activity(data.activity, this.pending);
-      if (data.browser) this.browserContinuation.update(data.browser, this.confirmationActive);
+      if (data.browser) {const state=browserExecutionStateSchema.safeParse((data.browser as {executionState?:unknown}).executionState);if(state.success&&this.browserInvocations===0)this.present(data.browser);this.browserContinuation.update(data.browser, this.confirmationActive);}
     } catch { /* Polling never breaks voice playback. Tool requests report failures. */ }
   }
   close(): void { this.diagnostic('bridge.close', 'session_closed'); this.closed = true; this.browserContinuation.close(); this.observedResponses.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE').catch(() => undefined); }

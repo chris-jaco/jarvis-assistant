@@ -1,3 +1,4 @@
+import { PresentationGate } from './presentation-gate.js';
 import { OpenAIRealtimeWebRTC, RealtimeAgent, RealtimeSession } from '@openai/agents-realtime';
 import { ASSISTANT_NAME, JARVIS_INSTRUCTIONS, REALTIME_MODEL, JARVIS_VOICE, TURN_EAGERNESS } from '../core/personality.js';
 import type { VoiceProvider, ProviderObserver, TranscriptEntry } from '../core/provider.js';
@@ -7,6 +8,7 @@ import { SessionMetrics } from '../telemetry/session.js';
 
 class ClientError extends Error {}
 export class OpenAIVoiceProvider implements VoiceProvider {
+  private presentation?:PresentationGate;
   private session?: RealtimeSession;
   private tools?: VoiceToolBridge;
   private memory?: VoiceMemoryBridge;
@@ -51,7 +53,8 @@ export class OpenAIVoiceProvider implements VoiceProvider {
         throw new ClientError('No se pudo autorizar esta conversación.');
       }
       if (!current()) return;
-      const bridge = new VoiceToolBridge((rows, pending) => { if (current()) this.observer.tools?.(rows, pending); }, message => { if (current()) this.session?.sendMessage(message); });
+      const gate=new PresentationGate(muted=>{this.audio.muted=muted;});this.presentation=gate;
+      const bridge = new VoiceToolBridge((rows, pending) => { if (current()) this.observer.tools?.(rows, pending); }, message => { if (current()&&this.session){const id=crypto.randomUUID();gate.internal(id);this.session.sendMessage(message,{item:{id,type:'message',role:'user',content:[{type:'input_text',text:message}]}});} },undefined,undefined,{state:state=>gate.update(state),tool:browser=>{gate.tool();if(browser)gate.beginBrowser();}});
       this.tools = bridge;
       const toolConfig = await bridge.initialize();
       if (!current()) { bridge.close(); return; }
@@ -80,6 +83,21 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       });
       session.on('transport_event', event => {
         if (!current()) return;
+        const raw=event as unknown as {response_id?:unknown;response?:unknown};
+        const response=raw.response as {id?:string;output?:{type?:string;id?:string}[]}|undefined;
+        const responseId=typeof raw.response_id==='string'?raw.response_id:response?.id;
+        if(event.type==='response.created'&&responseId)gate.response(responseId);
+        if(event.type==='response.output_item.added'&&responseId){const item=event.item as {id?:string;type?:string}|undefined;if(item?.id)gate.item(responseId,item.id);if(item?.type==='function_call')gate.tool();}
+        if(event.type==='input_audio_buffer.speech_started')gate.turn(bridge.confirmationActive);
+        if(event.type==='output_audio_buffer.started')gate.playback(responseId);
+        if(event.type==='response.done'&&responseId&&gate.done(responseId)){
+          // Fresh ordinary response after a silent routing turn. No buffered
+          // audio or hidden narration is replayed. Browser RUNNING never enters here.
+          // This completed admission response had no tools: discard only its
+          // remaining server audio, without cancelling any response/function.
+          transport.sendEvent({type:'output_audio_buffer.clear'});
+          transport.sendEvent({type:'response.create',response:{tool_choice:'none',instructions:baseInstructions+'\n'+memoryContext+'\nRespondé ahora al último pedido real del usuario, de forma natural y breve. No hagas acknowledgement del turno interno ni repitas narración previa.'}});
+        }
         void bridge.transportEvent(event).catch(() => undefined);
         if (event.type === 'input_audio_buffer.speech_started' && typeof event.item_id === 'string') memory.speechStarted(event.item_id);
         if (event.type === 'conversation.item.input_audio_transcription.completed' && typeof event.item_id === 'string' && typeof event.transcript === 'string') {
@@ -96,7 +114,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
           case 'response.created': if (!speaking && this.visualState !== 'listening') this.state('thinking'); break;
           case 'response.done': if (!speaking && this.visualState === 'thinking') this.state('connected'); break;
           // Playback events reflect actual WebRTC audio buffering, not response generation.
-          case 'output_audio_buffer.started': speaking = true; this.state('speaking'); break;
+          case 'output_audio_buffer.started': speaking = gate.audible(responseId); if(speaking)this.state('speaking');else if(this.visualState!=='listening')this.state('thinking');break;
           case 'output_audio_buffer.stopped':
           case 'output_audio_buffer.cleared':
             speaking = false; if (this.visualState !== 'listening') this.state('connected'); break;
@@ -108,7 +126,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
         if (!current()) return;
         const entries: TranscriptEntry[] = [];
         for (const item of history) {
-          if (item.type !== 'message' || (item.role !== 'user' && item.role !== 'assistant')) continue;
+          if (item.type !== 'message' || (item.role !== 'user' && item.role !== 'assistant') ||item.role==='user'&&!gate.userVisible(item.itemId)|| item.role==='assistant'&&!gate.visible(item.itemId)) continue;
           const text = item.content.map(part => {
             if ('text' in part && typeof part.text === 'string') return part.text;
             if ('transcript' in part && typeof part.transcript === 'string') return part.transcript;
@@ -137,6 +155,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
   disconnect(): void {
     ++this.generation;
     this.active = false;
+    this.presentation?.close();this.presentation=undefined;
     this.memory?.close(); this.memory = undefined;
     this.tools?.close(); this.tools = undefined;
     this.observer.tools?.([], null);

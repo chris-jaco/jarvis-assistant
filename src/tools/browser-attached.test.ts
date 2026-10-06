@@ -561,3 +561,40 @@ test('production waitForMedia is reversible WRITE; skip uses Phase 1 once and re
     assert.ok(!JSON.stringify(row).includes('Advertisement'));
   } finally { f.h.close(); }
 });
+
+test('normalized completed action survives failed post-READ and later observe; verification never repeats type',async()=>{
+ const h=harness();let writes=0,failReads=false;const base=h.transport;
+ const transport:BrowserTransport={...base,request:async(connection,request,signal)=>{if(request.operation==='observe'&&failReads)return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};const reply=await base.request(connection,request,signal);if(request.operation==='type'){++writes;failReads=true;}return reply;}};
+ const provider=new AttachedChromeProvider(transport);const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{
+  await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);const seen=await provider.observe(signal());const input={ref:seen.elements[0]!.ref,text:'Fixture',mode:'replace'};
+  const type=adapter.tools().find(t=>t.id==='browser.type')!;const result:any=await type.execute(input,signal());assert.equal(result.action.status,'COMPLETED');assert.equal(result.actionOutcome.outcome,'ACTION_EXECUTED_UNVERIFIED');assert.equal(result.observation.status,'FAILED');
+  await assert.rejects(provider.observe(signal()),/UPSTREAM/);assert.equal(provider.state(session).actionOutcome!.execution,'EXECUTED');
+  const verify=adapter.tools().find(t=>t.id==='browser.verify')!;for(let i=0;i<2;i++){const checked:any=await verify.execute({},signal());assert.equal(checked.actionOutcome.outcome,'ACTION_EXECUTED_UNVERIFIED');}await assert.rejects(verify.execute({},signal()),/LIMIT/);
+  const duplicate:any=await type.execute(input,signal());assert.equal(duplicate.actionOutcome.execution,'EXECUTED');assert.equal(writes,1);
+ });}finally{await provider.close();h.close();}
+});
+test('cancellation after ACK preserves known execution; lost mutation response stays UNKNOWN and never retries',async()=>{
+ for(const uncertain of [false,true]){
+  const h=harness();const base=h.transport;let writes=0;const controller=new AbortController();
+  const transport:BrowserTransport={...base,request:async(connection,request,signal)=>{const result=await base.request(connection,request,signal);if(request.operation==='type'){++writes;if(uncertain)return {outcome:'ERROR',code:'EXECUTION_UNKNOWN'};}if(request.operation==='observe'&&writes&&!uncertain)controller.abort();return result;}};
+  const provider=new AttachedChromeProvider(transport);const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+  try{await adapter.inSession(session,async()=>{
+   await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);const seen=await provider.observe(signal());const type=adapter.tools().find(t=>t.id==='browser.type')!;const input={ref:seen.elements[0]!.ref,text:'Fixture',mode:'replace'};
+   if(uncertain){await assert.rejects(type.execute(input,signal()),/EXECUTION_UNKNOWN/);assert.equal(provider.state(session).actionOutcome!.outcome,'EXECUTION_UNKNOWN');await assert.rejects(type.execute(input,signal()),/EXECUTION_UNKNOWN/);}
+   else{const result:any=await type.execute(input,controller.signal);assert.equal(result.actionOutcome.execution,'EXECUTED');assert.equal(result.observation.status,'FAILED');}
+   assert.equal(writes,1);
+  });}finally{await provider.close();h.close();}
+ }
+});
+
+test('outer ToolExecutor timeout after known mutation cannot erase execution evidence',async()=>{
+ const h=harness();const base=h.transport;let writes=0;
+ const transport:BrowserTransport={...base,request:async(connection,request,signal)=>{
+  if(request.operation==='observe'&&writes)return new Promise<Reply>((_resolve,reject)=>{signal.addEventListener('abort',()=>reject(new Error('timeout')),{once:true});});
+  const reply=await base.request(connection,request,signal);if(request.operation==='type')++writes;return reply;
+ }};
+ const provider=new AttachedChromeProvider(transport);const adapter=new BrowserAdapter(provider);const registry=new ToolRegistry();registry.add({integration:'browser',transport:'local',tools:()=>adapter.tools().map(tool=>({...tool,timeoutMs:20}))});const executor=new ToolExecutor(registry);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);const seen=await provider.observe(signal());const result=await executor.invoke(id(),'browser.type',{ref:seen.elements[0]!.ref,text:'Fixture',mode:'replace'});assert.equal(result.status,'error');await new Promise<void>(resolve=>setImmediate(resolve));assert.equal(adapter.state(session)!.actionOutcome!.execution,'EXECUTED');assert.equal(adapter.state(session)!.actionOutcome!.outcome,'ACTION_EXECUTED_UNVERIFIED');assert.equal(writes,1);});}
+ finally{executor.close();await provider.close();h.close();}
+});

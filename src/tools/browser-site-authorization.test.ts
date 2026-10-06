@@ -1,3 +1,4 @@
+import { PopupDiagnostics } from '../diagnostics/popup.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID as id } from 'node:crypto';
@@ -19,12 +20,12 @@ function storage() {
   const env:SiteEnvironment={load:async()=>structuredClone(file),save:async value=>{file=structuredClone(value);},contains:async p=>permissions.has(p),remove:async p=>permissions.delete(p)};
   return {env,permissions,invalidations,policy:()=>new SiteAuthorization(env,async origin=>{invalidations.push(origin);})};
 }
-function runtime() {
+function runtime(diagnostics?:PopupDiagnostics) {
   const store=storage(); let controller:ExtensionController; let reads=0,navigations=0,invalidations=0; const events:any[]=[];const listeners=new Set<(connection:string,event:any)=>void>();const connection=id();
   const tab={id:7,url:A+'/',title:'Fixture',status:'complete'};
   const policy=new SiteAuthorization(store.env,async origin=>controller.revokeOrigin(origin));
   const surface:Surface={current:async()=>tab,tab:async()=>tab,create:async url=>{tab.url=url;return tab.id;},activate:async()=>{},navigate:async(_,url)=>{++navigations;tab.url=url;},history:async()=>{},invalidate:async()=>{++invalidations;},content:async(_tab,grant)=>{++reads;return {outcome:'OK',data:{tabId:grant.tabId,scopeId:grant.scopeId,truncated:false,title:'Fixture',url:grant.origin+'/',documentId:id(),snapshotId:id(),expiresAt:Date.now()+15000,elements:[]}};}};
-  controller=new ExtensionController(surface,event=>{events.push(event);for(const listener of listeners)listener(connection,event);},Date.now,id,policy);
+  controller=new ExtensionController(surface,event=>{events.push(event);for(const listener of listeners)listener(connection,event);},Date.now,id,policy,diagnostics);
   const session=id(),task=id(); let epoch=id();
   const req=(operation:string,args:unknown={},extra:object={})=>({protocol:'atlas.browser',version:1,kind:'request',requestId:id(),backendSessionId:session,taskId:task,connectionEpoch:epoch,deadlineAt:Date.now()+20000,operation,args,...extra});
   const reset=async()=>{epoch=id();await controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});};
@@ -96,7 +97,7 @@ test('packaged popup lists/revokes sites and requests granular permission direct
   const html=await readFile('extension/popup.html','utf8'),script=await readFile('dist/extension/popup.js','utf8');const dom=new JSDOM(html,{runScripts:'outside-only'});const calls:any[]=[];let removed=()=>{};
   const state={connected:true,pending:[{id:id(),origin:A,tabSelected:true,purpose:'Fixture',lifetime:'task'}],authorized:[],sites:[{origin:B,allowed:true}]};
   (dom.window as any).chrome={runtime:{sendMessage:async(x:any)=>{calls.push(x);return state;}},permissions:{request:(x:any)=>{calls.push({request:x});return Promise.resolve(true);},onRemoved:{addListener:(fn:()=>void)=>{removed=fn;}},onAdded:{addListener:()=>{}}}};
-  try {(dom.window as any).hostPattern=hostPattern;dom.window.eval(script.replace(/^import .*;$/m,''));await new Promise(resolve=>setTimeout(resolve,0));assert.match(dom.window.document.querySelector('#sites')!.textContent!,/second.example.*ALLOW/);
+  try {(dom.window as any).hostPattern=hostPattern;(dom.window as any).PopupDiagnostics=PopupDiagnostics;Object.defineProperty(dom.window.crypto,'randomUUID',{value:id});dom.window.eval(script.replace(/^import .*;$/gm,''));await new Promise(resolve=>setTimeout(resolve,0));assert.match(dom.window.document.querySelector('#sites')!.textContent!,/second.example.*ALLOW/);
     const buttons=[...dom.window.document.querySelectorAll('button')];buttons.find(b=>b.textContent==='Permitir siempre este sitio')!.click();assert.equal(JSON.stringify(calls.at(-1)),JSON.stringify({request:{origins:[A+'/*']}}));await new Promise(resolve=>setTimeout(resolve,0));assert.ok(calls.some(c=>c.action==='approve'&&c.always&&c.origin===A));
     [...dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Revocar')!.click();await new Promise(resolve=>setTimeout(resolve,0));assert.ok(calls.some(c=>c.action==='revokeSite'&&c.origin===B));const n=calls.length;removed();await new Promise(resolve=>setTimeout(resolve,0));assert.ok(calls.length>n);
   }finally{dom.window.close();}
@@ -126,4 +127,14 @@ test('continuation never resumes from FAILED or WAITING state, even if an old re
   const messages:string[]=[];const continuation=new BrowserContinuation(async()=>({outcome:'OK',data:{completed:true}}),text=>messages.push(text));
   for(const executionState of ['FAILED','WAITING_ACCESS','WAITING_CONFIRMATION','WAITING_MANUAL'] as const)continuation.update({workflow:null,ready:id(),executionState},false);
   assert.equal(messages.length,0);continuation.update({workflow:null,ready:id(),executionState:'RUNNING'},false);assert.equal(messages.length,1);assert.match(messages[0]!,/sin acknowledgement/);
+});
+
+test('opt-in authorization diagnostics correlate policy/grant/post/backend/continuation/next READ without private metadata',async()=>{
+ const rows:import('../diagnostics/popup.js').PopupTrace[]=[];const diagnostics=new PopupDiagnostics(row=>rows.push(row));diagnostics.enabled=true;const r=runtime(diagnostics);await r.reset();r.store.permissions.add(hostPattern(A));const provider=new AttachedChromeProvider(r.transport,true,undefined,undefined,diagnostics);const correlation=id();const notifications:string[]=[];
+ try{await provider.inSession(r.session,async()=>{
+  const pending:any=await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},new AbortController().signal);await r.controller.approve(pending.accessRequestId,A,true,correlation);
+  const continuation=new BrowserContinuation(async()=>({outcome:'OK',data:{completed:true}}),message=>notifications.push(message),diagnostics);continuation.update({...provider.state(r.session),executionState:'RUNNING',taskActive:true,revision:1},false);await provider.observe(new AbortController().signal);
+  for(const stage of ['policy_saved','grant_created','notification_posted','backend_received','continuation_sent','next_task_tool'])assert.ok(rows.some(row=>row.stage===stage&&row.correlationId===correlation),stage);
+  assert.ok(!JSON.stringify(rows).includes(A));assert.ok(rows.every(row=>Object.keys(row).every(key=>['correlationId','stage','outcome','durationMs'].includes(key))));assert.equal(notifications.length,1);
+ });}finally{await provider.close();}
 });

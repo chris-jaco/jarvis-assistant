@@ -1,3 +1,4 @@
+import type { PopupDiagnostics } from '../../src/diagnostics/popup.js';
 import { parseRequest, replySchema, helloSchema, cancelSchema } from '../../src/browser/attached/protocol.js';
 import type { Request, Reply, AuthorizedTab } from '../../src/browser/attached/protocol.js';
 import { navigationUrl, displayUrl, privateText } from '../../src/browser/policy.js';
@@ -20,7 +21,7 @@ export class ExtensionController {
   private results = new Map<string, { signature: string; result: Promise<Reply>; session: string }>();
   private cancelled = new Set<string>(); private ended = new Set<string>(); private endedTasks = new Set<string>(); private tail: Promise<unknown> = Promise.resolve();
   private approving = false; private activeTasks = new Set<string>();
-  constructor(private readonly surface: Surface, private readonly emit: (event: unknown) => void, private readonly now = Date.now, private readonly id = () => crypto.randomUUID(), private readonly sites?: Pick<SiteAuthorization, 'allows' | 'allowAlways'>) {}
+  constructor(private readonly surface: Surface, private readonly emit: (event: unknown) => void, private readonly now = Date.now, private readonly id = () => crypto.randomUUID(), private readonly sites?: Pick<SiteAuthorization, 'allows' | 'allowAlways'>, private readonly diagnostics?:PopupDiagnostics) {}
   async reset(raw?: unknown): Promise<void> {
     this.epoch = raw === undefined ? undefined : helloSchema.parse(raw).connectionEpoch;
     const old = [...this.grants.values()]; this.grants.clear(); this.tickets.clear(); this.results.clear(); this.cancelled.clear(); this.ended.clear(); this.endedTasks.clear(); this.activeTasks.clear();
@@ -54,12 +55,12 @@ export class ExtensionController {
   expire(): void { this.cleanup(); }
   pending(): { id: string; purpose: string; lifetime: string; origin?: string; tabSelected?: boolean }[] { this.cleanup(); return [...this.tickets.values()].map(ticket => ({ id: ticket.id, purpose: privateText(String(ticket.request.args.purpose), 160), lifetime: String(ticket.request.args.lifetime), ...(ticket.origin ? { origin: ticket.origin } : {}) })); }
   authorized(): AuthorizedTab[] { this.cleanup(); return [...this.grants.values()].map(grant => this.dto(grant)); }
-  async approve(ticketId: string, expectedOrigin?: string, always = false): Promise<void> {
+  async approve(ticketId: string, expectedOrigin?: string, always = false, correlationId?:string): Promise<void> {
     if (this.approving) throw new Error('REJECTED');
     this.approving = true;
-    try { await this.approveOnce(ticketId, expectedOrigin, always); } finally { this.approving = false; }
+    try { await this.approveOnce(ticketId, expectedOrigin, always,correlationId); } finally { this.approving = false; }
   }
-  private async approveOnce(ticketId: string, expectedOrigin?: string, always = false): Promise<void> {
+  private async approveOnce(ticketId: string, expectedOrigin?: string, always = false, correlationId?:string): Promise<void> {
     this.cleanup(); const ticket = this.tickets.get(ticketId); if (!ticket || !this.epoch || this.ended.has(ticket.request.backendSessionId) || this.endedTasks.has(ticket.request.backendSessionId + ':' + ticket.request.taskId)) throw new Error('EXPIRED');
     const epoch = this.epoch; const selected = await this.surface.current();
     const target = ticket.request.args.target as { kind: string; url?: string };
@@ -67,9 +68,11 @@ export class ExtensionController {
     navigationUrl(selected.url);
     if (this.grants.size >= 20 || [...this.grants.values()].some(grant => grant.chromeId === selected.id && grant.scopeId !== ticket.priorScope)) throw new Error('REJECTED');
     if (this.epoch !== epoch || ticket.expiresAt <= this.now() || this.ended.has(ticket.request.backendSessionId) || this.endedTasks.has(ticket.request.backendSessionId + ':' + ticket.request.taskId)) throw new Error('EXPIRED');
-    if (always) { if (!this.sites) throw new Error('ACCESS_DENIED'); await this.sites.allowAlways(siteOrigin(selected.url)); }
+    if(!always&&correlationId)this.diagnostics?.event(correlationId,'policy_saved','NOT_APPLICABLE');
+    if (always) { if (!this.sites) throw new Error('ACCESS_DENIED'); const start=performance.now();await this.sites.allowAlways(siteOrigin(selected.url));if(correlationId)this.diagnostics?.event(correlationId,'policy_saved','OK',performance.now()-start); }
     const priorExpiry = ticket.priorScope ? this.grants.get(ticket.priorScope)?.expiresAt : undefined;
     if (ticket.priorScope) await this.revoke(ticket.priorScope, ticketId);
+    const grantStarted=performance.now();
     const grant: Grant = { scopeId: this.id(), tabId: ticket.tabId ?? this.id(), chromeId: selected.id, origin: new URL(selected.url).origin, session: ticket.request.backendSessionId, task: ticket.request.taskId, lifetime: ticket.request.args.lifetime as 'task' | 'session', expiresAt: priorExpiry ?? this.now() + (ticket.request.args.lifetime === 'session' ? 30 : 15) * 60_000, title: privateText(selected.title), url: displayUrl(selected.url), persistent: always };
     if (!this.tickets.has(ticketId) || this.epoch !== epoch || ticket.expiresAt <= this.now() || this.ended.has(grant.session) || this.endedTasks.has(grant.session + ':' + grant.task) || always && !await this.sites?.allows(grant.origin)) throw new Error('ACCESS_DENIED');
     // Chrome activeTab comes from the real toolbar/popup gesture, not this method.
@@ -78,7 +81,9 @@ export class ExtensionController {
     if (!this.tickets.has(ticketId) || result.outcome === 'ERROR' || this.epoch !== epoch || this.ended.has(grant.session) || this.endedTasks.has(grant.session + ':' + grant.task) || grant.expiresAt <= this.now()) { await this.surface.invalidate(selected.id); throw new Error('ACCESS_DENIED'); }
     if (result.outcome === 'REQUIRES_USER_INTERACTION') grant.handoff = { id: result.handoffId, reason: result.reason };
     this.grants.set(grant.scopeId, grant); this.tickets.delete(ticketId);
-    this.emit({ protocol: 'atlas.browser', version: 1, kind: 'event', connectionEpoch: epoch, backendSessionId: grant.session, event: 'accessGranted', accessRequestId: ticketId, tab: this.dto(grant) });
+    if(correlationId)this.diagnostics?.event(correlationId,'grant_created','OK',performance.now()-grantStarted);
+    this.emit({ protocol: 'atlas.browser', version: 1, kind: 'event', connectionEpoch: epoch, backendSessionId: grant.session, event: 'accessGranted', accessRequestId: ticketId, tab: this.dto(grant),...(correlationId&&this.diagnostics?.enabled?{trace:{correlationId,stage:'notification_posted',outcome:'OK'}}:{}) });
+    if(correlationId)this.diagnostics?.event(correlationId,'notification_posted');
   }
   async renew(scopeId: string): Promise<void> {
     const grant = this.grants.get(scopeId); if (!grant) throw new Error('EXPIRED');

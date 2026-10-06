@@ -13,14 +13,16 @@ import type { ToolAdapter, ToolDefinition } from '../types.js';
 const empty = z.object({}).strict(); const ref = z.string().uuid();
 const url = z.string().url().max(2000);
 export class BrowserAdapter implements ToolAdapter {
+  private presentations=new Map<string,{signature:string;revision:number}>();
   private executionScope = new AsyncLocalStorage<string>();
   private executionStates = new Map<string, BrowserExecutionState>();
   private mark(state: BrowserExecutionState): void { const id = this.executionScope.getStore(); if (id) this.executionStates.set(id,state); }
   readonly integration = 'browser'; readonly transport = 'local' as const;
   constructor(private readonly provider: BrowserProvider, readonly diagnostics = new BrowserDiagnostics()) {}
+  get presentationEnabled():boolean{return this.provider instanceof AttachedChromeProvider;}
   inSession<T>(id: string, work: () => Promise<T>): Promise<T> { return this.executionScope.run(id, () => this.provider instanceof AttachedChromeProvider ? this.provider.inSession(id, work) : work()); }
-  state(id: string, confirmation = false) { const state = this.provider instanceof AttachedChromeProvider ? this.provider.state(id) : undefined; return state ? {...state,executionState:confirmation ? 'WAITING_CONFIRMATION' as const : state.accessRevoked ? 'FAILED' as const : executionState(this.executionStates.get(id) ?? 'RUNNING',state.workflow,confirmation,!!state.ready)} : undefined; }
-  endSession(id: string): Promise<void> { this.executionStates.delete(id); return this.provider instanceof AttachedChromeProvider ? this.provider.endSession(id) : Promise.resolve(); }
+  state(id: string, confirmation = false) { const state = this.provider instanceof AttachedChromeProvider ? this.provider.state(id) : undefined;if(!state)return;const result={...state,taskActive:this.executionStates.has(id),executionState:confirmation ? 'WAITING_CONFIRMATION' as const : state.accessRevoked ? 'FAILED' as const : executionState(this.executionStates.get(id) ?? 'RUNNING',state.workflow,confirmation,!!state.ready)};const signature=JSON.stringify(result);const previous=this.presentations.get(id);const revision=previous?.signature===signature?previous.revision:(previous?.revision??0)+1;this.presentations.set(id,{signature,revision});return {...result,revision}; }
+  endSession(id: string): Promise<void> { this.executionStates.delete(id);this.presentations.delete(id); return this.provider instanceof AttachedChromeProvider ? this.provider.endSession(id) : Promise.resolve(); }
   tools(): ToolDefinition[] {
     const tool = (id: string, description: string, schema: z.ZodType, execute: ToolDefinition['execute'], read = false): ToolDefinition => ({ id: `browser.${id}`, name: `browser_${id}`, description, integration: this.integration, capability: id, permission: read ? 'READ' : 'WRITE', confirm: false, schema, timeoutMs: 18_000, execute: (input, signal) => this.diagnostics.run('adapter', async () => {
       this.mark('RUNNING');
@@ -55,6 +57,7 @@ export class BrowserAdapter implements ToolAdapter {
       return [...tools.filter(tool => tool.id !== 'browser.close'),
         tool('requestAccess', 'Pide acceso a una pestaña seleccionada por el usuario. ACCESS_PENDING no es confirmación de acción ni éxito; el usuario debe pulsar el icono de la extensión. Usa lifetime task por defecto.', accessArgs, (raw, signal) => attached.requestTabAccess(raw as Parameters<typeof attached.requestTabAccess>[0], signal).then(browserState => ({ browserState }))),
         tool('revokeAccess', 'Revoca acceso a una pestaña autorizada; no cierra Chrome.', z.object({ tabId: ref }).strict(), (raw, signal) => attached.revokeTabAccess((raw as { tabId: string }).tabId, signal)),
+        tool('verify', 'Verificación READ del último efecto esperado, máximo dos intentos. Nunca reejecuta la acción.',empty,(_,signal)=>attached.verify(signal),true),
         tool('endTask', 'Termina o cancela la tarea browser actual y revoca sus grants task. No cierra tabs. Usa sólo al completar/cancelar la tarea.', empty, (_, signal) => attached.endTask(signal)),
         tool('resume', 'Server-only READ resume; not model facing.', z.object({ handoffId: ref }).strict(), (raw, signal) => attached.resume((raw as { handoffId: string }).handoffId, signal), true),
         tool('waitForMedia', 'Sólo para una tarea multimedia solicitada: hasta tres comprobaciones READ silenciosas en diez segundos; si hay un único SKIP_AD permitido lo pulsa una sola vez y devuelve su auto-observe. Nunca repitas esta tool para prolongar el polling ni repitas el skip.', empty, (_, signal) => pollMedia({ observe: s => attached.observe(s), skip: (ref, s) => attached.interact('click', { ref }, async () => { await attached.click(ref, s); return { interacted: true }; }, s) }, signal)),

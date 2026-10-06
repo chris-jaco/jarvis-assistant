@@ -1201,3 +1201,8 @@ reconexión, uninstall y pruebas A–L están en
 constituyen acceptance de tu Chrome real; V0.5.1 todavía no está publicada como
 release. Una autorización de tab y una reanudación “listo” nunca sustituyen las
 confirmaciones de acciones consecuenciales existentes.
+
+V0.5.2.1 (working tree, acceptance Windows pendiente): separa ejecución de
+verificación, aplica silencio RUNNING en audio/transcript y añade diagnostics
+opt-in del popup. La admisión añade un response en conversación sin herramientas.
+Contrato, configuración y límites en [browser-attached.md](docs/browser-attached.md#v0521--estabilización-de-resultados-y-presentación).

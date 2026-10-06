@@ -1,15 +1,18 @@
+import type { PopupDiagnostics } from '../diagnostics/popup.js';
+import { actionOutcomeSchema, outcomeInstruction } from '../browser/action-outcome.js';
 import { browserExecutionStateSchema } from '../browser/execution-state.js';
 import { z } from 'zod';
 import { uuid, replySchema } from '../browser/attached/protocol.js';
-const stateSchema = z.object({ workflow: replySchema.nullable(), ready: uuid.nullable(), executionState: browserExecutionStateSchema.optional(), accessRevoked:z.boolean().optional() }).strict();
+const stateSchema = z.object({ workflow: replySchema.nullable(), ready: uuid.nullable(), executionState: browserExecutionStateSchema.optional(), accessRevoked:z.boolean().optional(), actionOutcome:actionOutcomeSchema.nullable().optional(),accessCorrelation:uuid.nullable().optional(),revision:z.number().int().positive().optional(),taskActive:z.boolean().optional() }).strict();
 export class BrowserContinuation {
+  private revision=0;
   private handoff?: string; private ready?: string; private captured = new Map<string, string>(); private handled = new Set<string>();
-  constructor(private readonly resume: (handoffId: string, utterance: string) => Promise<unknown>, private readonly notify: (message: string) => void) {}
+  constructor(private readonly resume: (handoffId: string, utterance: string) => Promise<unknown>, private readonly notify: (message: string) => void,private readonly diagnostics?:PopupDiagnostics) {}
   update(raw: unknown, confirmationActive: boolean): void {
     const parsed = stateSchema.safeParse(raw); if (!parsed.success) return;
-    const state = parsed.data; this.handoff = state.workflow?.outcome === 'REQUIRES_USER_INTERACTION' ? state.workflow.handoffId : undefined;
+    const state = parsed.data;if(state.revision!==undefined){if(state.revision<=this.revision)return;this.revision=state.revision;} this.handoff = state.workflow?.outcome === 'REQUIRES_USER_INTERACTION' ? state.workflow.handoffId : undefined;
     if (state.executionState === 'FAILED') this.handoff = undefined;
-    if ((!state.executionState || state.executionState === 'RUNNING') && state.ready && state.ready !== this.ready && !confirmationActive) { this.ready = state.ready; this.notify('Estado del backend de browser: RUNNING, acceso/reanudación verificados. Continuá en silencio, sin acknowledgement ni narración. Continuá la tarea original de browser usando una observación nueva de la pestaña autorizada. No abras otra pestaña ni afirmes que el objetivo ya se realizó.'); }
+    if ((!state.executionState || state.executionState === 'RUNNING') && state.ready && state.ready !== this.ready && !confirmationActive) { this.ready = state.ready;if(state.accessCorrelation)this.diagnostics?.event(state.accessCorrelation,'continuation_sent'); this.notify('Estado del backend de browser: RUNNING, acceso/reanudación verificados. Continuá en silencio, sin acknowledgement ni narración. Continuá la tarea original de browser usando una observación nueva de la pestaña autorizada. No abras otra pestaña ni afirmes que el objetivo ya se realizó.' + (state.actionOutcome ? ' '+outcomeInstruction(state.actionOutcome):'')); }
   }
   speechStarted(itemId: string, confirmationActive: boolean): void { if (!confirmationActive && this.handoff && this.captured.size < 100) this.captured.set(itemId, this.handoff); }
   async transcript(itemId: string, text: string, confirmationActive: boolean): Promise<void> {

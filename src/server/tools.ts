@@ -1,3 +1,4 @@
+import { PopupDiagnostics } from '../diagnostics/popup.js';
 import { IsolatedBrowserProvider } from '../browser/isolated.js';
 import { AttachedChromeProvider } from '../browser/attached/provider.js';
 import { NativeTransport } from '../browser/attached/transport.js';
@@ -44,7 +45,8 @@ export function createToolRuntime(env: NodeJS.ProcessEnv = process.env, diagnost
   const options = browserOptions(env);
   const native = mode === 'attached' ? new NativeTransport(env.ATLAS_BROWSER_HOST_PATH, env.ATLAS_BROWSER_EXTENSION_ID, { diagnostic: line => console.info(line) }) : undefined;
   if (native && options.enabled) native.initialize();
-  const provider = native ? new AttachedChromeProvider(native, options.enabled, env.BROWSER_CONNECTION_ID, browserDiagnostics) : new IsolatedBrowserProvider(options, undefined, browserDiagnostics);
+  const accessDiagnostics=new PopupDiagnostics();accessDiagnostics.enabled=env.ATLAS_ACCESS_TRACE==='true';
+  const provider = native ? new AttachedChromeProvider(native, options.enabled, env.BROWSER_CONNECTION_ID, browserDiagnostics,accessDiagnostics) : new IsolatedBrowserProvider(options, undefined, browserDiagnostics);
   const browser = new BrowserAdapter(provider, browserDiagnostics); registry.add(browser);
   registry.add(new WebSearchAdapter(env.OPENAI_API_KEY, env.OPENAI_SEARCH_MODEL ?? 'gpt-4.1'));
   const auth = new GoogleAuth(googleConfig(env));
@@ -91,13 +93,13 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
       const id = randomBytes(32).toString('hex');
       sessions.set(id, { browserSessionId: randomUUID(), executor: new ToolExecutor(registry, dependencies.now ?? Date.now, 60_000, undefined, trace), expiresAt: Date.now() + lifetime, busy: false, seenTurns: new Set(), workingIds: [], memoryGeneration: 0, lastMemorySequence: 0, spellingEvidence: '', jobs: new Set(), closed: false });
       res.setHeader('Set-Cookie', `jarvis_session=${id}; HttpOnly; SameSite=Strict; Path=/api/tools; Max-Age=1800${origin?.startsWith('https:') ? '; Secure' : ''}`);
-      send(200, { tools: registry.descriptors().filter(tool => tool.id !== 'memory.ingest' && tool.id !== 'browser.resume'), timezone, now: new Date().toISOString(), confirmationTrace, browserTrace: browserDiagnostics.enabled }); return true;
+      send(200, { tools: registry.descriptors().filter(tool => tool.id !== 'memory.ingest' && tool.id !== 'browser.resume'), timezone, now: new Date().toISOString(), confirmationTrace, browserTrace: browserDiagnostics.enabled, accessTrace:env.ATLAS_ACCESS_TRACE==='true',browserPresentation:browser?.presentationEnabled===true }); return true;
     }
     const id = /(?:^|;\s*)jarvis_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
     const session = id ? sessions.get(id) : undefined;
     if (!session) { send(401, { error: 'Sesión de herramientas caducada. Reconecta.' }); return true; }
     if (path === '/api/tools/session' && req.method === 'DELETE') { browserDiagnostics.lifecycle(session.executor, 'session_closed'); session.closed = true; session.executor.close(); void browser?.endSession(session.browserSessionId).catch(() => {}); sessions.delete(id!); send(200, { closed: true }); return true; }
-    if (path === '/api/tools/activity' && req.method === 'GET') { send(200, { activity: session.executor.telemetry.snapshot(), pending: session.executor.pendingState(), ...(browser?.state(session.browserSessionId) ? { browser: browser.state(session.browserSessionId, !!session.executor.pendingState()) } : {}) }); return true; }
+    if (path === '/api/tools/activity' && req.method === 'GET') { const pending=session.executor.pendingState();const state=browser?.state(session.browserSessionId,!!pending);send(200, { activity: session.executor.telemetry.snapshot(), pending, ...(state ? { browser:state } : {}) }); return true; }
     if (req.method !== 'POST') { send(405, { error: 'Método no permitido.' }); return true; }
     const contextualRead = path === '/api/tools/memory-context' || path === '/api/tools/memory-turn';
     if (session.busy && !contextualRead) { browserDiagnostics.lifecycle(session.executor, 'http_busy'); send(429, { error: 'Una herramienta sigue ejecutándose.' }); return true; }
@@ -176,6 +178,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
           if (browserCall) browserDiagnostics.event('executor_result', result.status === 'error' ? browserCode(result.category) : 'OK', performance.now() - started);
           return result;
         };
+        const priorActionId=browser?.state(session.browserSessionId)?.actionOutcome?.actionId;
         const result = browserCall ? await browserDiagnostics.inCall(session.executor, browserCall, run) : await run();
         if (browserCall) await browserDiagnostics.inCall(session.executor, browserCall, async () => { browserDiagnostics.event('http_result', result.status === 'error' ? browserCode(result.category) : 'OK', performance.now() - started); });
         if (p.toolId.startsWith('memory.') && result.status === 'error') {
@@ -188,7 +191,9 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
           const issue = parsed && !parsed.success ? new MemoryValidationError(field, 'schema') : new ToolError(result.category);
           memoryDiagnostics.failure(operation, result.category === 'INVALID_INPUT' ? 'validation' : 'execute', issue, started);
         }
-        send(200, {...result,...(p.toolId.startsWith('browser.') ? {browserExecutionState: browser?.state(session.browserSessionId, !!session.executor.pendingState())?.executionState} : {})});
+        const state=p.toolId.startsWith('browser.')?browser?.state(session.browserSessionId,!!session.executor.pendingState()):undefined;
+        const currentOutcome=result.status==='success'&&result.data&&typeof result.data==='object'&&'actionOutcome' in result.data;
+        send(200, {...result,...(state ? {browserExecutionState:state.executionState,browserActionOutcome:state.actionOutcome??null,browserOutcomeRelation:currentOutcome||state.actionOutcome?.actionId!==priorActionId?'CURRENT_ACTION':'LAST_ACTION',browserRevision:state.revision,browserTaskActive:state.taskActive} : {})});
       } else if (path === '/api/tools/browser-resume') {
         const p = z.object({ handoffId: z.string().uuid(), utterance: z.string().max(80) }).strict().parse(input);
         if (session.executor.pendingState() || !/^(listo|lista|ya est[aá]|done)[.!\s]*$/i.test(p.utterance.trim()) || !browser) throw new Error();

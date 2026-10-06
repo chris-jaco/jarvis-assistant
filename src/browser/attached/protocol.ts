@@ -1,3 +1,4 @@
+import { popupTraceSchema } from '../../diagnostics/popup.js';
 import { z } from 'zod';
 export const MAX_PAYLOAD = 65_536;
 export const uuid = z.string().uuid();
@@ -36,7 +37,7 @@ export const observationSchema = z.object({ media: mediaSchema.optional(), tabId
 export type AttachedObservation = z.infer<typeof observationSchema>;
 export const observationResultSchema = z.discriminatedUnion('status', [z.object({ status: z.literal('OK'), data: observationSchema }).strict(), z.object({ status: z.literal('FAILED'), reason: z.enum([...errors.options, ...reasons.options, ...conflictSchema.shape.reason.options, 'OBSERVATION_REQUIRED', 'STEP_PENDING', 'UPSTREAM']) }).strict()]);
 export type ObservationResult = z.infer<typeof observationResultSchema>;
-export interface InteractionResult { action: { status: 'COMPLETED' }; result: unknown; observation: ObservationResult; requiresFreshObservation: boolean }
+export interface InteractionResult { actionOutcome?: import('../action-outcome.js').ActionOutcome; action: { status: 'COMPLETED' }; result: unknown; observation: ObservationResult; requiresFreshObservation: boolean }
 const status = z.object({ available: z.boolean(), connected: z.boolean(), visible: z.literal(true), connections: z.array(uuid).max(10) }).strict();
 const ack = z.object({ completed: z.literal(true), paused: z.boolean().optional() }).strict();
 export const replySchema = z.discriminatedUnion('outcome', [
@@ -49,5 +50,5 @@ export type Reply = z.infer<typeof replySchema>;
 export const helloSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('hello'), connectionEpoch: uuid }).strict();
 export const cancelSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('cancel'), requestId: uuid, backendSessionId: uuid, connectionEpoch: uuid }).strict();
 export const responseSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('response'), requestId: uuid, backendSessionId: uuid, connectionEpoch: uuid, reply: replySchema }).strict();
-export const eventSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('event'), connectionEpoch: uuid, backendSessionId: uuid, event: z.enum(['accessGranted', 'accessRevoked', 'documentChanged', 'accessRequired']), access: z.object({outcome:z.literal('ACCESS_PENDING'),accessRequestId:uuid,expiresAt:z.number().int().positive(),origin:z.string().url().max(300).optional()}).strict().optional(), accessRequestId: uuid.optional(), tab: tabSchema.optional(), scopeId: uuid.optional() }).strict();
+export const eventSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('event'), connectionEpoch: uuid, backendSessionId: uuid, trace:popupTraceSchema.optional(), event: z.enum(['accessGranted', 'accessRevoked', 'documentChanged', 'accessRequired']), access: z.object({outcome:z.literal('ACCESS_PENDING'),accessRequestId:uuid,expiresAt:z.number().int().positive(),origin:z.string().url().max(300).optional()}).strict().optional(), accessRequestId: uuid.optional(), tab: tabSchema.optional(), scopeId: uuid.optional() }).strict();
 export function parseRequest(raw: unknown): Request { return requestSchema.parse(raw) as unknown as Request; }
