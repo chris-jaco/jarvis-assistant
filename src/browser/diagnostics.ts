@@ -1,3 +1,4 @@
+import type { BrowserConflictDetail, BrowserTimings } from './attached/protocol.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { browserTracer, browserCode } from '../diagnostics/browser.js';
 import type { BrowserDiagnostic, BrowserDiagnosticSink, BrowserStage, BrowserToolId } from '../diagnostics/browser.js';
@@ -22,6 +23,9 @@ export class BrowserDiagnostics {
   }
   event(stage: BrowserStage, code: BrowserDiagnostic['code'], elapsedMs = 0, state: Pick<BrowserDiagnostic, 'channel' | 'connected' | 'initializing'> = {}): void {
     this.sink({ ...this.scope.getStore(), stage, code, elapsedMs: Math.max(0, Math.round(elapsedMs)), ...state });
+  }
+  metadata(timings: BrowserTimings, reason?: BrowserConflictDetail['reason']): void {
+    this.sink({ ...this.scope.getStore(), stage: 'provider_result', code: reason ? 'CONFLICT' : 'OK', elapsedMs: timings.transportMs ?? 0, timings, ...(reason ? { reason } : {}) });
   }
   capture(stage: BrowserStage, code: BrowserDiagnostic['code']): () => void {
     const call = this.scope.getStore();

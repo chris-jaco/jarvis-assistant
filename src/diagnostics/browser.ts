@@ -1,3 +1,4 @@
+import type { BrowserConflictDetail, BrowserTimings } from '../browser/attached/protocol.js';
 // Shared metadata contract, safe for the browser bundle; no Node imports.
 export const browserToolIds = ['browser.status', 'browser.tabs', 'browser.open', 'browser.navigate', 'browser.switch', 'browser.close', 'browser.observe', 'browser.click', 'browser.type', 'browser.press', 'browser.scroll', 'browser.back', 'browser.forward', 'browser.reload', 'browser.requestAccess', 'browser.revokeAccess', 'browser.media', 'browser.endTask', 'browser.resume'] as const;
 export type BrowserToolId = typeof browserToolIds[number];
@@ -7,11 +8,18 @@ export type BrowserCode = 'RUNNING' | 'OK' | 'TIMEOUT' | 'UNCONFIGURED' | 'CONFL
 export interface BrowserDiagnostic {
   stage: BrowserStage; code: BrowserCode; elapsedMs: number;
   call?: string; clientRequest?: number; tool?: BrowserToolId; duplicate?: boolean;
+  reason?: BrowserConflictDetail['reason']; timings?: BrowserTimings;
   channel?: 'chrome' | 'msedge' | 'chromium'; connected?: boolean; initializing?: boolean;
 }
 export type BrowserDiagnosticSink = (entry: BrowserDiagnostic) => void;
 export function browserTracer(enabled: boolean, sink: BrowserDiagnosticSink = entry => console.info('[ATLAS browser]', JSON.stringify(entry))): BrowserDiagnosticSink {
-  return enabled ? entry => { try { sink(entry); } catch { /* Diagnostics cannot affect execution. */ } } : () => {};
+  return enabled ? entry => { try {
+    const { stage, code, elapsedMs, call, clientRequest, tool, duplicate, channel, connected, initializing } = entry;
+    const reason = ['SNAPSHOT_CONSUMED','SNAPSHOT_EXPIRED','DOCUMENT_CHANGED','ELEMENT_CHANGED'].includes(entry.reason ?? '') ? entry.reason : undefined;
+    const timings: BrowserTimings = {};
+    for (const field of ['queueMs','injectionMs','initializationMs','observationBuildMs','returnMs','transportMs'] as const) { const value = entry.timings?.[field]; if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 30_000) timings[field] = value; }
+    sink({ stage, code, elapsedMs, ...(call ? { call } : {}), ...(clientRequest !== undefined ? { clientRequest } : {}), ...(tool ? { tool } : {}), ...(duplicate !== undefined ? { duplicate } : {}), ...(channel ? { channel } : {}), ...(connected !== undefined ? { connected } : {}), ...(initializing !== undefined ? { initializing } : {}), ...(reason ? { reason } : {}), ...(Object.keys(timings).length ? { timings } : {}) });
+  } catch { /* Diagnostics cannot affect execution. */ } } : () => {};
 }
 export function browserCode(category: unknown): BrowserCode {
   return typeof category === 'string' && ['TIMEOUT', 'UNCONFIGURED', 'CONFLICT', 'REJECTED', 'UPSTREAM', 'INVALID_INPUT', 'EXECUTION_UNKNOWN'].includes(category) ? category as BrowserCode : 'UPSTREAM';

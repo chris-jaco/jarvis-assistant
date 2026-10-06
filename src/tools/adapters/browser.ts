@@ -18,8 +18,12 @@ export class BrowserAdapter implements ToolAdapter {
     const tool = (id: string, description: string, schema: z.ZodType, execute: ToolDefinition['execute'], read = false): ToolDefinition => ({ id: `browser.${id}`, name: `browser_${id}`, description, integration: this.integration, capability: id, permission: read ? 'READ' : 'WRITE', confirm: false, schema, timeoutMs: 18_000, execute: (input, signal) => this.diagnostics.run('adapter', async () => {
       const abort = this.diagnostics.capture('execution_abort', 'TIMEOUT');
       signal.addEventListener('abort', abort, { once: true });
-      try { const result = await execute(input, signal); this.diagnostics.event('provider_result', 'OK'); return result; }
-      catch (error) { if (error instanceof BrowserWorkflow) return { browserState: error.reply }; this.diagnostics.event('provider_result', error instanceof ToolError ? browserCode(error.category) : 'UPSTREAM'); throw error; }
+      try {
+        const attached = this.provider instanceof AttachedChromeProvider ? this.provider : undefined;
+        attached?.resetMeasurements();
+        const action = attached && ['click','type','press','scroll','media','navigate','switch','back','forward','reload'].includes(id);
+        const result = action ? await attached.interact(id, input, () => execute(input, signal), signal) : await execute(input, signal); this.diagnostics.event('provider_result', 'OK'); return attached && id !== 'resume' && result && typeof result === 'object' && !Array.isArray(result) ? { ...result, browserTimings: attached.measurements() } : result; }
+      catch (error) { if (error instanceof BrowserWorkflow) return { browserState: error.reply }; this.diagnostics.event('provider_result', error instanceof ToolError ? browserCode(error.category) : 'UPSTREAM'); if (error instanceof ToolError && this.provider instanceof AttachedChromeProvider) { this.diagnostics.metadata(this.provider.measurements(), error.browserRecovery?.reason); throw new ToolError(error.category, error.browserRecovery, error.browserObservation, this.provider.measurements()); } throw error; }
       finally { signal.removeEventListener('abort', abort); }
     }, signal) });
     const tools = [

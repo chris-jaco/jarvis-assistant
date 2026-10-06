@@ -51,3 +51,14 @@ test('Gmail acknowledgment waits for authoritative send success, not user approv
     assert.ok(JARVIS_INSTRUCTIONS.includes(instruction), instruction);
   }
 });
+
+
+test('browser recovery is silent, bounded and only allowed after proven non-execution', () => {
+  for (const instruction of ['observe → action → observe', 'CONFLICT no significa control bloqueado', 'execution NOT_EXECUTED y recoverable true', 'Máximo dos recuperaciones consecutivas por paso', 'un observe exitoso no reinicia ese límite', 'Ante EXECUTION_UNKNOWN, TIMEOUT', 'Nunca repitas type después de success', 'sin narrar', 'nunca los resuelvas ni evadas', 'no envíes mensajes/formularios con consecuencias']) assert.ok(JARVIS_INSTRUCTIONS.includes(instruction), instruction);
+});
+
+test('completed browser actions and fresh observations remain separate from recovery', () => {
+  for (const instruction of ['action.status COMPLETED', 'observation.status OK/FAILED', 'nunca repitas esa acción por un fallo', 'refs nuevas de observation.data', 'SNAPSHOT_CONSUMED significa contexto consumido', 'ni lo reinicia otra acción diferente', 'STEP_PENDING']) {
+    assert.ok(JARVIS_INSTRUCTIONS.includes(instruction), instruction);
+  }
+});

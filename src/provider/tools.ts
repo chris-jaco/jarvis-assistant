@@ -68,7 +68,13 @@ export class VoiceToolBridge {
             if (this.closed) { browserResult('CLOSED'); return { status: 'error', message: 'Sesión cerrada.' }; }
             this.pending = result.status === 'pending' ? result : null; this.armed = false; this.promptPlayback = undefined; this.captured.clear();
             this.diagnostic('tool.result', result.status === 'pending' ? 'prepared' : 'not_pending');
-            await this.refresh(); browserResult(result.status === 'error' ? browserCode(result.category) : 'OK'); return result;
+            await this.refresh(); browserResult(result.status === 'error' ? browserCode(result.category) : 'OK');
+            if (descriptor.id.startsWith('browser.') && result.status === 'error' && result.browserRecovery) {
+              return { ...result, instruction: result.browserRecovery.recoverable
+                ? 'Sin hablar: usa browserObservation si status es OK y resuelve el mismo paso con una ref nueva. Si FAILED, sólo observa para obtener contexto; no repitas acciones completadas. SNAPSHOT_CONSUMED significa contexto consumido, no cambios rápidos de página. Máximo dos recuperaciones, según el backend.'
+                : 'Detente: no quedan recuperaciones para este paso. Da sólo un error final breve; no pidas intervención manual por un CONFLICT.' };
+            }
+            return result;
           } catch { browserResult('UPSTREAM'); return { status: 'error', message: 'La herramienta no respondió. No asumas que la acción se realizó; comprueba su estado antes de repetirla.' }; }
         } })) };
   }

@@ -8,7 +8,7 @@ export interface Surface {
   navigate(tab: number, url: string): Promise<void>;
   history(tab: number, action: 'back' | 'forward' | 'reload'): Promise<void>;
   content(tab: number, grant: Grant, request: Request): Promise<Reply>;
-  invalidate(tab: number): Promise<void>;
+  invalidate(tab: number, documentOnly?: boolean): Promise<void>;
 }
 export interface Grant { scopeId: string; tabId: string; chromeId: number; origin: string; session: string; task: string; expiresAt: number; lifetime: 'task' | 'session'; title: string; url: string; handoff?: { id: string; reason: Extract<Reply, { outcome: 'REQUIRES_USER_INTERACTION' }>['reason'] }; suspended?: boolean }
 interface Ticket { id: string; request: Request; expiresAt: number; chromeId?: number }
@@ -38,8 +38,10 @@ export class ExtensionController {
     const signature = JSON.stringify(request); const previous = this.results.get(request.requestId);
     if (previous) return previous.signature === signature ? previous.result : Promise.resolve({ outcome: 'ERROR', code: 'REJECTED' });
     if (this.results.size >= 1000) return Promise.resolve({ outcome: 'ERROR', code: 'REJECTED' });
+    const queuedAt = performance.now();
     const result = this.tail.catch(() => {}).then(async (): Promise<Reply> => {
-      try { this.check(request); const reply = await this.execute(request); if (!['endSession', 'endTask'].includes(request.operation)) this.check(request); return replySchema.parse(reply); }
+      const queueMs = Math.min(30_000, Math.max(0, Math.round(performance.now() - queuedAt)));
+      try { this.check(request); const reply = await this.execute(request); if (!['endSession', 'endTask'].includes(request.operation)) this.check(request); return replySchema.parse({ ...reply, timings: { ...reply.timings, queueMs } }); }
       catch (error) { const code = error instanceof Error ? error.message : ''; return { outcome: 'ERROR', code: ['TIMEOUT', 'ACCESS_DENIED', 'EXPIRED', 'STALE_REF', 'REJECTED'].includes(code) ? code as 'REJECTED' : 'UNSUPPORTED' }; }
     });
     this.tail = result; this.results.set(request.requestId, { signature, result, session: request.backendSessionId }); return result;
@@ -84,7 +86,7 @@ export class ExtensionController {
     if (this.epoch) this.emit({ protocol: 'atlas.browser', version: 1, kind: 'event', connectionEpoch: this.epoch, backendSessionId: grant.session, event: 'accessRevoked', scopeId });
   }
   async documentChanged(chromeId: number): Promise<void> {
-    for (const grant of this.grants.values()) if (grant.chromeId === chromeId) { await this.surface.invalidate(chromeId).catch(() => {}); if (this.epoch) this.emit({ protocol: 'atlas.browser', version: 1, kind: 'event', connectionEpoch: this.epoch, backendSessionId: grant.session, event: 'documentChanged', scopeId: grant.scopeId }); }
+    for (const grant of this.grants.values()) if (grant.chromeId === chromeId) { await this.surface.invalidate(chromeId, true).catch(() => {}); if (this.epoch) this.emit({ protocol: 'atlas.browser', version: 1, kind: 'event', connectionEpoch: this.epoch, backendSessionId: grant.session, event: 'documentChanged', scopeId: grant.scopeId }); }
   }
   async end(session: string): Promise<void> { this.ended.add(session); for (const grant of [...this.grants.values()]) if (grant.session === session) await this.revoke(grant.scopeId); for (const [id, ticket] of this.tickets) if (ticket.request.backendSessionId === session) this.tickets.delete(id); }
   private async execute(request: Request): Promise<Reply> {

@@ -11,6 +11,7 @@ if (!root.__atlasContentInstalled) {
     if (!backendSender(sender, chrome.runtime.id)) return false;
     try {
       if (raw?.kind === 'revoke' && Object.keys(raw).length === 1) { engine.revoke(); send({ completed: true }); return false; }
+      if (raw?.kind === 'documentChanged' && Object.keys(raw).length === 1) { engine.documentChanged(); send({ completed: true }); return false; }
       if (raw?.kind === 'init') { engine.initialize(init.parse(raw).access); send({ completed: true }); return false; }
       const request = parseRequest(raw);
       void engine.run(request.operation, request.args, request.deadlineAt, { session: request.backendSessionId, epoch: request.connectionEpoch }).then(send).catch(() => send({ outcome: 'ERROR', code: 'UNSUPPORTED' })); return true;

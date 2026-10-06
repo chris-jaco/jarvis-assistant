@@ -85,16 +85,16 @@ test('document mutation, TTL, reconnect, modal and media preserve ref safety', a
     Object.defineProperty(f.dom.window.document.querySelector('[role="dialog"]'), 'innerText', { value: 'Cookies\nReject all\nAccept all' });
     const observed: any = await f.run('observe'); assert.ok(!observed.data.elements.some((el: any) => el.role === 'searchbox')); assert.equal(observed.data.elements[0].action, 'consent'); assert.equal(observed.data.elements[1].action, 'blocked');
     const el = observed.data.elements[0]; const binding = { documentId: observed.data.documentId, snapshotId: observed.data.snapshotId, ref: el.ref };
-    f.dom.window.document.querySelector('button')!.textContent = 'Send message'; await Promise.resolve(); assert.deepEqual(await f.run('click', binding), { outcome: 'ERROR', code: 'STALE_REF' });
+    f.dom.window.document.querySelector('button')!.textContent = 'Send message'; await Promise.resolve(); assert.deepEqual(await f.run('click', binding), { outcome: 'ERROR', code: 'STALE_REF', conflict: { reason: 'ELEMENT_CHANGED', execution: 'NOT_EXECUTED' } });
     f.engine.initialize({ ...f.access, epoch: id() }); assert.equal((await f.run('click', binding)).outcome, 'ERROR');
   } finally { f.close(); }
   let now = Date.now(); const t = fixture(); const timed = new ContentEngine(t.dom.window as any, () => now, id); timed.initialize(t.access);
-  try { const reply: any = await timed.run('observe', { scopeId: t.access.scopeId, tabId: t.access.tabId }, now + 1000, { session, epoch }); now += 16_000; const media = reply.data.elements.find((el: any) => el.role === 'media'); assert.deepEqual(await timed.run('media', { scopeId: t.access.scopeId, tabId: t.access.tabId, documentId: reply.data.documentId, snapshotId: reply.data.snapshotId, ref: media.ref, action: 'play' }, now + 1000, { session, epoch }), { outcome: 'ERROR', code: 'STALE_REF' }); } finally { timed.destroy(); t.close(); }
+  try { const reply: any = await timed.run('observe', { scopeId: t.access.scopeId, tabId: t.access.tabId }, now + 1000, { session, epoch }); now += 16_000; const media = reply.data.elements.find((el: any) => el.role === 'media'); assert.deepEqual(await timed.run('media', { scopeId: t.access.scopeId, tabId: t.access.tabId, documentId: reply.data.documentId, snapshotId: reply.data.snapshotId, ref: media.ref, action: 'play' }, now + 1000, { session, epoch }), { outcome: 'ERROR', code: 'STALE_REF', conflict: { reason: 'SNAPSHOT_EXPIRED', execution: 'NOT_EXECUTED' } }); } finally { timed.destroy(); t.close(); }
 });
 function harness() {
   let creates = 0; let invalidates = 0; const events: any[] = []; const chosen = { id: 7, url: 'https://workspace.example/', title: 'Authenticated workspace' };
   const f = fixture(); const listeners = new Set<(connection: string, event: any) => void>(); const connection = id();
-  const surface: Surface = { current: async () => chosen, create: async url => { ++creates; chosen.url = url; return chosen.id; }, activate: async () => {}, navigate: async (_id, url) => { chosen.url = url; }, history: async () => {}, invalidate: async () => { ++invalidates; f.engine.revoke(); }, content: async (_id, grant, req) => { try { f.engine.initialize({ scopeId: grant.scopeId, tabId: grant.tabId, session: grant.session, epoch: req.connectionEpoch, origin: grant.origin, expiresAt: grant.expiresAt }); return f.engine.run(req.operation, req.args, req.deadlineAt, { session: req.backendSessionId, epoch: req.connectionEpoch }); } catch { return { outcome: 'REQUIRES_USER_INTERACTION', reason: 'ORIGIN_PERMISSION', handoffId: id() }; } } };
+  const surface: Surface = { current: async () => chosen, create: async url => { ++creates; chosen.url = url; return chosen.id; }, activate: async () => {}, navigate: async (_id, url) => { chosen.url = url; }, history: async () => {}, invalidate: async (_tab, documentOnly) => { ++invalidates; if (documentOnly) f.engine.documentChanged(); else f.engine.revoke(); }, content: async (_id, grant, req) => { try { f.engine.initialize({ scopeId: grant.scopeId, tabId: grant.tabId, session: grant.session, epoch: req.connectionEpoch, origin: grant.origin, expiresAt: grant.expiresAt }); return f.engine.run(req.operation, req.args, req.deadlineAt, { session: req.backendSessionId, epoch: req.connectionEpoch }); } catch { return { outcome: 'REQUIRES_USER_INTERACTION', reason: 'ORIGIN_PERMISSION', handoffId: id() }; } } };
   const controller = new ExtensionController(surface, event => { events.push(event); for (const listener of listeners) listener(connection, event); }, Date.now, id);
   const channels = [connection]; let closed = false;
   const transport: BrowserTransport = { epoch, connections: () => channels, request: async (_connection, req, aborted) => aborted.aborted ? { outcome: 'ERROR', code: 'EXECUTION_UNKNOWN' } : controller.receive(req), subscribe: listener => { listeners.add(listener); return () => listeners.delete(listener); }, close: () => { closed = true; void controller.reset(); } };
@@ -227,4 +227,317 @@ test('attached search labels never authorize POST/custom button clicks on person
       assert.equal(result.outcome, 'REQUIRES_USER_INTERACTION'); assert.equal(result.reason, 'UNSUPPORTED_CONTROL'); assert.equal(clicks, 0);
     } finally { f.close(); }
   }
+});
+
+const observedBinding = (observed: any, element = observed.data.elements[0]) => ({ documentId: observed.data.documentId, snapshotId: observed.data.snapshotId, ref: element.ref });
+test('SPA background mutations keep the original search ref valid without reading private input values', async () => {
+  const f = fixture('<form method="get"><input type="text" role="combobox" aria-label="Search"></form><div id="background"></div>');
+  try {
+    let events = 0; f.dom.window.document.querySelector('input')!.addEventListener('input', () => { ++events; });
+    const observed: any = await f.run('observe');
+    for (let n = 0; n < 20; n++) f.dom.window.document.querySelector('#background')!.textContent = String(n);
+    await Promise.resolve();
+    assert.deepEqual(await f.run('type', { ...observedBinding(observed), text: 'fixture search', mode: 'replace' }), { outcome: 'OK', data: { completed: true } });
+    assert.equal(events, 1);
+  } finally { f.close(); }
+});
+test('refs fail before execution on changes to identity, security, form context and element replacement', async () => {
+  const changes: ((f: ReturnType<typeof fixture>) => void)[] = [
+    f => f.dom.window.document.querySelector('input')!.setAttribute('aria-label', 'Send message'),
+    f => f.dom.window.document.querySelector('input')!.setAttribute('role', 'button'),
+    f => f.dom.window.document.querySelector('input')!.setAttribute('readonly', ''),
+    f => f.dom.window.document.querySelector('input')!.setAttribute('autocomplete', 'cc-number'),
+    f => f.dom.window.document.querySelector('input')!.setAttribute('disabled', ''),
+    f => f.dom.window.document.querySelector('form')!.setAttribute('method', 'post'),
+    f => f.dom.window.document.querySelector('form')!.setAttribute('action', '/different'),
+    f => f.dom.window.document.querySelector('form')!.insertAdjacentHTML('beforeend', '<input type="hidden" name="different">'),
+    f => { const input = f.dom.window.document.querySelector('input')!; input.replaceWith(input.cloneNode(true)); },
+    f => { const input = f.dom.window.document.querySelector('input')!; const form = f.dom.window.document.createElement('form'); form.method = 'get'; f.dom.window.document.body.append(form); form.append(input); },
+    f => f.dom.window.document.body.insertAdjacentHTML('beforeend', '<div role="dialog" aria-modal="true"><button>Search</button></div>')
+  ];
+  for (const change of changes) {
+    const f = fixture(); try {
+      let events = 0; f.dom.window.document.addEventListener('input', () => { ++events; });
+      const observed: any = await f.run('observe'); change(f); await Promise.resolve();
+      assert.deepEqual(await f.run('type', { ...observedBinding(observed), text: 'fixture', mode: 'replace' }), { outcome: 'ERROR', code: 'STALE_REF', conflict: { reason: 'ELEMENT_CHANGED', execution: 'NOT_EXECUTED' } });
+      assert.equal(events, 0);
+    } finally { f.close(); }
+  }
+});
+test('type consumes its snapshot; observe → type → observe → press works despite dynamic mutations', async () => {
+  const f = fixture(); let submitted = 0;
+  f.dom.window.HTMLFormElement.prototype.requestSubmit = function() { ++submitted; };
+  try {
+    f.dom.window.document.querySelector('input')!.addEventListener('input', () => f.dom.window.document.body.insertAdjacentHTML('beforeend', '<span>background</span>'));
+    const first: any = await f.run('observe'); const bind = observedBinding(first);
+    assert.equal((await f.run('type', { ...bind, text: 'fixture', mode: 'replace' })).outcome, 'OK');
+    assert.deepEqual(await f.run('press', { ...bind, key: 'Enter' }), { outcome: 'ERROR', code: 'STALE_REF', conflict: { reason: 'SNAPSHOT_CONSUMED', execution: 'NOT_EXECUTED' } });
+    const next: any = await f.run('observe'); assert.notEqual(next.data.snapshotId, first.data.snapshotId);
+    assert.equal((await f.run('press', { ...observedBinding(next), key: 'Enter' })).outcome, 'OK'); assert.equal(submitted, 1);
+  } finally { f.close(); }
+});
+test('pushState, replaceState, history events and reload invalidate documents without revoking access', async () => {
+  const f = fixture();
+  try {
+    for (const navigate of [() => f.dom.window.history.pushState({}, '', '/results'), () => f.dom.window.history.replaceState({}, '', '/updated'), () => f.dom.window.dispatchEvent(new f.dom.window.PopStateEvent('popstate')), () => f.engine.documentChanged()]) {
+      const old: any = await f.run('observe'); navigate();
+      assert.deepEqual(await f.run('click', observedBinding(old)), { outcome: 'ERROR', code: 'STALE_REF', conflict: { reason: 'DOCUMENT_CHANGED', execution: 'NOT_EXECUTED' } });
+      const next: any = await f.run('observe'); assert.equal(next.outcome, 'OK'); assert.notEqual(next.data.documentId, old.data.documentId);
+    }
+    f.engine.revoke(); assert.deepEqual(await f.run('observe'), { outcome: 'ERROR', code: 'ACCESS_DENIED' });
+  } finally { f.close(); }
+});
+test('same-origin documentChanged retains controller/backend grant and permits fresh observation', async () => {
+  const h = harness(); const provider = new AttachedChromeProvider(h.transport); await h.controller.reset({ protocol: 'atlas.browser', version: 1, kind: 'hello', connectionEpoch: epoch });
+  try { await provider.inSession(session, async () => {
+    await assert.rejects(provider.requestTabAccess({ target: { kind: 'current' }, purpose: 'Fixture', lifetime: 'task' }, signal()).then(reply => { if (reply.outcome === 'ACCESS_PENDING') throw new BrowserWorkflow(reply); }), BrowserWorkflow);
+    await h.controller.approve(h.controller.pending()[0]!.id); await provider.listTabs(signal());
+    const old = await provider.observe(signal()); const grant = h.controller.authorized()[0]!;
+    h.f.dom.window.history.pushState({}, '', '/results'); await h.controller.documentChanged(h.chosen.id);
+    await assert.rejects(provider.type(old.elements[0]!.ref, 'fixture', 'replace', signal()), (error: any) => error.browserRecovery?.reason === 'DOCUMENT_CHANGED');
+    assert.equal(h.controller.authorized()[0]!.scopeId, grant.scopeId); assert.equal(h.events.filter(e => e.event === 'accessRevoked').length, 0);
+    const next = await provider.observe(signal()); await provider.type(next.elements[0]!.ref, 'fixture', 'replace', signal());
+  }); } finally { h.close(); }
+});
+test('backend allows only two recoveries; observe does not reset budget and exhausted retries never dispatch', async () => {
+  const h = harness(); const provider = new AttachedChromeProvider(h.transport); await h.controller.reset({ protocol: 'atlas.browser', version: 1, kind: 'hello', connectionEpoch: epoch });
+  try { await provider.inSession(session, async () => {
+    await provider.requestTabAccess({ target: { kind: 'current' }, purpose: 'Fixture', lifetime: 'task' }, signal()); await h.controller.approve(h.controller.pending()[0]!.id); await provider.listTabs(signal());
+    let edited = 0; h.f.dom.window.document.addEventListener('input', () => { ++edited; });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const observed = await provider.observe(signal()); h.f.dom.window.document.querySelector('input')!.setAttribute('aria-label', 'Search ' + attempt);
+      await assert.rejects(provider.type(observed.elements[0]!.ref, 'fixture', 'replace', signal()), (error: any) => error.browserRecovery?.execution === 'NOT_EXECUTED' && error.browserRecovery.recoverable === (attempt < 2) && error.browserRecovery.remainingRecoveries === 2 - attempt);
+    }
+    const fresh = await provider.observe(signal());
+    await assert.rejects(provider.type(fresh.elements[0]!.ref, 'fixture', 'replace', signal()), (error: any) => error.browserRecovery?.recoverable === false);
+    assert.equal(edited, 0);
+  }); } finally { h.close(); }
+});
+test('different low-level successful interaction does not reset a pending recovery budget', async () => {
+  const h = harness(); const provider = new AttachedChromeProvider(h.transport); await h.controller.reset({ protocol: 'atlas.browser', version: 1, kind: 'hello', connectionEpoch: epoch });
+  try { await provider.inSession(session, async () => {
+    await provider.requestTabAccess({ target: { kind: 'current' }, purpose: 'Fixture', lifetime: 'task' }, signal()); await h.controller.approve(h.controller.pending()[0]!.id); await provider.listTabs(signal());
+    for (let step = 0; step < 3; step++) {
+      const observed = await provider.observe(signal()); await provider.type(observed.elements[0]!.ref, 'fixture', 'replace', signal());
+      await assert.rejects(provider.press(observed.elements[0]!.ref, 'Enter', signal()), (error: any) => error.browserRecovery?.reason === 'SNAPSHOT_CONSUMED' && error.browserRecovery.remainingRecoveries === 2 - step);
+    }
+  }); } finally { h.close(); }
+});
+test('EXECUTION_UNKNOWN/TIMEOUT after dispatch block future actions even after observe; no implicit retry', async () => {
+  for (const code of ['EXECUTION_UNKNOWN','TIMEOUT'] as const) {
+    const h = harness(); const base = h.transport; let dispatched = 0;
+    const transport: BrowserTransport = { ...base, request: async (connection, req, signal) => { if (req.operation === 'type') { ++dispatched; await base.request(connection, req, signal); return { outcome: 'ERROR', code }; } return base.request(connection, req, signal); } };
+    const provider = new AttachedChromeProvider(transport); await h.controller.reset({ protocol: 'atlas.browser', version: 1, kind: 'hello', connectionEpoch: epoch });
+    try { await provider.inSession(session, async () => {
+      await provider.requestTabAccess({ target: { kind: 'current' }, purpose: 'Fixture', lifetime: 'task' }, signal()); await h.controller.approve(h.controller.pending()[0]!.id); await provider.listTabs(signal());
+      const first = await provider.observe(signal()); await assert.rejects(provider.type(first.elements[0]!.ref, 'fixture', 'replace', signal()), new RegExp(code));
+      const next = await provider.observe(signal()); await assert.rejects(provider.type(next.elements[0]!.ref, 'fixture', 'replace', signal()), /EXECUTION_UNKNOWN/);
+      await assert.rejects(provider.press(next.elements[0]!.ref, 'Enter', signal()), /EXECUTION_UNKNOWN/); assert.equal(dispatched, 1);
+    }); } finally { h.close(); }
+  }
+});
+test('post-effect content exceptions are EXECUTION_UNKNOWN without recoverable conflict metadata', async () => {
+  const f = fixture(); try {
+    const original = Object.getOwnPropertyDescriptor(f.dom.window.HTMLInputElement.prototype, 'value')!;
+    Object.defineProperty(f.dom.window.HTMLInputElement.prototype, 'value', { ...original, set(value) { original.set!.call(this, value); throw new Error('PRIVATE_SENTINEL'); } });
+    const observed: any = await f.run('observe'); const result = await f.run('type', { ...observedBinding(observed), text: 'fixture', mode: 'replace' });
+    assert.deepEqual(result, { outcome: 'ERROR', code: 'EXECUTION_UNKNOWN' }); assert.ok(!JSON.stringify(result).includes('PRIVATE'));
+  } finally { f.close(); }
+});
+test('conflict schema only permits sanitized pre-execution reasons on stale refs', () => {
+  const conflict = { reason: 'ELEMENT_CHANGED', execution: 'NOT_EXECUTED' };
+  assert.throws(() => replySchema.parse({ outcome: 'ERROR', code: 'EXECUTION_UNKNOWN', conflict }));
+  assert.throws(() => replySchema.parse({ outcome: 'ERROR', code: 'STALE_REF', conflict: { ...conflict, privatePayload: 'PRIVATE' } }));
+  assert.throws(() => replySchema.parse({ outcome: 'ERROR', code: 'STALE_REF', conflict: { reason: 'PRIVATE', execution: 'NOT_EXECUTED' } }));
+});
+
+test('abort after dispatch blocks another action before a delayed transport returns; observing cannot unlock it', async () => {
+  const h = harness(); let release!: () => void; let entered!: () => void;
+  const delayed = new Promise<void>(resolve => { release = resolve; }); const received = new Promise<void>(resolve => { entered = resolve; }); let actions = 0;
+  const transport: BrowserTransport = { ...h.transport, request: async (connection, req, signal) => {
+    if (req.operation === 'type') { ++actions; entered(); await delayed; return { outcome: 'ERROR', code: 'EXECUTION_UNKNOWN' }; }
+    return h.transport.request(connection, req, signal);
+  } };
+  const provider = new AttachedChromeProvider(transport); await h.controller.reset({ protocol: 'atlas.browser', version: 1, kind: 'hello', connectionEpoch: epoch });
+  try { await provider.inSession(session, async () => {
+    await provider.requestTabAccess({ target: { kind: 'current' }, purpose: 'Fixture', lifetime: 'task' }, signal()); await h.controller.approve(h.controller.pending()[0]!.id); await provider.listTabs(signal());
+    const first = await provider.observe(signal()); const abort = new AbortController();
+    const operation = provider.type(first.elements[0]!.ref, 'fixture', 'replace', abort.signal); const rejected = assert.rejects(operation, /EXECUTION_UNKNOWN/);
+    await received; abort.abort();
+    const next = await provider.observe(signal()); await assert.rejects(provider.type(next.elements[0]!.ref, 'fixture', 'replace', signal()), /EXECUTION_UNKNOWN/);
+    assert.equal(actions, 1); release(); await rejected;
+  }); } finally { release(); h.close(); }
+});
+
+test('revoked access is not a recoverable stale snapshot', async () => {
+  const h = harness(); const provider = new AttachedChromeProvider(h.transport); await h.controller.reset({ protocol: 'atlas.browser', version: 1, kind: 'hello', connectionEpoch: epoch });
+  try { await provider.inSession(session, async () => {
+    await provider.requestTabAccess({ target: { kind: 'current' }, purpose: 'Fixture', lifetime: 'task' }, signal()); await h.controller.approve(h.controller.pending()[0]!.id); await provider.listTabs(signal());
+    const observed = await provider.observe(signal()); await h.controller.revoke(h.controller.authorized()[0]!.scopeId);
+    await assert.rejects(provider.type(observed.elements[0]!.ref, 'fixture', 'replace', signal()), (error: any) => error.category === 'REJECTED' && !error.browserRecovery);
+  }); } finally { h.close(); }
+});
+test('navigation of another scope does not consume the active tab snapshot', async () => {
+  const h = harness(); let emit!: (connection: string, event: any) => void; let actions = 0;
+  const transport: BrowserTransport = { ...h.transport, subscribe: listener => { emit = listener; return h.transport.subscribe(listener); }, request: (connection, req, signal) => {
+    if (req.operation === 'type') { ++actions; return Promise.resolve({ outcome: 'OK', data: { completed: true } }); }
+    return h.transport.request(connection, req, signal);
+  } };
+  const provider = new AttachedChromeProvider(transport); await h.controller.reset({ protocol: 'atlas.browser', version: 1, kind: 'hello', connectionEpoch: epoch });
+  try { await provider.inSession(session, async () => {
+    await provider.requestTabAccess({ target: { kind: 'current' }, purpose: 'Fixture', lifetime: 'task' }, signal()); await h.controller.approve(h.controller.pending()[0]!.id); await provider.listTabs(signal());
+    const observed = await provider.observe(signal());
+    emit(h.channels[0]!, { protocol: 'atlas.browser', version: 1, connectionEpoch: epoch, backendSessionId: session, event: 'documentChanged', scopeId: id() });
+    await provider.type(observed.elements[0]!.ref, 'fixture', 'replace', signal()); assert.equal(actions, 1);
+  }); } finally { h.close(); }
+});
+
+async function grantedRuntime(transportOverride?: (base: BrowserTransport) => BrowserTransport) {
+  const h = harness(); const provider = new AttachedChromeProvider(transportOverride?.(h.transport) ?? h.transport);
+  await h.controller.reset({ protocol: 'atlas.browser', version: 1, kind: 'hello', connectionEpoch: epoch });
+  const registry = new ToolRegistry(); registry.add(new BrowserAdapter(provider)); const executor = new ToolExecutor(registry);
+  await provider.inSession(session, async () => {
+    await provider.requestTabAccess({ target: { kind: 'current' }, purpose: 'Fixture', lifetime: 'task' }, signal());
+    await h.controller.approve(h.controller.pending()[0]!.id); await provider.listTabs(signal());
+  });
+  const invoke = (operation: string, input: unknown = {}) => provider.inSession(session, () => executor.invoke(id(), 'browser.' + operation, input)) as Promise<any>;
+  return { h, provider, executor, invoke };
+}
+test('production executor orchestrates type COMPLETED → one READ → press with new ref, never using consumed refs', async () => {
+  const operations: string[] = []; const f = await grantedRuntime(base => ({ ...base, request: (connection, req, signal) => { operations.push(req.operation); return base.request(connection, req, signal); } }));
+  let submits = 0; f.h.f.dom.window.HTMLFormElement.prototype.requestSubmit = function() { ++submits; };
+  try {
+    const first = await f.invoke('observe'); const input = first.data.elements[0]; operations.length = 0;
+    const typed = await f.invoke('type', { ref: input.ref, text: 'fixture query', mode: 'replace' });
+    assert.equal(typed.status, 'success'); assert.equal(typed.data.action.status, 'COMPLETED'); assert.equal(typed.data.observation.status, 'OK');
+    assert.deepEqual(operations, ['type','observe']); assert.notEqual(typed.data.observation.data.elements[0].ref, input.ref);
+    operations.length = 0;
+    const stale = await f.invoke('press', { ref: input.ref, key: 'Enter' });
+    assert.equal(stale.category, 'CONFLICT'); assert.equal(stale.browserRecovery.reason, 'SNAPSHOT_CONSUMED'); assert.equal(stale.browserObservation.status, 'OK');
+    assert.deepEqual(operations, ['observe']); assert.equal(submits, 0);
+    operations.length = 0;
+    const pressed = await f.invoke('press', { ref: stale.browserObservation.data.elements[0].ref, key: 'Enter' });
+    assert.equal(pressed.data.action.status, 'COMPLETED'); assert.equal(pressed.data.observation.status, 'OK');
+    assert.deepEqual(operations, ['press','observe']); assert.equal(submits, 1);
+  } finally { f.h.close(); }
+});
+test('action completion survives failed post-observe and duplicate type requests never execute again', async () => {
+  let failure = false; let edits = 0; let reads = 0;
+  const f = await grantedRuntime(base => ({ ...base, request: async (connection, req, signal) => {
+    if (req.operation === 'observe') { ++reads; if (failure) return { outcome: 'ERROR', code: 'CONTENT_UNAVAILABLE' }; }
+    const reply = await base.request(connection, req, signal);
+    if (req.operation === 'type') { ++edits; failure = true; }
+    return reply;
+  } }));
+  try {
+    const observed = await f.invoke('observe'); const input = { ref: observed.data.elements[0].ref, text: 'fixture', mode: 'replace' };
+    reads = 0; const typed = await f.invoke('type', input);
+    assert.equal(typed.status, 'success'); assert.equal(typed.data.action.status, 'COMPLETED'); assert.deepEqual(typed.data.observation, { status: 'FAILED', reason: 'UPSTREAM' });
+    assert.equal(typed.data.requiresFreshObservation, true); assert.equal(edits, 1); assert.equal(reads, 1);
+    const repeated = await f.invoke('type', input); assert.equal(repeated.data.action.status, 'COMPLETED'); assert.equal(edits, 1);
+    failure = false;
+    const rejected = await f.invoke('press', { ref: input.ref, key: 'Enter' }); assert.equal(rejected.category, 'CONFLICT'); assert.equal(rejected.browserObservation.status, 'OK');
+    assert.equal(edits, 1);
+  } finally { f.h.close(); }
+});
+test('post-action READ EXECUTION_UNKNOWN does not change COMPLETED or lock unrelated safe action; unknown action never retries', async () => {
+  let failRead = false; let failAction = false; let edits = 0;
+  const f = await grantedRuntime(base => ({ ...base, request: async (connection, req, signal) => {
+    if (req.operation === 'observe' && failRead) return { outcome: 'ERROR', code: 'EXECUTION_UNKNOWN' };
+    if (req.operation === 'type') { ++edits; if (failAction) { await base.request(connection, req, signal); return { outcome: 'ERROR', code: 'EXECUTION_UNKNOWN' }; } }
+    return base.request(connection, req, signal);
+  } }));
+  try {
+    const observed = await f.invoke('observe'); failRead = true;
+    const first = await f.invoke('type', { ref: observed.data.elements[0].ref, text: 'fixture', mode: 'replace' });
+    assert.equal(first.data.action.status, 'COMPLETED'); assert.equal(first.data.observation.status, 'FAILED');
+    failRead = false; const next = await f.invoke('observe'); failAction = true;
+    const second = await f.invoke('type', { ref: next.data.elements[0].ref, text: 'different explicit step', mode: 'replace' }); assert.equal(second.category, 'EXECUTION_UNKNOWN');
+    const fresh = await f.invoke('observe');
+    const blocked = await f.invoke('type', { ref: fresh.data.elements[0].ref, text: 'different explicit step', mode: 'replace' }); assert.equal(blocked.category, 'EXECUTION_UNKNOWN'); assert.equal(edits, 2);
+  } finally { f.h.close(); }
+});
+test('snapshot TTL starts after construction and never spends build time', async () => {
+  const f = fixture(); let now = Date.now(); const engine = new ContentEngine(f.dom.window as any, () => now, id); engine.initialize(f.access);
+  const original = f.dom.window.HTMLElement.prototype.checkVisibility;
+  f.dom.window.HTMLElement.prototype.checkVisibility = function() { now += 1000; return original.call(this); };
+  try {
+    const before = now; const reply: any = await engine.run('observe', { scopeId: f.access.scopeId, tabId: f.access.tabId }, now + 60_000, { session, epoch });
+    assert.equal(reply.outcome, 'OK'); assert.ok(now > before); assert.equal(reply.data.expiresAt, now + 15_000); assert.equal(reply.timings.observationBuildMs, now - before);
+  } finally { engine.destroy(); f.close(); }
+});
+test('backend rejects received expired/near-expired snapshots without extending their TTL', async () => {
+  let expiring = false;
+  const f = await grantedRuntime(base => ({ ...base, request: async (connection, req, signal) => {
+    const reply = await base.request(connection, req, signal);
+    if (req.operation === 'observe' && reply.outcome === 'OK' && 'snapshotId' in reply.data && expiring) return { ...reply, data: { ...reply.data, expiresAt: Date.now() + 100 } };
+    return reply;
+  } }));
+  try {
+    expiring = true; const result = await f.invoke('observe'); assert.equal(result.category, 'CONFLICT'); assert.equal(result.browserRecovery.reason, 'SNAPSHOT_EXPIRED');
+    expiring = false; const fresh = await f.invoke('observe'); assert.equal(fresh.status, 'success'); assert.ok(fresh.data.expiresAt > Date.now() + 250);
+  } finally { f.h.close(); }
+});
+test('expired snapshot triggers a new READ and never silently remaps or executes the old action', async () => {
+  let first = true; let expiry = 0; let edits = 0; const operations: string[] = [];
+  const f = await grantedRuntime(base => ({ ...base, request: async (connection, req, signal) => {
+    operations.push(req.operation); if (req.operation === 'type') ++edits;
+    const reply = await base.request(connection, req, signal);
+    if (req.operation === 'observe' && reply.outcome === 'OK' && 'snapshotId' in reply.data && first) { first = false; expiry = Date.now() + 500; return { ...reply, data: { ...reply.data, expiresAt: expiry } }; }
+    return reply;
+  } }));
+  try {
+    const observed = await f.invoke('observe'); assert.equal(observed.data.expiresAt, expiry);
+    await new Promise(resolve => setTimeout(resolve, 300)); operations.length = 0;
+    const input = { ref: observed.data.elements[0].ref, text: 'fixture', mode: 'replace' };
+    const stale = await f.invoke('type', input); assert.equal(stale.browserRecovery.reason, 'SNAPSHOT_EXPIRED'); assert.equal(stale.browserObservation.status, 'OK'); assert.deepEqual(operations, ['observe']); assert.equal(edits, 0);
+    const completed = await f.invoke('type', { ...input, ref: stale.browserObservation.data.elements[0].ref }); assert.equal(completed.data.action.status, 'COMPLETED'); assert.equal(edits, 1);
+  } finally { f.h.close(); }
+});
+test('pending step budget cannot be reset by switching action; at most two pre-execution recoveries', async () => {
+  const f = await grantedRuntime(); let edits = 0; f.h.f.dom.window.document.addEventListener('input', () => { ++edits; });
+  try {
+    const observed = await f.invoke('observe'); const typed = await f.invoke('type', { ref: observed.data.elements[0].ref, text: 'fixture', mode: 'replace' });
+    let failed = await f.invoke('press', { ref: observed.data.elements[0].ref, key: 'Enter' }); assert.equal(failed.browserRecovery.remainingRecoveries, 2);
+    const different = await f.invoke('type', { ref: typed.data.observation.data.elements[0].ref, text: 'other query', mode: 'replace' }); assert.equal(different.category, 'REJECTED'); assert.equal(different.browserObservation.reason, 'STEP_PENDING'); assert.equal(edits, 1);
+    for (let remaining = 1; remaining >= 0; remaining--) {
+      const ref = failed.browserObservation.data.elements[0].ref;
+      const input = f.h.f.dom.window.document.querySelector('input')!; input.replaceWith(input.cloneNode(true));
+      failed = await f.invoke('press', { ref, key: 'Enter' }); assert.equal(failed.browserRecovery.remainingRecoveries, remaining);
+    }
+    assert.equal(failed.browserRecovery.recoverable, false); assert.equal(failed.browserObservation.status, 'FAILED'); assert.equal(edits, 1);
+  } finally { f.h.close(); }
+});
+
+test('post-action READ aborted or stalled preserves COMPLETED and does not replay the action', async () => {
+  let hold = false; let entered!: () => void; let reads = 0; let edits = 0;
+  const received = new Promise<void>(resolve => { entered = resolve; });
+  const f = await grantedRuntime(base => ({ ...base, request: async (connection, req, signal) => {
+    if (req.operation === 'observe' && hold) { ++reads; entered(); return new Promise(() => {}); }
+    const result = await base.request(connection, req, signal); if (req.operation === 'type') ++edits; return result;
+  } }));
+  const aborted = new AbortController();
+  try {
+    const observed = await f.invoke('observe'); hold = true;
+    const operation = f.provider.inSession(session, () => f.provider.interact('type', { ref: observed.data.elements[0].ref, text: 'fixture', mode: 'replace' }, async () => {
+      await f.provider.type(observed.data.elements[0].ref, 'fixture', 'replace', aborted.signal); return { typed: true };
+    }, aborted.signal));
+    await received; aborted.abort();
+    const result = await operation; assert.equal(result.action.status, 'COMPLETED'); assert.deepEqual(result.observation, { status: 'FAILED', reason: 'TIMEOUT' }); assert.equal(reads, 1); assert.equal(edits, 1);
+    hold = false; const fresh = await f.invoke('observe'); assert.equal(fresh.status, 'success');
+  } finally { f.h.close(); }
+});
+test('tool telemetry keeps sanitized conflict reasons and stage durations without page/text payloads', async () => {
+  const f = await grantedRuntime(base => ({ ...base, request: async (connection, req, signal) => {
+    const reply = await base.request(connection, req, signal); return { ...reply, timings: { ...reply.timings, injectionMs: 3, initializationMs: 2, returnMs: 1 } };
+  } }));
+  try {
+    const first = await f.invoke('observe'); const typed = await f.invoke('type', { ref: first.data.elements[0].ref, text: 'PRIVATE_WRITTEN_SENTINEL', mode: 'replace' }); assert.equal(typed.data.action.status, 'COMPLETED');
+    await f.invoke('press', { ref: first.data.elements[0].ref, key: 'Enter' });
+    const rows = f.executor.telemetry.snapshot(); const conflict = rows.find(row => row.toolId === 'browser.press')!;
+    assert.equal(conflict.reason, 'SNAPSHOT_CONSUMED');
+    assert.ok(typeof conflict.timings?.queueMs === 'number'); assert.ok(typeof conflict.timings?.transportMs === 'number');
+    assert.equal(conflict.timings?.injectionMs, 3); assert.equal(conflict.timings?.initializationMs, 2); assert.equal(conflict.timings?.returnMs, 1);
+    assert.ok(!JSON.stringify(rows).includes('PRIVATE')); assert.ok(!JSON.stringify(rows).includes('fixture.example'));
+  } finally { f.h.close(); }
 });

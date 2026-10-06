@@ -1,3 +1,4 @@
+import { conflictSchema, timingSchema, observationResultSchema } from '../browser/attached/protocol.js';
 import type { TraceSink } from '../diagnostics/confirmation.js';
 import { randomUUID } from 'node:crypto';
 import { requiresConfirmation } from './permissions.js';
@@ -16,7 +17,12 @@ const messages: Record<ErrorCategory, string> = {
 };
 export function safeError(error: unknown): ToolResult {
   const category = error instanceof ToolError ? error.category : 'UPSTREAM';
-  return { status: 'error', category, message: messages[category] };
+  const detail = error instanceof ToolError && category === 'CONFLICT' ? error.browserRecovery : undefined;
+  const parsed = conflictSchema.safeParse(detail && { reason: detail.reason, execution: detail.execution });
+  const browserRecovery = detail && parsed.success && Number.isInteger(detail.remainingRecoveries) && detail.remainingRecoveries >= 0 && detail.remainingRecoveries <= 2 && typeof detail.recoverable === 'boolean' && detail.recoverable === (detail.remainingRecoveries > 0)
+    ? { ...parsed.data, remainingRecoveries: detail.remainingRecoveries, recoverable: detail.recoverable } : undefined;
+  const observation = observationResultSchema.safeParse(error instanceof ToolError ? error.browserObservation : undefined);
+  return { status: 'error', category, ...(observation.success ? { browserObservation: observation.data } : {}), message: observation.success && observation.data.status === 'FAILED' && observation.data.reason === 'STEP_PENDING' ? 'Existe un paso pendiente. No repitas acciones completadas ni cambies de operación para reiniciar el presupuesto.' : browserRecovery ? browserRecovery.recoverable ? browserRecovery.reason === 'SNAPSHOT_CONSUMED' ? 'El contexto anterior ya fue consumido; no atribuyas esto a cambios de página ni repitas una acción completada. Usa las refs de la observación nueva.' : 'La acción no se ejecutó. Resuelve el control en la observación nueva en silencio; no es un control bloqueado.' : 'La acción no se ejecutó. Se agotaron las dos recuperaciones de este paso; detente sin más intentos.' : messages[category], ...(browserRecovery ? { browserRecovery } : {}) };
 }
 interface Pending { id: string; tool: ToolDefinition; input: unknown; expiresAt: number; pendingAt: number; row: ToolActivity }
 export class ToolExecutor {
@@ -104,13 +110,15 @@ export class ToolExecutor {
     row.status = 'running'; const started = this.now();
     try {
       const data = await this.bounded(tool, signal => tool.execute(input, signal));
+      if (tool.integration === 'browser') { const timings = timingSchema.safeParse(data && typeof data === 'object' && 'browserTimings' in data ? data.browserTimings : undefined); if (timings.success) row.timings = timings.data; }
       row.executionMs = this.now() - started; row.status = 'success'; this.end(row); return { status: 'success', data };
     } catch (error) { row.executionMs = this.now() - started; return this.finishError(row, error); }
   }
   private end(row: ToolActivity): void { row.endedAt = this.now(); row.durationMs = row.endedAt - row.startedAt; }
   private finishError(row: ToolActivity, error: unknown): ToolResult {
     const result = safeError(error); row.status = 'error';
-    if (result.status === 'error') row.errorCategory = result.category;
+    if (result.status === 'error') { row.errorCategory = result.category; if (result.browserRecovery) row.reason = result.browserRecovery.reason; }
+    const timings = timingSchema.safeParse(error instanceof ToolError ? error.browserTimings : undefined); if (timings.success) row.timings = timings.data;
     this.end(row); return result;
   }
   invalidate(reason: 'rejected' | 'expired' = 'rejected'): void {

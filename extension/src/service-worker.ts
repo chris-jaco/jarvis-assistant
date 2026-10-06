@@ -1,10 +1,10 @@
 import { popupSender } from './senders.js';
 import { ExtensionController } from './controller.js';
-import { helloSchema, cancelSchema, responseSchema, replySchema, MAX_PAYLOAD } from '../../src/browser/attached/protocol.js';
-import type { Reply } from '../../src/browser/attached/protocol.js';
+import { helloSchema, cancelSchema, responseSchema, MAX_PAYLOAD } from '../../src/browser/attached/protocol.js';
+import { contentRequest } from './content-transport.js';
 import { z } from 'zod';
 let port: chrome.runtime.Port | undefined; let reconnect: ReturnType<typeof setTimeout> | undefined; let delay = 500;
-const invalidate = async (tab: number) => { await chrome.tabs.sendMessage(tab, { kind: 'revoke' }, { frameId: 0 }).catch(() => {}); };
+const invalidate = async (tab: number, documentOnly = false) => { await chrome.tabs.sendMessage(tab, { kind: documentOnly ? 'documentChanged' : 'revoke' }, { frameId: 0 }).catch(() => {}); };
 const controller = new ExtensionController({
   current: async () => { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (tab?.id === undefined || !tab.url) throw new Error('ACCESS_DENIED'); return { id: tab.id, url: tab.url, title: tab.title ?? '' }; },
   create: async url => { const tab = await chrome.tabs.create({ url, active: true }); if (tab.id === undefined) throw new Error('UNSUPPORTED'); return tab.id; },
@@ -12,17 +12,7 @@ const controller = new ExtensionController({
   navigate: async (id, url) => { await chrome.tabs.update(id, { url, active: true }); },
   history: async (id, action) => { if (action === 'reload') await chrome.tabs.reload(id); else if (action === 'back') await chrome.tabs.goBack(id); else await chrome.tabs.goForward(id); },
   invalidate,
-  content: async (id, grant, request): Promise<Reply> => {
-    try {
-      if (controller.epoch !== request.connectionEpoch || request.deadlineAt <= Date.now()) throw new Error('ACCESS_DENIED');
-      await chrome.tabs.update(id, { active: true });
-      await chrome.scripting.executeScript({ target: { tabId: id, frameIds: [0] }, world: 'ISOLATED', files: ['content.js'] });
-      if (controller.epoch !== request.connectionEpoch || request.deadlineAt <= Date.now()) throw new Error('ACCESS_DENIED');
-      const initialized = await chrome.tabs.sendMessage(id, { kind: 'init', access: { scopeId: grant.scopeId, tabId: grant.tabId, session: grant.session, epoch: request.connectionEpoch, origin: grant.origin, expiresAt: grant.expiresAt } }, { frameId: 0 });
-      if (initialized?.completed !== true) throw new Error('ACCESS_DENIED');
-      return replySchema.parse(await chrome.tabs.sendMessage(id, request, { frameId: 0 }));
-    } catch { return { outcome: 'REQUIRES_USER_INTERACTION', handoffId: crypto.randomUUID(), reason: 'ORIGIN_PERMISSION' }; }
-  }
+  content: (id, grant, request) => contentRequest(chrome, () => controller.epoch, id, grant, request)
 }, message => { if (port) { try { port.postMessage(message); } catch { /* Disconnect resets grants below. */ } } void badge(); });
 async function badge() { await chrome.action.setBadgeText({ text: controller.pending().length ? '?' : controller.authorized().length ? 'ON' : '' }); await chrome.action.setBadgeBackgroundColor({ color: '#35E6D0' }); }
 function connect(): void {

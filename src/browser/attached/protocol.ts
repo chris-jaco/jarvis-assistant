@@ -3,7 +3,11 @@ export const MAX_PAYLOAD = 65_536;
 export const uuid = z.string().uuid();
 const empty = z.object({}).strict();
 export const reasons = z.enum(['CAPTCHA', 'AUTHENTICATION', 'MFA', 'CHALLENGE', 'ORIGIN_PERMISSION', 'UNSUPPORTED_CONTROL', 'MEDIA_USER_GESTURE']);
-export const errors = z.enum(['INVALID_INPUT', 'ACCESS_DENIED', 'EXPIRED', 'STALE_REF', 'DISCONNECTED', 'TIMEOUT', 'UNSUPPORTED', 'REJECTED', 'EXECUTION_UNKNOWN']);
+export const conflictSchema = z.object({ reason: z.enum(['SNAPSHOT_CONSUMED', 'SNAPSHOT_EXPIRED', 'DOCUMENT_CHANGED', 'ELEMENT_CHANGED']), execution: z.literal('NOT_EXECUTED') }).strict();
+export const timingSchema = z.object({ queueMs: z.number().min(0).max(30_000).optional(), injectionMs: z.number().min(0).max(30_000).optional(), initializationMs: z.number().min(0).max(30_000).optional(), observationBuildMs: z.number().min(0).max(30_000).optional(), returnMs: z.number().min(0).max(30_000).optional(), transportMs: z.number().min(0).max(30_000).optional() }).strict();
+export type BrowserTimings = z.infer<typeof timingSchema>;
+export type BrowserConflictDetail = z.infer<typeof conflictSchema>;
+export const errors = z.enum(['INVALID_INPUT', 'ACCESS_DENIED', 'CONTENT_UNAVAILABLE', 'EXPIRED', 'STALE_REF', 'DISCONNECTED', 'TIMEOUT', 'UNSUPPORTED', 'REJECTED', 'EXECUTION_UNKNOWN']);
 export const binding = z.object({ scopeId: uuid, tabId: uuid }).strict();
 export const refBinding = binding.extend({ documentId: uuid, snapshotId: uuid, ref: uuid }).strict();
 const url = z.string().url().max(2000);
@@ -25,14 +29,18 @@ export interface Request { protocol: 'atlas.browser'; version: 1; kind: 'request
 export const tabSchema = z.object({ id: uuid, scopeId: uuid, title: z.string().max(120), url: z.string().max(300), active: z.boolean(), expiresAt: z.number().int(), state: z.enum(['ACTIVE', 'MANUAL_INTERVENTION', 'SUSPENDED_ORIGIN', 'SUSPENDED_CONNECTION']) }).strict();
 export type AuthorizedTab = z.infer<typeof tabSchema>;
 export const elementSchema = z.object({ ref: uuid, role: z.string().max(30), name: z.string().max(120), type: z.string().max(20), disabled: z.boolean(), action: z.enum(['navigation', 'search', 'media', 'consent', 'blocked']), state: z.object({ paused: z.boolean().optional(), checked: z.boolean().optional(), expanded: z.boolean().optional() }).strict().optional() }).strict();
-export const observationSchema = z.object({ tabId: uuid, scopeId: uuid, documentId: uuid, snapshotId: uuid, url: z.string().max(300), title: z.string().max(120), elements: z.array(elementSchema).max(40), truncated: z.boolean(), dialog: z.object({ role: z.string().max(30), name: z.string().max(120) }).strict().optional() }).strict().refine(value => JSON.stringify(value).length <= 12_000);
+export const observationSchema = z.object({ tabId: uuid, scopeId: uuid, documentId: uuid, snapshotId: uuid, expiresAt: z.number().int().positive(), url: z.string().max(300), title: z.string().max(120), elements: z.array(elementSchema).max(40), truncated: z.boolean(), dialog: z.object({ role: z.string().max(30), name: z.string().max(120) }).strict().optional() }).strict().refine(value => JSON.stringify(value).length <= 12_000);
+export type AttachedObservation = z.infer<typeof observationSchema>;
+export const observationResultSchema = z.discriminatedUnion('status', [z.object({ status: z.literal('OK'), data: observationSchema }).strict(), z.object({ status: z.literal('FAILED'), reason: z.enum([...errors.options, ...reasons.options, ...conflictSchema.shape.reason.options, 'OBSERVATION_REQUIRED', 'STEP_PENDING', 'UPSTREAM']) }).strict()]);
+export type ObservationResult = z.infer<typeof observationResultSchema>;
+export interface InteractionResult { action: { status: 'COMPLETED' }; result: unknown; observation: ObservationResult; requiresFreshObservation: boolean }
 const status = z.object({ available: z.boolean(), connected: z.boolean(), visible: z.literal(true), connections: z.array(uuid).max(10) }).strict();
 const ack = z.object({ completed: z.literal(true), paused: z.boolean().optional() }).strict();
 export const replySchema = z.discriminatedUnion('outcome', [
-  z.object({ outcome: z.literal('OK'), data: z.union([status, tabSchema, z.array(tabSchema).max(20), observationSchema, ack]) }).strict(),
-  z.object({ outcome: z.literal('ACCESS_PENDING'), accessRequestId: uuid, expiresAt: z.number().int().positive() }).strict(),
-  z.object({ outcome: z.literal('REQUIRES_USER_INTERACTION'), handoffId: uuid, reason: reasons }).strict(),
-  z.object({ outcome: z.literal('ERROR'), code: errors }).strict()
+  z.object({ outcome: z.literal('OK'), timings: timingSchema.optional(), data: z.union([status, tabSchema, z.array(tabSchema).max(20), observationSchema, ack]) }).strict(),
+  z.object({ outcome: z.literal('ACCESS_PENDING'), timings: timingSchema.optional(), accessRequestId: uuid, expiresAt: z.number().int().positive() }).strict(),
+  z.object({ outcome: z.literal('REQUIRES_USER_INTERACTION'), timings: timingSchema.optional(), handoffId: uuid, reason: reasons }).strict(),
+  z.object({ outcome: z.literal('ERROR'), timings: timingSchema.optional(), code: errors, conflict: conflictSchema.optional() }).strict().refine(reply => !reply.conflict || reply.code === 'STALE_REF')
 ]);
 export type Reply = z.infer<typeof replySchema>;
 export const helloSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('hello'), connectionEpoch: uuid }).strict();
