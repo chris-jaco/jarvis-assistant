@@ -87,17 +87,10 @@ export class OpenAIVoiceProvider implements VoiceProvider {
         const response=raw.response as {id?:string;output?:{type?:string;id?:string}[]}|undefined;
         const responseId=typeof raw.response_id==='string'?raw.response_id:response?.id;
         if(event.type==='response.created'&&responseId)gate.response(responseId);
-        if(event.type==='response.output_item.added'&&responseId){const item=event.item as {id?:string;type?:string}|undefined;if(item?.id)gate.item(responseId,item.id);if(item?.type==='function_call')gate.tool();}
+        if(event.type==='response.output_item.added'&&responseId){const item=event.item as {id?:string;type?:string}|undefined;if(item?.id)gate.item(responseId,item.id,item.type);if(item?.type==='function_call')gate.tool(responseId);}
         if(event.type==='input_audio_buffer.speech_started')gate.turn(bridge.confirmationActive);
         if(event.type==='output_audio_buffer.started')gate.playback(responseId);
-        if(event.type==='response.done'&&responseId&&gate.done(responseId)){
-          // Fresh ordinary response after a silent routing turn. No buffered
-          // audio or hidden narration is replayed. Browser RUNNING never enters here.
-          // This completed admission response had no tools: discard only its
-          // remaining server audio, without cancelling any response/function.
-          transport.sendEvent({type:'output_audio_buffer.clear'});
-          transport.sendEvent({type:'response.create',response:{tool_choice:'none',instructions:baseInstructions+'\n'+memoryContext+'\nRespondé ahora al último pedido real del usuario, de forma natural y breve. No hagas acknowledgement del turno interno ni repitas narración previa.'}});
-        }
+        if(event.type==='response.done'&&responseId)gate.done(responseId);
         void bridge.transportEvent(event).catch(() => undefined);
         if (event.type === 'input_audio_buffer.speech_started' && typeof event.item_id === 'string') memory.speechStarted(event.item_id);
         if (event.type === 'conversation.item.input_audio_transcription.completed' && typeof event.item_id === 'string' && typeof event.transcript === 'string') {

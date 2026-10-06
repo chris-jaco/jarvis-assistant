@@ -435,7 +435,7 @@ test('action completion survives failed post-observe and duplicate type requests
     const observed = await f.invoke('observe'); const input = { ref: observed.data.elements[0].ref, text: 'fixture', mode: 'replace' };
     reads = 0; const typed = await f.invoke('type', input);
     assert.equal(typed.status, 'success'); assert.equal(typed.data.action.status, 'COMPLETED'); assert.deepEqual(typed.data.observation, { status: 'FAILED', reason: 'UPSTREAM' });
-    assert.equal(typed.data.requiresFreshObservation, true); assert.equal(edits, 1); assert.equal(reads, 1);
+    assert.equal(typed.data.requiresFreshObservation, true); assert.equal(edits, 1); assert.equal(reads, 3);
     const repeated = await f.invoke('type', input); assert.equal(repeated.data.action.status, 'COMPLETED'); assert.equal(edits, 1);
     failure = false;
     const rejected = await f.invoke('press', { ref: input.ref, key: 'Enter' }); assert.equal(rejected.category, 'CONFLICT'); assert.equal(rejected.browserObservation.status, 'OK');
@@ -570,7 +570,7 @@ test('normalized completed action survives failed post-READ and later observe; v
   await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);const seen=await provider.observe(signal());const input={ref:seen.elements[0]!.ref,text:'Fixture',mode:'replace'};
   const type=adapter.tools().find(t=>t.id==='browser.type')!;const result:any=await type.execute(input,signal());assert.equal(result.action.status,'COMPLETED');assert.equal(result.actionOutcome.outcome,'ACTION_EXECUTED_UNVERIFIED');assert.equal(result.observation.status,'FAILED');
   await assert.rejects(provider.observe(signal()),/UPSTREAM/);assert.equal(provider.state(session).actionOutcome!.execution,'EXECUTED');
-  const verify=adapter.tools().find(t=>t.id==='browser.verify')!;for(let i=0;i<2;i++){const checked:any=await verify.execute({},signal());assert.equal(checked.actionOutcome.outcome,'ACTION_EXECUTED_UNVERIFIED');}await assert.rejects(verify.execute({},signal()),/LIMIT/);
+  const verify=adapter.tools().find(t=>t.id==='browser.verify')!;for(let i=0;i<3;i++){const checked:any=await verify.execute({},signal());assert.equal(checked.actionOutcome.outcome,'ACTION_EXECUTED_UNVERIFIED');assert.equal(checked.step,'NOT_APPLICABLE');}
   const duplicate:any=await type.execute(input,signal());assert.equal(duplicate.actionOutcome.execution,'EXECUTED');assert.equal(writes,1);
  });}finally{await provider.close();h.close();}
 });
@@ -597,4 +597,106 @@ test('outer ToolExecutor timeout after known mutation cannot erase execution evi
  const provider=new AttachedChromeProvider(transport);const adapter=new BrowserAdapter(provider);const registry=new ToolRegistry();registry.add({integration:'browser',transport:'local',tools:()=>adapter.tools().map(tool=>({...tool,timeoutMs:20}))});const executor=new ToolExecutor(registry);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
  try{await adapter.inSession(session,async()=>{await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);const seen=await provider.observe(signal());const result=await executor.invoke(id(),'browser.type',{ref:seen.elements[0]!.ref,text:'Fixture',mode:'replace'});assert.equal(result.status,'error');await new Promise<void>(resolve=>setImmediate(resolve));assert.equal(adapter.state(session)!.actionOutcome!.execution,'EXECUTED');assert.equal(adapter.state(session)!.actionOutcome!.outcome,'ACTION_EXECUTED_UNVERIFIED');assert.equal(writes,1);});}
  finally{executor.close();await provider.close();h.close();}
+});
+
+for (const failPostSubmit of [false,true]) test(`multi-step search continues after executed-unverified; failed post-submit READ=${failPostSubmit}`,async()=>{
+  let readsToFail=0,submits=0,clicks=0;const operations:string[]=[];
+  const f=await grantedRuntime(base=>({...base,request:async(connection,req,abort)=>{
+    operations.push(req.operation);if(req.operation==='click')++clicks;
+    if(req.operation==='observe'&&readsToFail-- > 0)return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};
+    const result=await base.request(connection,req,abort);
+    if(req.operation==='press'&&failPostSubmit)readsToFail=1;
+    return result;
+  }}));
+  f.h.f.dom.window.HTMLFormElement.prototype.requestSubmit=function(){++submits;const link=f.h.f.dom.window.document.createElement('a');link.href='/result';link.textContent='Result';link.addEventListener('click',e=>{e.preventDefault();});f.h.f.dom.window.document.body.append(link);};
+  try{
+    const seen=await f.invoke('observe');
+    const typed=await f.invoke('type',{ref:seen.data.elements[0].ref,text:'fixture',mode:'replace'});
+    assert.equal(typed.data.actionOutcome.execution,'EXECUTED');assert.equal(typed.data.actionOutcome.step,'NOT_APPLICABLE');
+    const checked=await f.invoke('verify');assert.equal(checked.data.step,'NOT_APPLICABLE');
+    const pressed=await f.invoke('press',{ref:typed.data.observation.data.elements[0].ref,key:'Enter'});
+    assert.equal(pressed.data.actionOutcome.execution,'EXECUTED');assert.equal(pressed.data.observation.status,'OK');
+    const link=pressed.data.observation.data.elements.find((el:any)=>el.role==='link');assert.ok(link);
+    const clicked=await f.invoke('click',{ref:link.ref});assert.equal(clicked.data.action.status,'COMPLETED');assert.equal(submits,1);assert.equal(clicks,1);
+    assert.equal(operations.filter(op=>op==='press').length,1);assert.equal(operations.filter(op=>op==='type').length,1);
+    if(failPostSubmit)assert.ok(pressed.data.observation.data.snapshotId);
+  }finally{f.executor.close();await f.provider.close();f.h.close();}
+});
+
+test('two failed recovery READs end TASK INCONCLUSIVE while action remains EXECUTED',async()=>{
+  let afterAction=false,reads=0,writes=0;const h=harness();const base=h.transport;
+  const provider=new AttachedChromeProvider({...base,request:async(c,req,abort)=>{
+    if(req.operation==='observe'&&afterAction){++reads;return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};}
+    const result=await base.request(c,req,abort);if(req.operation==='type'){afterAction=true;++writes;}return result;
+  }});
+  const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+  try{await adapter.inSession(session,async()=>{
+    await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);const seen=await provider.observe(signal());
+    const result:any=await adapter.tools().find(t=>t.id==='browser.type')!.execute({ref:seen.elements[0]!.ref,text:'fixture',mode:'replace'},signal());
+    assert.equal(result.actionOutcome.execution,'EXECUTED');assert.equal(reads,3);assert.equal(writes,1);assert.equal(adapter.state(session)!.executionState,'INCONCLUSIVE');assert.equal(adapter.state(session)!.contextRecovery!.attempts,2);
+    const verification:any=await adapter.tools().find(t=>t.id==='browser.verify')!.execute({},signal());assert.equal(verification.step,'NOT_APPLICABLE');assert.equal(reads,3);assert.notEqual(adapter.state(session)!.executionState,'FAILED');
+    await adapter.tools().find(t=>t.id==='browser.endTask')!.execute({},signal());assert.equal(adapter.state(session)!.executionState,'INCONCLUSIVE');
+    afterAction=false;await provider.requestTabAccess({target:{kind:'current'},purpose:'New explicit task',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);assert.equal(provider.state(session).contextRecovery,null);
+  });}finally{await provider.close();h.close();}
+});
+
+test('optional verify budget ends STEP INCONCLUSIVE, not TASK FAILED, and never repeats navigation',async()=>{
+  let navigations=0;const h=harness();const base=h.transport;
+  const provider=new AttachedChromeProvider({...base,request:async(c,req,abort)=>{if(req.operation==='navigate')++navigations;return base.request(c,req,abort);}});
+  const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+  try{await adapter.inSession(session,async()=>{
+    await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);await provider.observe(signal());
+    const tools=adapter.tools();await tools.find(t=>t.id==='browser.navigate')!.execute({url:'https://workspace.example/expected?q=redacted'},signal());
+    for(let n=0;n<3;n++){const result:any=await tools.find(t=>t.id==='browser.verify')!.execute({},signal());assert.equal(result.step,'INCONCLUSIVE');assert.equal(result.actionOutcome.execution,'EXECUTED');assert.equal(adapter.state(session)!.executionState,'RUNNING');}
+    assert.equal(navigations,1);
+  });}finally{await provider.close();h.close();}
+});
+
+test('transient READ error after a completed action recovers internally and resumes task',async()=>{
+  let fail=0;const h=harness();const base=h.transport;
+  const provider=new AttachedChromeProvider({...base,request:async(c,req,abort)=>{if(req.operation==='observe'&&fail-- > 0)return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};return base.request(c,req,abort);}});
+  const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+  try{await adapter.inSession(session,async()=>{
+    await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);const seen=await provider.observe(signal());
+    await adapter.tools().find(t=>t.id==='browser.type')!.execute({ref:seen.elements[0]!.ref,text:'fixture',mode:'replace'},signal());fail=1;
+    const result:any=await adapter.tools().find(t=>t.id==='browser.observe')!.execute({},signal());assert.equal(result.observation.status,'OK');assert.equal(result.actionOutcome.execution,'EXECUTED');assert.equal(adapter.state(session)!.executionState,'RUNNING');assert.ok(adapter.state(session)!.contextRecovery!.ready);
+  });}finally{await provider.close();h.close();}
+});
+
+test('attached adapter → real HTTP → VoiceToolBridge → continuation preserves multi-step search after READ recovery',async()=>{
+  const {createServer}=await import('node:http');const {createToolsHandler}=await import('../server/tools.js');const {VoiceToolBridge}=await import('../provider/tools.js');const {RunContext}=await import('@openai/agents-core');
+  const h=harness();const baseTransport=h.transport;let failRead=0,submits=0,clicks=0;const operations:string[]=[];
+  h.f.dom.window.HTMLFormElement.prototype.requestSubmit=function(){++submits;const a=h.f.dom.window.document.createElement('a');a.href='/result';a.textContent='Result';a.onclick=e=>{e.preventDefault();};h.f.dom.window.document.body.append(a);};
+  const provider=new AttachedChromeProvider({...baseTransport,request:async(c,req,abort)=>{operations.push(req.operation);if(req.operation==='click')++clicks;if(req.operation==='observe'&&failRead-- > 0)return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};const result=await baseTransport.request(c,req,abort);if(req.operation==='press')failRead=1;return result;}});
+  await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});const adapter=new BrowserAdapter(provider);const registry=new ToolRegistry();registry.add(adapter);
+  const runtime=createToolsHandler({}, {}, {runtime:{registry,timezone:'Europe/Madrid',browser:adapter}});
+  const server=createServer(async(req,res)=>{await runtime.handle(req,res);});await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const base=`http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;const nativeFetch=globalThis.fetch;let cookie='';const notifications:string[]=[];const states:string[]=[];
+  globalThis.fetch=async(path,opts)=>{const headers=new Headers(opts?.headers);if(cookie)headers.set('Cookie',cookie);const result=await nativeFetch(new URL(String(path),base),{...opts,headers});if(result.headers.get('set-cookie'))cookie=result.headers.get('set-cookie')!.split(';')[0]!;return result;};
+  const bridge=new VoiceToolBridge(()=>{},message=>notifications.push(message),undefined,undefined,{state:s=>states.push(s),tool:()=>{}});
+  try{
+    const config=await bridge.initialize();const invoke=async(name:string,input:unknown={})=>{const raw=await config.tools.find(t=>t.name==='browser_'+name)!.invoke(new RunContext(),JSON.stringify({inputJson:JSON.stringify(input)}));return typeof raw==='string'?JSON.parse(raw):raw as any;};
+    await invoke('requestAccess',{target:{kind:'current'},purpose:'Fixture',lifetime:'task'});await h.controller.approve(h.controller.pending()[0]!.id);
+    const seen=await invoke('observe');const typed=await invoke('type',{ref:seen.data.elements[0].ref,text:'fixture',mode:'replace'});
+    const pressed=await invoke('press',{ref:typed.data.observation.data.elements[0].ref,key:'Enter'});
+    assert.equal(pressed.browserExecutionState,'RUNNING');assert.equal(pressed.browserActionOutcome.execution,'EXECUTED');assert.equal(pressed.data.observation.status,'OK');assert.match(pressed.instruction,/siguiente paso distinto/);
+    const clicked=await invoke('click',{ref:pressed.data.observation.data.elements.find((el:any)=>el.role==='link').ref});assert.equal(clicked.status,'success');assert.equal(submits,1);assert.equal(clicks,1);assert.equal(operations.filter(op=>op==='press').length,1);assert.ok(!states.includes('FAILED'));assert.ok(!notifications.some(text=>/Sigue detenido/.test(text)));
+    const verified=await invoke('verify');assert.equal(verified.data.step,'NOT_APPLICABLE');assert.equal(verified.browserExecutionState,'RUNNING');await invoke('endTask');assert.equal(states.at(-1),'COMPLETED');
+  }finally{bridge.close();globalThis.fetch=nativeFetch;runtime.close();await new Promise<void>(resolve=>server.close(()=>resolve()));await provider.close();h.close();}
+});
+
+for(const intervention of ['revoked','challenge'] as const)test(`context recovery stops immediately on ${intervention} without another action`,async()=>{
+  const h=harness();const base=h.transport;let executed=false,reads=0,writes=0;
+  const provider=new AttachedChromeProvider({...base,request:async(c,req,abort)=>{
+    if(req.operation==='observe'&&executed){++reads;if(reads===1)return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};
+      if(intervention==='revoked'){await h.controller.revoke(h.controller.authorized()[0]!.scopeId);return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};}
+      h.f.dom.window.document.body.innerHTML='<h1>Verify you are human</h1>';
+    }
+    const result=await base.request(c,req,abort);if(req.operation==='type'){executed=true;++writes;}return result;
+  }});const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+  try{await adapter.inSession(session,async()=>{
+    await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);const seen=await provider.observe(signal());
+    const result:any=await adapter.tools().find(t=>t.id==='browser.type')!.execute({ref:seen.elements[0]!.ref,text:'fixture',mode:'replace'},signal());
+    assert.equal(result.actionOutcome.execution,'EXECUTED');assert.equal(writes,1);assert.equal(reads,2);assert.equal(adapter.state(session)!.executionState,intervention==='revoked'?'FAILED':'WAITING_MANUAL');
+  });}finally{await provider.close();h.close();}
 });

@@ -88,7 +88,19 @@ export class VoiceToolBridge {
             }
             if (descriptor.id.startsWith('browser.')) { const state = browserExecutionStateSchema.safeParse((result as unknown as {browserExecutionState?:unknown}).browserExecutionState); if (state.success) {const relation=(result as unknown as {browserOutcomeRelation?:string}).browserOutcomeRelation;const read=descriptor.permission==='READ'||['browser.observe','browser.verify','browser.status','browser.tabs','browser.resume'].includes(descriptor.id);const outcome=actionOutcomeSchema.safeParse((result as unknown as {browserActionOutcome?:unknown}).browserActionOutcome);return {...result,...(outcome.success&&outcome.data.execution==='EXECUTED'&&result.status==='error'&&(relation!=='LAST_ACTION'||read)?{message:'La acción fue ejecutada; falló una lectura o la devolución posterior. No repitas la acción.'}:{}),instruction:executionInstruction(state.data)+(outcome.success?' '+(relation==='LAST_ACTION'?'Última acción registrada, distinta de esta invocación READ/control o fallo de validación: ':'')+outcomeInstruction(outcome.data):'')};} }
             return result;
-          } catch { browserResult('UPSTREAM');if(descriptor.id.startsWith('browser.'))this.presentation?.state('FAILED'); return { status: 'error', message: 'La herramienta no respondió. No asumas que la acción se realizó; comprueba su estado antes de repetirla.' }; }finally{if(descriptor.id.startsWith('browser.'))--this.browserInvocations;}
+          } catch {
+            browserResult('UPSTREAM');
+            // A lost HTTP result is not proof of task/action failure. Reconcile
+            // the authoritative backend before presenting a terminal outcome.
+            if (descriptor.id.startsWith('browser.')) {
+              try {
+                const activity=await toolRequest('activity',undefined,'GET') as {browser?:unknown};
+                if(activity.browser){this.present(activity.browser);this.browserContinuation.update(activity.browser,this.confirmationActive,true);const state=activity.browser as {executionState?:unknown;actionOutcome?:unknown};const outcome=actionOutcomeSchema.safeParse(state.actionOutcome);const flow=browserExecutionStateSchema.safeParse(state.executionState);return {status:'error',category:'UPSTREAM',browserActionOutcome:outcome.success?outcome.data:null,browserExecutionState:flow.success?flow.data:undefined,browserOutcomeRelation:'LAST_ACTION',message:outcome.success&&outcome.data.execution==='EXECUTED'?'La última acción registrada fue ejecutada. No la repitas. Esta invocación perdió su resultado HTTP: reconciliá contexto READ antes de decidir cualquier paso.':'No se recibió el resultado. No reintentes ninguna acción ni asumas éxito; reconciliá el estado mediante READ.',instruction:'No repitas la invocación sin resultado ni la sustituyas por otra acción. Sólo reconciliación READ hasta identificar su ejecución. El outcome corresponde a la última acción registrada, no prueba por sí solo la ejecución de esta invocación. '+(flow.success?executionInstruction(flow.data):'')};}
+              } catch { /* Transport uncertainty never turns into an action retry. */ }
+              this.presentation?.state('INCONCLUSIVE');
+            }
+            return { status: 'error', message: 'No se pudo reconciliar el resultado. No reintentes la acción ni asumas éxito o fracaso; requiere comprobar el estado.' };
+          }finally{if(descriptor.id.startsWith('browser.'))--this.browserInvocations;}
         } })) };
   }
   private registerPromptResponse(responseId: string): void {
@@ -240,7 +252,7 @@ export class VoiceToolBridge {
       if (this.closed) return;
       if (this.pending && this.pending.confirmationId === expectedId && (!data.pending || data.pending.confirmationId !== this.pending.confirmationId)) { this.diagnostic('activity.refresh', 'backend_pending_missing_or_changed'); this.pending = null; this.armed = false; }
       this.activity(data.activity, this.pending);
-      if (data.browser) {const state=browserExecutionStateSchema.safeParse((data.browser as {executionState?:unknown}).executionState);if(state.success&&this.browserInvocations===0)this.present(data.browser);this.browserContinuation.update(data.browser, this.confirmationActive);}
+      if (data.browser) {const state=browserExecutionStateSchema.safeParse((data.browser as {executionState?:unknown}).executionState);if(state.success&&this.browserInvocations===0)this.present(data.browser);this.browserContinuation.update(data.browser, this.confirmationActive,this.browserInvocations>0);}
     } catch { /* Polling never breaks voice playback. Tool requests report failures. */ }
   }
   close(): void { this.diagnostic('bridge.close', 'session_closed'); this.closed = true; this.browserContinuation.close(); this.observedResponses.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE').catch(() => undefined); }

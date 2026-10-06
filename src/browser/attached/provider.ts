@@ -10,7 +10,9 @@ import type { BrowserProvider, BrowserTab, BrowserObservation, BrowserKey, Brows
 import { parseRequest, observationSchema, replySchema } from './protocol.js';
 import type { Operation, Reply, AuthorizedTab, BrowserConflictDetail, AttachedObservation, ObservationResult, InteractionResult, BrowserTimings } from './protocol.js';
 import type { BrowserTransport } from './transport.js';
-interface Session { accessCorrelation?:string; traceNext?:boolean; actionRecord?: ActionRecord; accessRevoked?: boolean; id: string; task: string; connection?: string; active?: string; tabs: Map<string, AuthorizedTab>; workflow?: Exclude<Reply, { outcome: 'OK' } | { outcome: 'ERROR' }>; ready?: string; observation?: { tabId: string; scopeId: string; documentId: string; snapshotId: string; refs: Set<string>; expires: number }; closed?: boolean; failures: number; uncertain?: boolean; invalidation?: BrowserConflictDetail['reason']; context: 'READY' | 'OBSERVATION_REQUIRED'; pendingStep?: string; completed?: { key: string; result: unknown; record:ActionRecord }; knownRefs: Map<string, string>; lastObservation?: AttachedObservation; timings: BrowserTimings; tail: Promise<unknown>; deadline?: number }
+const contextReadReasons: readonly string[] = ['UPSTREAM','TIMEOUT','OBSERVATION_REQUIRED','SNAPSHOT_EXPIRED','DOCUMENT_CHANGED','ELEMENT_CHANGED','SNAPSHOT_CONSUMED'];
+interface ContextRecovery { status: 'READY' | 'REQUIRED' | 'RECOVERING' | 'INCONCLUSIVE'; attempts: number; ready: string | null }
+interface Session { contextRecovery?: ContextRecovery; accessCorrelation?:string; traceNext?:boolean; actionRecord?: ActionRecord; accessRevoked?: boolean; id: string; task: string; connection?: string; active?: string; tabs: Map<string, AuthorizedTab>; workflow?: Exclude<Reply, { outcome: 'OK' } | { outcome: 'ERROR' }>; ready?: string; observation?: { tabId: string; scopeId: string; documentId: string; snapshotId: string; refs: Set<string>; expires: number }; closed?: boolean; failures: number; uncertain?: boolean; invalidation?: BrowserConflictDetail['reason']; context: 'READY' | 'OBSERVATION_REQUIRED'; pendingStep?: string; completed?: { key: string; result: unknown; record:ActionRecord }; knownRefs: Map<string, string>; lastObservation?: AttachedObservation; timings: BrowserTimings; tail: Promise<unknown>; deadline?: number }
 export class BrowserWorkflow extends Error { constructor(readonly reply: Exclude<Reply, { outcome: 'OK' }>) { super(reply.outcome); } }
 export class AttachedChromeProvider implements BrowserProvider {
   readonly attached = true; private scope = new AsyncLocalStorage<Session>(); private sessions = new Map<string, Session>();
@@ -20,7 +22,7 @@ export class AttachedChromeProvider implements BrowserProvider {
       if(event.trace){session.accessCorrelation=event.trace.correlationId;session.traceNext=true;this.accessDiagnostics?.event(event.trace.correlationId,'backend_received');}
       if (event.event === 'accessRequired' && event.access) { session.workflow = event.access; session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; }
       if (event.event === 'accessGranted' || event.scopeId === session.tabs.get(session.active ?? '')?.scopeId) { session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; session.invalidation = 'DOCUMENT_CHANGED'; }
-      if (event.event === 'accessGranted' && event.tab) { session.accessRevoked = false; session.failures = 0; session.pendingStep = undefined; session.completed = undefined; session.tabs.set(event.tab.id, event.tab); session.active = event.tab.id; if (session.workflow?.outcome === 'ACCESS_PENDING' && (!event.accessRequestId || event.accessRequestId === session.workflow.accessRequestId)) { session.workflow = undefined; session.ready = randomUUID(); } else if (session.workflow?.outcome === 'REQUIRES_USER_INTERACTION' && session.workflow.reason === 'ORIGIN_PERMISSION') { session.workflow = undefined; session.ready = randomUUID(); } }
+      if (event.event === 'accessGranted' && event.tab) { session.accessRevoked = false; session.failures = 0; session.pendingStep = undefined; session.completed = undefined; session.contextRecovery = undefined; session.tabs.set(event.tab.id, event.tab); session.active = event.tab.id; if (session.workflow?.outcome === 'ACCESS_PENDING' && (!event.accessRequestId || event.accessRequestId === session.workflow.accessRequestId)) { session.workflow = undefined; session.ready = randomUUID(); } else if (session.workflow?.outcome === 'REQUIRES_USER_INTERACTION' && session.workflow.reason === 'ORIGIN_PERMISSION') { session.workflow = undefined; session.ready = randomUUID(); } }
       else if (event.event === 'accessRevoked') { if (event.accessRequestId && (session.workflow?.outcome !== 'ACCESS_PENDING' || session.workflow.accessRequestId !== event.accessRequestId)) return; session.accessRevoked = true; session.ready = undefined; for (const [id, tab] of session.tabs) if (tab.scopeId === event.scopeId) { session.tabs.delete(id); if (session.active === id) session.active = undefined; } session.workflow = undefined; }
     });
   }
@@ -28,7 +30,7 @@ export class AttachedChromeProvider implements BrowserProvider {
     let session = this.sessions.get(id); if (!session) { if (this.sessions.size >= 10) throw new ToolError('LIMIT'); session = { id, task: randomUUID(), tabs: new Map(), failures: 0, context: 'OBSERVATION_REQUIRED', knownRefs: new Map(), timings: {}, tail: Promise.resolve() }; this.sessions.set(id, session); }
     if (session.closed) throw new ToolError('REJECTED'); return this.scope.run(session, work);
   }
-  state(id: string) { const session = this.sessions.get(id); return session && !session.closed ? { workflow: session.workflow ?? null, ready: session.ready ?? null, accessRevoked: session.accessRevoked ?? false, actionOutcome:session.actionRecord?.result() ?? null, accessCorrelation:session.accessCorrelation ?? null } : { workflow: null, ready: null }; }
+  state(id: string) { const session = this.sessions.get(id); return session && !session.closed ? { workflow: session.workflow ?? null, ready: session.ready ?? null, accessRevoked: session.accessRevoked ?? false, actionOutcome:session.actionRecord?.result() ?? null, accessCorrelation:session.accessCorrelation ?? null, contextRecovery:session.contextRecovery ?? null } : { workflow: null, ready: null }; }
   private session(): Session { const session = this.scope.getStore(); if (!session || session.closed) throw new ToolError('REJECTED'); return session; }
   private async connection(session: Session, signal: AbortSignal): Promise<string> {
     if (!this.enabled || this.transport.configuration?.().configured === false) throw new ToolError('UNCONFIGURED');
@@ -97,7 +99,9 @@ export class AttachedChromeProvider implements BrowserProvider {
     session.lastObservation = data; session.context = 'READY'; const tab = session.tabs.get(data.tabId); if (tab) { tab.title = data.title; tab.url = data.url; }
     for (const element of data.elements) session.knownRefs.set(element.ref, JSON.stringify([data.scopeId, element.role, element.name, element.type, element.action]));
     while (session.knownRefs.size > 160) session.knownRefs.delete(session.knownRefs.keys().next().value!);
-    session.observation = { tabId: data.tabId, scopeId: data.scopeId, documentId: data.documentId, snapshotId: data.snapshotId, refs: new Set(data.elements.map(el => el.ref)), expires: data.expiresAt }; if (handoffId) { session.workflow = undefined; session.ready = randomUUID(); } session.actionRecord?.observe({status:'OK',data});return data;
+    session.observation = { tabId: data.tabId, scopeId: data.scopeId, documentId: data.documentId, snapshotId: data.snapshotId, refs: new Set(data.elements.map(el => el.ref)), expires: data.expiresAt }; if (handoffId) { session.workflow = undefined; session.ready = randomUUID(); } session.actionRecord?.observe({status:'OK',data});
+    if (session.contextRecovery && ['REQUIRED','RECOVERING','INCONCLUSIVE'].includes(session.contextRecovery.status)) session.contextRecovery = { ...session.contextRecovery, status:'READY', ready:randomUUID() };
+    return data;
   }
   async resume(handoffId: string, signal: AbortSignal): Promise<Reply> {
     const session = this.session(); if (session.workflow?.outcome !== 'REQUIRES_USER_INTERACTION' || session.workflow.handoffId !== handoffId) throw new ToolError('REJECTED');
@@ -123,7 +127,7 @@ export class AttachedChromeProvider implements BrowserProvider {
   measurements(): BrowserTimings { return { ...this.session().timings }; }
   resetMeasurements(): void { this.session().timings = {}; }
   private async refresh(signal: AbortSignal, deadlineAt: number): Promise<ObservationResult> {
-    if (deadlineAt <= Date.now()) return { status: 'FAILED', reason: 'TIMEOUT' };
+    if (deadlineAt <= Date.now()) { if(this.canRecoverContext()) this.session().contextRecovery = {status:'RECOVERING',attempts:this.session().contextRecovery?.attempts ?? 0,ready:null}; return { status: 'FAILED', reason: 'TIMEOUT' }; }
     const remaining = deadlineAt - Date.now();
     const bounded = AbortSignal.any([signal, AbortSignal.timeout(remaining)]);
     try { return { status: 'OK', data: await this.observeWithResume(bounded) }; }
@@ -132,6 +136,12 @@ export class AttachedChromeProvider implements BrowserProvider {
       const reason = error instanceof BrowserWorkflow ? error.reply.outcome === 'ERROR' ? error.reply.code : error.reply.outcome === 'REQUIRES_USER_INTERACTION' ? error.reply.reason : 'OBSERVATION_REQUIRED'
         : error instanceof ToolError ? error.browserRecovery?.reason ?? error.category : 'UPSTREAM';
       this.session().actionRecord?.observe({status:'FAILED',reason:'UPSTREAM'});
+      if (this.canRecoverContext()) {
+        const recovery = this.session().contextRecovery ?? {status:'REQUIRED' as const,attempts:0,ready:null};
+        if (!contextReadReasons.includes(reason)) recovery.status='INCONCLUSIVE';
+        else if (recovery.status === 'READY') recovery.status = 'REQUIRED';
+        this.session().contextRecovery = recovery;
+      }
       return { status: 'FAILED', reason: reason === 'CONFLICT' || reason === 'UNCONFIGURED' || reason === 'LIMIT' || reason === 'AMBIGUOUS' ? 'OBSERVATION_REQUIRED' : reason };
     }
   }
@@ -152,7 +162,7 @@ export class AttachedChromeProvider implements BrowserProvider {
         // Consecutive duplicate of a completed action: return completion, never
         // execute it again even if its post-action READ failed.
         const observation = session.context === 'READY' && session.lastObservation && session.lastObservation.expiresAt - Date.now() > 250
-          ? { status: 'OK' as const, data: session.lastObservation } : await this.refresh(signal, deadlineAt);
+          ? { status: 'OK' as const, data: session.lastObservation } : await this.recoverReads(signal, deadlineAt, {status:'FAILED',reason:'UPSTREAM'});
         return { action: { status: 'COMPLETED' as const }, result: session.completed.result, observation, actionOutcome: session.actionRecord!.result(), requiresFreshObservation: observation.status !== 'OK' };
       }
       session.pendingStep = key;
@@ -172,15 +182,56 @@ export class AttachedChromeProvider implements BrowserProvider {
       // Commit completion before READ. Nothing after this point can change it
       // into a failed/uncertain action, or cause execute() to run a second time.
       record.executed();
+      session.contextRecovery = {status:'READY',attempts:0,ready:null};
       session.completed = { key, result,record }; session.pendingStep = undefined; session.failures = 0;
       session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; session.invalidation = 'SNAPSHOT_CONSUMED';
-      const observation = await this.refresh(signal, deadlineAt);
+      const observation = await this.recoverReads(signal, deadlineAt, await this.refresh(signal, deadlineAt));
       return { action: { status: 'COMPLETED' as const }, result, observation, actionOutcome:record.result(), requiresFreshObservation: observation.status !== 'OK' };
     });
     const finished = work.finally(() => { session.deadline = undefined; });
     session.tail = finished; return finished;
   }
-  async verify(signal:AbortSignal):Promise<unknown>{const session=this.session();const work=session.tail.catch(()=>{}).then(async()=>{if(!session.actionRecord?.claimRead())throw new ToolError('LIMIT');const observation=await this.refresh(signal,Date.now()+8000);return {actionOutcome:session.actionRecord.result(),observation};});session.tail=work;return work;}
+  // Context recovery is independent of optional effect verification. Only READ
+  // callbacks live here; execute() is never retained or called by recovery.
+  private canRecoverContext(): boolean {
+    const session = this.session(); const tab = session.tabs.get(session.active ?? '');
+    return session.actionRecord?.result().execution === 'EXECUTED' && !session.uncertain && !session.accessRevoked && !session.closed && !session.workflow && !!tab && tab.expiresAt > Date.now();
+  }
+  private async recoverReads(signal: AbortSignal, deadlineAt: number, initial: ObservationResult): Promise<ObservationResult> {
+    const session = this.session();
+    if (initial.status === 'OK' || !this.canRecoverContext()) return initial;
+    if (!contextReadReasons.includes(initial.reason)) return initial;
+    session.contextRecovery ??= {status:'REQUIRED', attempts:0, ready:null};
+    // A cancelled caller cannot authorize another READ. A later fresh request
+    // may spend the remaining budget; we never lengthen its execution deadline.
+    session.contextRecovery.status = 'RECOVERING';
+    let observation: ObservationResult = initial;
+    while (session.contextRecovery.attempts < 2 && !signal.aborted && Date.now() < deadlineAt && this.canRecoverContext()) {
+      ++session.contextRecovery.attempts;
+      observation = await this.refresh(signal, deadlineAt);
+      if (observation.status === 'OK') return observation;
+      if (!contextReadReasons.includes(observation.reason)) break;
+    }
+    if (this.canRecoverContext() && session.contextRecovery.attempts >= 2) session.contextRecovery.status = 'INCONCLUSIVE';
+    return observation;
+  }
+  async recoverContext(signal: AbortSignal): Promise<{observation:ObservationResult; actionOutcome:ReturnType<ActionRecord['result']> | null; contextRecovery:ContextRecovery | null}> {
+    const session = this.session();
+    const work = session.tail.catch(()=>{}).then(async()=>{
+      const observation = await this.recoverReads(signal, Date.now()+8000, {status:'FAILED',reason:'UPSTREAM'});
+      return {observation,actionOutcome:session.actionRecord?.result() ?? null,contextRecovery:session.contextRecovery ?? null};
+    }); session.tail=work; return work;
+  }
+  async verify(signal:AbortSignal):Promise<unknown> {
+    const session=this.session(); const work=session.tail.catch(()=>{}).then(async()=>{
+      const record=session.actionRecord;
+      const decision=record?.verificationRead() ?? 'NOT_APPLICABLE';
+      if (decision !== 'READ') return {step:decision,actionOutcome:record?.result() ?? null};
+      const deadlineAt=Date.now()+8000;
+      const observation=await this.recoverReads(signal,deadlineAt,await this.refresh(signal,deadlineAt));
+      return {step:observation.status==='OK' && record!.result().outcome==='ACTION_VERIFIED'?'VERIFIED':'INCONCLUSIVE',actionOutcome:record!.result(),observation};
+    });session.tail=work;return work;
+  }
   async click(ref: string, signal: AbortSignal): Promise<void> { this.unwrap(await this.call('click', this.ref(ref), signal)); }
   async type(ref: string, text: string, mode: 'replace' | 'append', signal: AbortSignal): Promise<void> { this.unwrap(await this.call('type', { ...this.ref(ref), text, mode }, signal)); }
   async press(ref: string, key: BrowserKey, signal: AbortSignal): Promise<void> { this.unwrap(await this.call('press', { ...this.ref(ref), key }, signal)); }

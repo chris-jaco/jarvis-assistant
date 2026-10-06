@@ -1204,5 +1204,5 @@ confirmaciones de acciones consecuenciales existentes.
 
 V0.5.2.1 (working tree, acceptance Windows pendiente): separa ejecución de
 verificación, aplica silencio RUNNING en audio/transcript y añade diagnostics
-opt-in del popup. La admisión añade un response en conversación sin herramientas.
+opt-in del popup. La admisión permite un único acknowledgement inicial opcional; luego RUNNING y RECOVERING_CONTEXT son silenciosos. No añade una ronda para la conversación ordinaria.
 Contrato, configuración y límites en [browser-attached.md](docs/browser-attached.md#v0521--estabilización-de-resultados-y-presentación).

@@ -5,6 +5,7 @@ export const actionOutcomeSchema = z.object({
   outcome: z.enum(['ACTION_FAILED','ACTION_EXECUTED_UNVERIFIED','ACTION_VERIFIED','EXECUTION_UNKNOWN']),
   execution: z.enum(['NOT_EXECUTED','EXECUTED','UNKNOWN']),
   verification: z.enum(['NOT_APPLICABLE','PENDING','INCONCLUSIVE','FAILED','VERIFIED']),
+  step: z.enum(['VERIFIED','UNVERIFIED','NOT_APPLICABLE','INCONCLUSIVE']).optional(),
   evidence: z.enum(['PLAYBACK_PLAYING','PAUSED','TARGET_LOCATION']).optional()
 }).strict().refine(value=>value.outcome==='ACTION_FAILED'?value.execution==='NOT_EXECUTED'&&value.verification==='NOT_APPLICABLE':value.outcome==='EXECUTION_UNKNOWN'?value.execution==='UNKNOWN':value.execution==='EXECUTED'&&(value.outcome==='ACTION_VERIFIED'?value.verification==='VERIFIED'&&!!value.evidence:value.verification!=='VERIFIED'));
 export type ActionOutcome = z.infer<typeof actionOutcomeSchema>;
@@ -32,11 +33,19 @@ export class ActionRecord {
     if(this.expected?.kind==='navigation'){try{const target=new URL(this.expected.target),actual=new URL(data.url);if(!target.search&&!target.hash&&actual.origin===target.origin&&actual.pathname===target.pathname)return 'TARGET_LOCATION';}catch{}}
     return;
   }
-  claimRead():boolean { return this.execution==='EXECUTED'&&this.verification!=='VERIFIED'&&this.reads++<2; }
-  result():ActionOutcome {return {actionId:this.actionId,execution:this.execution,verification:this.verification,outcome:this.execution==='UNKNOWN'?'EXECUTION_UNKNOWN':this.execution==='NOT_EXECUTED'?'ACTION_FAILED':this.verification==='VERIFIED'?'ACTION_VERIFIED':'ACTION_EXECUTED_UNVERIFIED',...(this.evidence?{evidence:this.evidence}:{})};}
+  get verifiable(): boolean { return this.expected !== undefined; }
+  verificationRead(): 'READ' | 'VERIFIED' | 'NOT_APPLICABLE' | 'INCONCLUSIVE' {
+    if (!this.verifiable) return 'NOT_APPLICABLE';
+    if (this.verification === 'VERIFIED') return 'VERIFIED';
+    if (this.claimRead()) return 'READ';
+    if (this.execution === 'EXECUTED') this.verification = 'INCONCLUSIVE';
+    return 'INCONCLUSIVE';
+  }
+  claimRead():boolean { return this.verifiable&&this.execution==='EXECUTED'&&this.verification!=='VERIFIED'&&this.reads++<2; }
+  result():ActionOutcome {return {step:this.execution==='UNKNOWN'?'INCONCLUSIVE':!this.verifiable?'NOT_APPLICABLE':this.verification==='VERIFIED'?'VERIFIED':this.verification==='PENDING'?'UNVERIFIED':'INCONCLUSIVE',actionId:this.actionId,execution:this.execution,verification:this.verification,outcome:this.execution==='UNKNOWN'?'EXECUTION_UNKNOWN':this.execution==='NOT_EXECUTED'?'ACTION_FAILED':this.verification==='VERIFIED'?'ACTION_VERIFIED':'ACTION_EXECUTED_UNVERIFIED',...(this.evidence?{evidence:this.evidence}:{})};}
 }
 export function outcomeInstruction(outcome:ActionOutcome):string {
-  if(outcome.execution==='EXECUTED'&&outcome.outcome==='ACTION_EXECUTED_UNVERIFIED')return 'La acción fue ejecutada/aceptada, pero su efecto no está verificado. Nunca digas «No pude hacerlo». Si terminás: «Ejecuté la acción, pero no pude comprobar el resultado». Sólo verificación READ acotada, nunca repetir la acción.';
+  if(outcome.execution==='EXECUTED'&&outcome.outcome==='ACTION_EXECUTED_UNVERIFIED')return 'La acción fue ejecutada/aceptada, pero su efecto no está verificado. Nunca digas «No pude hacerlo». Si terminás: «Ejecuté la acción, pero no pude comprobar el resultado». No repitas esa misma acción para verificarla. Si existe contexto fresco, continuá con el siguiente paso distinto de la tarea. Si falta contexto, recuperalo mediante READ acotado. Verificar un efecto no es confirmar una acción ni un requisito universal para continuar.';
   if(outcome.outcome==='EXECUTION_UNKNOWN')return 'Ejecución desconocida: no asumas éxito o fracaso, no retry ni otra vía de ejecutar la misma acción.';
   if(outcome.outcome==='ACTION_VERIFIED')return 'Efecto verificado mediante evidencia observable. Esto NO termina automáticamente la tarea.';
   return 'Esta acción no se ejecutó. No confundas este resultado con una acción anterior ejecutada.';

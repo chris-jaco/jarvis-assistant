@@ -1,45 +1,79 @@
 import type { BrowserExecutionState } from '../browser/execution-state.js';
-// This gate owns presentation only. It never cancels responses/tools, changes
-// capture tracks, or removes SDK conversation history.
+interface ResponseAdmission {
+  allowed: boolean;
+  accepted: boolean;
+  tools: boolean;
+  message?: string;
+  generation: number;
+}
+// Presentation only: no capture-track changes, response cancellation or tool
+// scheduling. One initial response may acknowledge; subsequent work is silent.
 export class PresentationGate {
-  private generation=0;
-  private state?:BrowserExecutionState;
-  private admission=true;
-  private ordinaryPermit=false;
-  private responses=new Map<string,{allowed:boolean;admission:boolean;tools:boolean;generation:number}>();
-  private items=new Map<string,{allowed:boolean}>();
-  private internalItems=new Set<string>();
-  internal(id:string):void{this.internalItems.add(id);while(this.internalItems.size>1000)this.internalItems.delete(this.internalItems.values().next().value!);}
-  userVisible(id:string):boolean{return !this.internalItems.has(id);}
-  private active?:string;
-  constructor(private readonly muteOutput:(muted:boolean)=>void){muteOutput(true);}
-  turn(confirmationActive=false):void {
-    if(confirmationActive || this.state==='WAITING_MANUAL' || this.state==='WAITING_ACCESS')return;
-    if(this.state==='RUNNING')return;
-    ++this.generation;this.active=undefined;this.state=undefined;this.admission=true;this.ordinaryPermit=false;this.muteOutput(true);
+  private generation = 0;
+  private state?: BrowserExecutionState;
+  private accepted = false;
+  private ordinaryPermit = false;
+  private active?: string;
+  private responses = new Map<string, ResponseAdmission>();
+  private items = new Map<string, { allowed: boolean }>();
+  private internalItems = new Set<string>();
+  constructor(private readonly muteOutput: (muted: boolean) => void) { muteOutput(true); }
+  internal(id: string): void {
+    this.internalItems.add(id);
+    while (this.internalItems.size > 1000) this.internalItems.delete(this.internalItems.values().next().value!);
   }
-  update(state:BrowserExecutionState):void {this.state=state;this.admission=false; /* Never release an existing suppressed response. */}
-  beginBrowser():void {this.update('RUNNING');if(this.active){const response=this.responses.get(this.active);if(response)response.allowed=false;}this.muteOutput(true);}
-  tool():void {if(this.active){const response=this.responses.get(this.active);if(response)response.tools=true;}}
-  response(id:string):void {
-    if(this.responses.has(id))return;
-    const allowed=this.state!==undefined?this.state!=='RUNNING':this.ordinaryPermit;
-    this.responses.set(id,{allowed,admission:this.admission&&!this.ordinaryPermit,tools:false,generation:this.generation});this.active=id;this.ordinaryPermit=false;
-    while(this.responses.size>256)this.responses.delete(this.responses.keys().next().value!);
+  userVisible(id: string): boolean { return !this.internalItems.has(id); }
+  turn(confirmationActive = false): void {
+    if (confirmationActive || ['WAITING_ACCESS','WAITING_MANUAL'].includes(this.state ?? '')) return;
+    if (this.state === 'RUNNING' || this.state === 'RECOVERING_CONTEXT') { ++this.generation; this.active=undefined; this.muteOutput(true); return; }
+    ++this.generation; this.active = undefined; this.state = 'TASK_ACCEPTED'; this.accepted = false; this.ordinaryPermit = false; this.muteOutput(true);
+  }
+  update(state: BrowserExecutionState): void { this.state = state; if(state==='RUNNING'||state==='RECOVERING_CONTEXT')this.ordinaryPermit=false; }
+  beginBrowser(): void {
+    this.update('RUNNING');
+    const response = this.active ? this.responses.get(this.active) : undefined;
+    // An acknowledgement already created belongs to the accepted response.
+    // A tool-first response cannot acquire acknowledgement eligibility later.
+    if (response && !response.message) response.allowed = false;
+    if (!response?.allowed) this.muteOutput(true);
+  }
+  tool(id = this.active): void {
+    const response = id ? this.responses.get(id) : undefined;
+    if (response) { response.tools = true; if (response.accepted && !response.message) response.allowed = false; }
+  }
+  response(id: string): void {
+    if (this.responses.has(id)) return;
+    const accepted = !this.accepted && (!this.state || this.state === 'TASK_ACCEPTED');
+    if (accepted) this.accepted = true;
+    const allowed = accepted || this.ordinaryPermit || !!this.state && !['RUNNING','RECOVERING_CONTEXT','TASK_ACCEPTED'].includes(this.state);
+    this.ordinaryPermit = false;
+    this.responses.set(id, { allowed, accepted, tools: false, generation: this.generation });
+    this.active = id;
+    while (this.responses.size > 256) this.responses.delete(this.responses.keys().next().value!);
     this.muteOutput(true);
   }
-  item(response:string,item:string):void {if(this.items.has(item))return;this.items.set(item,this.responses.get(response)??{allowed:false});while(this.items.size>1000)this.items.delete(this.items.keys().next().value!);}
-  visible(item:string):boolean{return this.items.get(item)?.allowed===true;}
-  audible(id?:string):boolean{return !!(id&&this.responses.get(id)?.allowed&&this.responses.get(id)?.generation===this.generation);}
-  playback(id?:string):void {this.muteOutput(!this.audible(id));}
-  done(id:string):boolean {
-    const response=this.responses.get(id);if(this.active===id)this.active=undefined;
-    if(response?.generation!==this.generation)return false;
-    if(response?.admission&&!response.tools&&this.state===undefined){this.admission=false;this.ordinaryPermit=true;return true;}
-    // A response with a non-browser tool gets one fresh ordinary output after
-    // the tool result. Browser state remains authoritative if it was admitted.
-    if(response?.admission&&response.tools&&this.state===undefined){this.admission=false;this.ordinaryPermit=true;}
+  item(responseId: string, item: string, type = 'message'): void {
+    if (this.items.has(item)) return;
+    const response = this.responses.get(responseId);
+    if (type === 'function_call') { this.tool(responseId); return; }
+    const allowed = !!response?.allowed && (!response.accepted || !response.tools && !response.message);
+    if (response?.accepted) {
+      if (allowed) response.message = item;
+      else { response.allowed = false; this.muteOutput(true); }
+    }
+    this.items.set(item, { allowed });
+    while (this.items.size > 1000) this.items.delete(this.items.keys().next().value!);
+  }
+  visible(item: string): boolean { return this.items.get(item)?.allowed === true; }
+  audible(id?: string): boolean { return !!(id && this.responses.get(id)?.allowed && this.responses.get(id)?.generation === this.generation); }
+  playback(id?: string): void { this.muteOutput(!this.audible(id)); }
+  done(id: string): boolean {
+    if (this.active === id) this.active = undefined;
+    const response=this.responses.get(id);
+    if (response?.generation===this.generation && response.tools && (!this.state || this.state==='TASK_ACCEPTED')) this.ordinaryPermit=true;
+    // No second model roundtrip to replay/replace an initial response. Tool
+    // execution starts independently of acknowledgement playback/completion.
     return false;
   }
-  close():void{this.responses.clear();this.items.clear();this.internalItems.clear();this.state=undefined;this.active=undefined;this.muteOutput(true);}
+  close(): void { this.responses.clear(); this.items.clear(); this.internalItems.clear(); this.state = undefined; this.active = undefined; this.muteOutput(true); }
 }
