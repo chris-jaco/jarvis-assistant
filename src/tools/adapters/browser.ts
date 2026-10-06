@@ -1,3 +1,6 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { executionState } from '../../browser/execution-state.js';
+import type { BrowserExecutionState } from '../../browser/execution-state.js';
 import { pollMedia } from '../../browser/media-poll.js';
 import { AttachedChromeProvider, BrowserWorkflow } from '../../browser/attached/provider.js';
 import { accessArgs } from '../../browser/attached/protocol.js';
@@ -10,21 +13,25 @@ import type { ToolAdapter, ToolDefinition } from '../types.js';
 const empty = z.object({}).strict(); const ref = z.string().uuid();
 const url = z.string().url().max(2000);
 export class BrowserAdapter implements ToolAdapter {
+  private executionScope = new AsyncLocalStorage<string>();
+  private executionStates = new Map<string, BrowserExecutionState>();
+  private mark(state: BrowserExecutionState): void { const id = this.executionScope.getStore(); if (id) this.executionStates.set(id,state); }
   readonly integration = 'browser'; readonly transport = 'local' as const;
   constructor(private readonly provider: BrowserProvider, readonly diagnostics = new BrowserDiagnostics()) {}
-  inSession<T>(id: string, work: () => Promise<T>): Promise<T> { return this.provider instanceof AttachedChromeProvider ? this.provider.inSession(id, work) : work(); }
-  state(id: string) { return this.provider instanceof AttachedChromeProvider ? this.provider.state(id) : undefined; }
-  endSession(id: string): Promise<void> { return this.provider instanceof AttachedChromeProvider ? this.provider.endSession(id) : Promise.resolve(); }
+  inSession<T>(id: string, work: () => Promise<T>): Promise<T> { return this.executionScope.run(id, () => this.provider instanceof AttachedChromeProvider ? this.provider.inSession(id, work) : work()); }
+  state(id: string, confirmation = false) { const state = this.provider instanceof AttachedChromeProvider ? this.provider.state(id) : undefined; return state ? {...state,executionState:confirmation ? 'WAITING_CONFIRMATION' as const : state.accessRevoked ? 'FAILED' as const : executionState(this.executionStates.get(id) ?? 'RUNNING',state.workflow,confirmation,!!state.ready)} : undefined; }
+  endSession(id: string): Promise<void> { this.executionStates.delete(id); return this.provider instanceof AttachedChromeProvider ? this.provider.endSession(id) : Promise.resolve(); }
   tools(): ToolDefinition[] {
     const tool = (id: string, description: string, schema: z.ZodType, execute: ToolDefinition['execute'], read = false): ToolDefinition => ({ id: `browser.${id}`, name: `browser_${id}`, description, integration: this.integration, capability: id, permission: read ? 'READ' : 'WRITE', confirm: false, schema, timeoutMs: 18_000, execute: (input, signal) => this.diagnostics.run('adapter', async () => {
+      this.mark('RUNNING');
       const abort = this.diagnostics.capture('execution_abort', 'TIMEOUT');
       signal.addEventListener('abort', abort, { once: true });
       try {
         const attached = this.provider instanceof AttachedChromeProvider ? this.provider : undefined;
         attached?.resetMeasurements();
         const action = attached && ['click','type','press','scroll','media','navigate','switch','back','forward','reload'].includes(id);
-        const result = action ? await attached.interact(id, input, () => execute(input, signal), signal) : await execute(input, signal); this.diagnostics.event('provider_result', 'OK'); return attached && id !== 'resume' && result && typeof result === 'object' && !Array.isArray(result) ? { ...result, browserTimings: attached.measurements() } : result; }
-      catch (error) { if (error instanceof BrowserWorkflow) return { browserState: error.reply }; this.diagnostics.event('provider_result', error instanceof ToolError ? browserCode(error.category) : 'UPSTREAM'); if (error instanceof ToolError && this.provider instanceof AttachedChromeProvider) { this.diagnostics.metadata(this.provider.measurements(), error.browserRecovery?.reason); throw new ToolError(error.category, error.browserRecovery, error.browserObservation, this.provider.measurements()); } throw error; }
+        const result = action ? await attached.interact(id, input, () => execute(input, signal), signal) : await execute(input, signal); this.diagnostics.event('provider_result', 'OK'); if (id === 'endTask') this.mark('COMPLETED'); return attached && id !== 'resume' && result && typeof result === 'object' && !Array.isArray(result) ? { ...result, browserTimings: attached.measurements() } : result; }
+      catch (error) { if (error instanceof BrowserWorkflow) { this.mark(error.reply.outcome === 'ACCESS_PENDING' ? 'WAITING_ACCESS' : 'WAITING_MANUAL'); return { browserState: error.reply }; } this.mark(error instanceof ToolError && error.browserRecovery?.recoverable ? 'RUNNING' : 'FAILED'); this.diagnostics.event('provider_result', error instanceof ToolError ? browserCode(error.category) : 'UPSTREAM'); if (error instanceof ToolError && this.provider instanceof AttachedChromeProvider) { this.diagnostics.metadata(this.provider.measurements(), error.browserRecovery?.reason); throw new ToolError(error.category, error.browserRecovery, error.browserObservation, this.provider.measurements()); } throw error; }
       finally { signal.removeEventListener('abort', abort); }
     }, signal) });
     const tools = [

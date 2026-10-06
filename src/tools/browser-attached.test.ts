@@ -122,7 +122,7 @@ test('attached flow A–H/L: grant, authenticated tab, invisible other tabs, rep
     await h.controller.approve((access as any).accessRequestId);
     const grant = h.controller.authorized()[0]!;
     assert.equal((await h.controller.receive(request('observe', { scopeId: grant.scopeId, tabId: grant.id }, { taskId: id() }))).outcome, 'ERROR');
-    const navigate = await h.controller.receive(request('navigate', { scopeId: grant.scopeId, tabId: grant.id, url: 'https://other.example/' })); assert.equal((navigate as any).reason, 'ORIGIN_PERMISSION');
+    const navigate = await h.controller.receive(request('navigate', { scopeId: grant.scopeId, tabId: grant.id, url: 'https://other.example/' })); assert.equal(navigate.outcome, 'OK'); assert.equal(h.events.at(-1).event, 'accessRequired'); assert.equal(h.controller.pending().length,1);
     await provider.endSession(session); await h.controller.reset(); assert.equal(h.stats().creates, 2); assert.ok(h.stats().invalidates > 0);
     await provider.close(); assert.equal(h.stats().closed, true); // No Chrome close method exists on this surface.
   } finally { h.close(); }
@@ -158,8 +158,9 @@ test('listo is bound to the handoff captured at speech start; never approves con
 });
 test('extension manifest and attached source preserve minimum permissions/no prohibited extraction channels', async () => {
   const manifest = JSON.parse(await readFile('extension/manifest.json', 'utf8'));
-  assert.deepEqual(manifest.permissions, ['activeTab','scripting','nativeMessaging']);
-  for (const key of ['host_permissions','optional_host_permissions','externally_connectable','content_scripts']) assert.equal(manifest[key], undefined);
+  assert.deepEqual(manifest.permissions, ['activeTab','scripting','nativeMessaging','storage']);
+  assert.deepEqual(manifest.optional_host_permissions,['https://*/*']);
+  for (const key of ['host_permissions','externally_connectable','content_scripts']) assert.equal(manifest[key], undefined);
   for (const path of ['extension/src/content-engine.ts','extension/src/service-worker.ts','src/browser/attached/provider.ts','native/Atlas.BrowserHost/Program.cs']) {
     const source = await readFile(path, 'utf8'); for (const forbidden of ['document.cookie', 'localStorage', 'sessionStorage', 'chrome.cookies', 'chrome.debugger', 'webRequest', 'connectOverCDP', 'captureVisibleTab']) assert.ok(!source.includes(forbidden), `${path}: ${forbidden}`);
   }
@@ -170,9 +171,10 @@ test('scope lifetimes/endTask/endSession, manual handoff resume and Chrome owner
   try {
     const sessionAccess: any = await h.controller.receive(request('requestTabAccess', { target: { kind: 'current' }, purpose: 'Fixture', lifetime: 'session' })); await h.controller.approve(sessionAccess.accessRequestId);
     const grant = h.controller.authorized()[0]!;
-    assert.equal((await h.controller.receive(request('observe', { scopeId: grant.scopeId, tabId: grant.id }, { taskId: id() }))).outcome, 'OK');
+    assert.equal((await h.controller.receive(request('observe', { scopeId: grant.scopeId, tabId: grant.id }, { taskId: id() }))).outcome, 'ERROR');
     await h.controller.receive(request('endTask')); assert.equal(h.controller.authorized().length, 1);
     const otherTask = id();
+    assert.equal((await h.controller.receive(request('requestTabAccess',{target:{kind:'current'},purpose:'New task',lifetime:'session'},{taskId:otherTask}))).outcome,'OK');
     h.f.dom.window.document.body.innerHTML = '<h1>Verify you are human</h1>';
     const blocked: any = await h.controller.receive(request('observe', { scopeId: grant.scopeId, tabId: grant.id }, { taskId: otherTask })); assert.equal(blocked.reason, 'CHALLENGE');
     h.f.dom.window.document.body.innerHTML = '<input type="search" aria-label="Search">';
@@ -195,9 +197,9 @@ test('real HTTP sessions separate access/manual states from consequential pendin
     const created = await post('session', {}); cookie = created.headers.get('set-cookie')!.split(';')[0]!; const config = await created.json() as any; assert.ok(!config.tools.some((tool: any) => tool.id === 'browser.resume'));
     const access = await invoke('browser.requestAccess', { target: { kind: 'current' }, purpose: 'Fixture', lifetime: 'task' }); assert.equal(access.status, 'success'); assert.equal(access.data.browserState.outcome, 'ACCESS_PENDING');
     const activity = () => fetch(base + '/api/tools/activity', { headers: { Cookie: cookie } }).then(reply => reply.json()) as Promise<any>;
-    assert.equal((await activity()).pending, null); await h.controller.approve(access.data.browserState.accessRequestId); assert.ok((await activity()).browser.ready);
+    assert.equal((await activity()).pending, null); assert.equal((await activity()).browser.executionState,'WAITING_ACCESS'); await h.controller.approve(access.data.browserState.accessRequestId); assert.ok((await activity()).browser.ready);
     h.f.dom.window.document.body.innerHTML = '<input type="password">'; const observation = await invoke('browser.observe', {}); const handoff = observation.data.browserState.handoffId; assert.equal(observation.data.browserState.reason, 'AUTHENTICATION');
-    const pending = await invoke('fixture.sensitive', {}); assert.equal(pending.status, 'pending'); assert.equal(mutations, 0);
+    const pending = await invoke('fixture.sensitive', {}); assert.equal(pending.status, 'pending'); assert.equal(mutations, 0); assert.equal((await activity()).browser.executionState,'WAITING_CONFIRMATION');
     assert.equal((await post('browser-resume', { handoffId: handoff, utterance: 'listo' })).status, 400); assert.equal((await activity()).pending.confirmationId, pending.confirmationId); assert.equal(mutations, 0);
     await post('decision', { confirmationId: pending.confirmationId, approved: false }); assert.equal(mutations, 0);
     assert.equal((await post('invoke', { invocationId: id(), toolId: 'browser.resume', input: { handoffId: handoff } })).status, 400);

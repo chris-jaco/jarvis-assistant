@@ -41,7 +41,7 @@ const status = z.object({ available: z.boolean(), connected: z.boolean(), visibl
 const ack = z.object({ completed: z.literal(true), paused: z.boolean().optional() }).strict();
 export const replySchema = z.discriminatedUnion('outcome', [
   z.object({ outcome: z.literal('OK'), timings: timingSchema.optional(), data: z.union([status, tabSchema, z.array(tabSchema).max(20), observationSchema, ack]) }).strict(),
-  z.object({ outcome: z.literal('ACCESS_PENDING'), timings: timingSchema.optional(), accessRequestId: uuid, expiresAt: z.number().int().positive() }).strict(),
+  z.object({ outcome: z.literal('ACCESS_PENDING'), timings: timingSchema.optional(), accessRequestId: uuid, expiresAt: z.number().int().positive(), origin: z.string().url().max(300).optional() }).strict(),
   z.object({ outcome: z.literal('REQUIRES_USER_INTERACTION'), timings: timingSchema.optional(), handoffId: uuid, reason: reasons }).strict(),
   z.object({ outcome: z.literal('ERROR'), timings: timingSchema.optional(), code: errors, conflict: conflictSchema.optional() }).strict().refine(reply => !reply.conflict || reply.code === 'STALE_REF')
 ]);
@@ -49,5 +49,5 @@ export type Reply = z.infer<typeof replySchema>;
 export const helloSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('hello'), connectionEpoch: uuid }).strict();
 export const cancelSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('cancel'), requestId: uuid, backendSessionId: uuid, connectionEpoch: uuid }).strict();
 export const responseSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('response'), requestId: uuid, backendSessionId: uuid, connectionEpoch: uuid, reply: replySchema }).strict();
-export const eventSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('event'), connectionEpoch: uuid, backendSessionId: uuid, event: z.enum(['accessGranted', 'accessRevoked', 'documentChanged']), accessRequestId: uuid.optional(), tab: tabSchema.optional(), scopeId: uuid.optional() }).strict();
+export const eventSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('event'), connectionEpoch: uuid, backendSessionId: uuid, event: z.enum(['accessGranted', 'accessRevoked', 'documentChanged', 'accessRequired']), access: z.object({outcome:z.literal('ACCESS_PENDING'),accessRequestId:uuid,expiresAt:z.number().int().positive(),origin:z.string().url().max(300).optional()}).strict().optional(), accessRequestId: uuid.optional(), tab: tabSchema.optional(), scopeId: uuid.optional() }).strict();
 export function parseRequest(raw: unknown): Request { return requestSchema.parse(raw) as unknown as Request; }

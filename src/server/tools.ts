@@ -97,7 +97,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
     const session = id ? sessions.get(id) : undefined;
     if (!session) { send(401, { error: 'Sesión de herramientas caducada. Reconecta.' }); return true; }
     if (path === '/api/tools/session' && req.method === 'DELETE') { browserDiagnostics.lifecycle(session.executor, 'session_closed'); session.closed = true; session.executor.close(); void browser?.endSession(session.browserSessionId).catch(() => {}); sessions.delete(id!); send(200, { closed: true }); return true; }
-    if (path === '/api/tools/activity' && req.method === 'GET') { send(200, { activity: session.executor.telemetry.snapshot(), pending: session.executor.pendingState(), ...(browser?.state(session.browserSessionId) ? { browser: browser.state(session.browserSessionId) } : {}) }); return true; }
+    if (path === '/api/tools/activity' && req.method === 'GET') { send(200, { activity: session.executor.telemetry.snapshot(), pending: session.executor.pendingState(), ...(browser?.state(session.browserSessionId) ? { browser: browser.state(session.browserSessionId, !!session.executor.pendingState()) } : {}) }); return true; }
     if (req.method !== 'POST') { send(405, { error: 'Método no permitido.' }); return true; }
     const contextualRead = path === '/api/tools/memory-context' || path === '/api/tools/memory-turn';
     if (session.busy && !contextualRead) { browserDiagnostics.lifecycle(session.executor, 'http_busy'); send(429, { error: 'Una herramienta sigue ejecutándose.' }); return true; }
@@ -188,7 +188,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
           const issue = parsed && !parsed.success ? new MemoryValidationError(field, 'schema') : new ToolError(result.category);
           memoryDiagnostics.failure(operation, result.category === 'INVALID_INPUT' ? 'validation' : 'execute', issue, started);
         }
-        send(200, result);
+        send(200, {...result,...(p.toolId.startsWith('browser.') ? {browserExecutionState: browser?.state(session.browserSessionId, !!session.executor.pendingState())?.executionState} : {})});
       } else if (path === '/api/tools/browser-resume') {
         const p = z.object({ handoffId: z.string().uuid(), utterance: z.string().max(80) }).strict().parse(input);
         if (session.executor.pendingState() || !/^(listo|lista|ya est[aá]|done)[.!\s]*$/i.test(p.utterance.trim()) || !browser) throw new Error();

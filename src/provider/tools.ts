@@ -1,3 +1,4 @@
+import { browserExecutionStateSchema, executionInstruction } from '../browser/execution-state.js';
 import { BrowserContinuation } from './browser-continuation.js';
 import { browserTracer, browserCode, isBrowserTool } from '../diagnostics/browser.js';
 import type { BrowserDiagnosticSink } from '../diagnostics/browser.js';
@@ -74,6 +75,7 @@ export class VoiceToolBridge {
                 ? 'Sin hablar: usa browserObservation si status es OK y resuelve el mismo paso con una ref nueva. Si FAILED, sólo observa para obtener contexto; no repitas acciones completadas. SNAPSHOT_CONSUMED significa contexto consumido, no cambios rápidos de página. Máximo dos recuperaciones, según el backend.'
                 : 'Detente: no quedan recuperaciones para este paso. Da sólo un error final breve; no pidas intervención manual por un CONFLICT.' };
             }
+            if (descriptor.id.startsWith('browser.')) { const state = browserExecutionStateSchema.safeParse((result as unknown as {browserExecutionState?:unknown}).browserExecutionState); if (state.success) return {...result,instruction:executionInstruction(state.data)}; }
             return result;
           } catch { browserResult('UPSTREAM'); return { status: 'error', message: 'La herramienta no respondió. No asumas que la acción se realizó; comprueba su estado antes de repetirla.' }; }
         } })) };

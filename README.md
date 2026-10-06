@@ -1191,8 +1191,9 @@ Atlas puede usar una pestaña de tu Chrome habitual mediante extensión MV3 y
 Native Messaging, con autorización explícita por tarea/sesión y revocable.
 No copia perfiles ni lee cookies, passwords, storage o headers. El proveedor
 aislado sigue siendo el default (`BROWSER_PROVIDER=isolated`); attached es opt-in,
-sin fallback automático. La extensión solicita sólo `activeTab`, `scripting` y
-`nativeMessaging`. No cierra Chrome ni tus tabs al desconectar Atlas.
+sin fallback automático. La extensión usa `activeTab`, `scripting`, `nativeMessaging` y `storage` para
+preferencias propias; declara `optional_host_permissions: ["https://*/*"]` y
+solicita cada sitio HTTPS individualmente mediante un gesto en el popup. No cierra Chrome ni tus tabs al desconectar Atlas.
 
 La instalación manual Windows, configuración, protocolo, límites de seguridad,
 reconexión, uninstall y pruebas A–L están en

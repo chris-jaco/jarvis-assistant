@@ -151,8 +151,8 @@ test('modal observation does not pull player controls from outside its scope', a
   const f=fixture('<figure><video></video><button>Skip ad</button><div role="dialog" aria-label="Choices"><button>Reject all</button></div></figure>');
   try { const data=await f.observe();assert.equal(data.media.presence,'NONE');assert.ok(!data.elements.some((e:any)=>e.functionalKind==='AD_SKIP')); } finally { f.close(); }
 });
-test('protocol remains bounded/strict and extension permissions remain exactly the accepted three', async () => {
-  const manifest=JSON.parse(await readFile('extension/manifest.json','utf8'));assert.deepEqual(manifest.permissions,['activeTab','scripting','nativeMessaging']);
+test('protocol remains bounded/strict and extension permissions include only approved site-policy additions', async () => {
+  const manifest=JSON.parse(await readFile('extension/manifest.json','utf8'));assert.deepEqual(manifest.permissions,['activeTab','scripting','nativeMessaging','storage']);
   assert.equal(replySchema.safeParse({outcome:'OK',data:{completed:true,javascript:'evil'}}).success,false);
   assert.equal(resolveSearch(fixtureInput('<form method="post"><input type="search"></form>')),undefined);
 });
