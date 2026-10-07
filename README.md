@@ -1351,3 +1351,13 @@ errors are printed; counts are bounded. A tool's outer success may contain a
 failed recovery READ—use `OBSERVE_RESULT` and the budget transition to distinguish
 it from READY context. Diagnostic authorization probes are read-only, only on
 trace-enabled authorized requests, and can add measurement overhead.
+
+Attached document readiness: after navigation, an `observe` READ polls Chrome's
+loading state at most 20 times (100 ms intervals, at most 2 seconds and never
+beyond the request deadline). This does not repeat the preceding action or
+increase the existing two-READ recovery budget. Grant validity, cancellation,
+connection epoch, origin and persistent policy are checked again before content
+dispatch. A still-loading document returns the existing `CONTENT_UNAVAILABLE`
+outcome with sanitized trace reason `DOCUMENT_INITIALIZING`; actual content
+injection/init/messaging failures retain their separate diagnostics. No site
+exceptions or permission changes are used. `BROWSER_TRACE` remains off by default.

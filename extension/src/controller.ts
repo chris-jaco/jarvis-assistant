@@ -24,7 +24,7 @@ export class ExtensionController {
   private cancelled = new Set<string>(); private ended = new Set<string>(); private endedTasks = new Set<string>(); private tail: Promise<unknown> = Promise.resolve();
   private retiredScopes=new Map<string,'REVOKED'|'EXPIRED'>();
   private approving = false; private activeTasks = new Set<string>();
-  constructor(private readonly surface: Surface, private readonly emit: (event: unknown) => void, private readonly now = Date.now, private readonly id = () => crypto.randomUUID(), private readonly sites?: Pick<SiteAuthorization, 'allows' | 'allowAlways'>, private readonly diagnostics?:PopupDiagnostics) {}
+  constructor(private readonly surface: Surface, private readonly emit: (event: unknown) => void, private readonly now = Date.now, private readonly id = () => crypto.randomUUID(), private readonly sites?: Pick<SiteAuthorization, 'allows' | 'allowAlways'>, private readonly diagnostics?:PopupDiagnostics, private readonly pause = (ms:number):Promise<void> => new Promise(resolve => setTimeout(resolve,ms))) {}
   async reset(raw?: unknown): Promise<void> {
     this.epoch = raw === undefined ? undefined : helloSchema.parse(raw).connectionEpoch;
     this.retiredScopes.clear();
@@ -51,7 +51,7 @@ export class ExtensionController {
       const queueMs = Math.min(30_000, Math.max(0, Math.round(performance.now() - queuedAt)));
       const rows:ObserveTrace[]=[];const trace=observeTracer(request.observeTrace===true&&request.operation==='observe',row=>rows.push(row));
       const decorate=(reply:Reply):Reply=>rows.length?{...reply,observeTrace:[...rows,...(reply.observeTrace??[])].slice(0,12)}:reply;
-      try { this.check(request); if(request.observeTrace&&request.operation==='observe')await this.observeAuthorization(request,trace); const reply = await this.execute(request); if (!['endSession', 'endTask'].includes(request.operation)) this.check(request); return replySchema.parse(decorate({ ...reply, timings: { ...reply.timings, queueMs } })); }
+      try { this.check(request); if(request.observeTrace&&request.operation==='observe')await this.observeAuthorization(request,trace); const reply = await this.execute(request,trace); if (!['endSession', 'endTask'].includes(request.operation)) this.check(request); return replySchema.parse(decorate({ ...reply, timings: { ...reply.timings, queueMs } })); }
       catch (error) { const code = error instanceof Error ? error.message : ''; return decorate({ outcome: 'ERROR', code: ['TIMEOUT', 'ACCESS_DENIED', 'EXPIRED', 'STALE_REF', 'REJECTED'].includes(code) ? code as 'REJECTED' : 'UNSUPPORTED' }); }
     });
     this.tail = result; this.results.set(request.requestId, { signature, result, session: request.backendSessionId }); return result;
@@ -166,7 +166,7 @@ export class ExtensionController {
     for (const grant of this.grants.values()) if (grant.chromeId === chromeId) { await this.surface.invalidate(chromeId, true).catch(() => {}); if (this.epoch) this.emit({ protocol: 'atlas.browser', version: 1, kind: 'event', connectionEpoch: this.epoch, backendSessionId: grant.session, event: 'documentChanged', scopeId: grant.scopeId }); }
   }
   async end(session: string): Promise<void> { this.ended.add(session); for (const key of this.activeTasks) if (key.startsWith(session + ':')) this.activeTasks.delete(key); for (const grant of [...this.grants.values()]) if (grant.session === session) await this.revoke(grant.scopeId); for (const [id, ticket] of this.tickets) if (ticket.request.backendSessionId === session) this.tickets.delete(id); }
-  private async execute(request: Request): Promise<Reply> {
+  private async execute(request: Request, trace:(raw:unknown)=>void): Promise<Reply> {
     this.cleanup(); const args = request.args;
     if (request.operation === 'status') return { outcome: 'OK', data: { available: true, connected: true, visible: true, connections: [] } };
     if (request.operation === 'endTask') { this.activeTasks.delete(request.backendSessionId + ':' + request.taskId); this.endedTasks.add(request.backendSessionId + ':' + request.taskId); for (const grant of [...this.grants.values()]) if (grant.session === request.backendSessionId && grant.task === request.taskId && grant.lifetime === 'task') await this.revoke(grant.scopeId); for (const [id, ticket] of this.tickets) if (ticket.request.backendSessionId === request.backendSessionId && ticket.request.taskId === request.taskId) this.tickets.delete(id); return { outcome: 'OK', data: { completed: true } }; }
@@ -223,8 +223,27 @@ export class ExtensionController {
     if (request.operation === 'navigate') { const url = navigationUrl(String(args.url)); this.check(request); await this.surface.navigate(grant.chromeId, url); await this.surface.invalidate(grant.chromeId).catch(() => {}); if (siteOrigin(url) !== grant.origin) { const transition = await this.transition(grant,request,siteOrigin(url)); if (transition.reply) { this.emit({protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:this.epoch,backendSessionId:grant.session,event:'accessRequired',access:transition.reply}); } } return { outcome: 'OK', data: { completed: true } }; }
     if (['back', 'forward', 'reload'].includes(request.operation)) { this.check(request); await this.surface.invalidate(grant.chromeId).catch(() => {}); await this.surface.history(grant.chromeId, request.operation as 'back'); return { outcome: 'OK', data: { completed: true } }; }
     if (this.surface.tab) {
-      const tab = await this.surface.tab(grant.chromeId);
-      if (tab.status === 'loading') return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};
+      let tab = await this.surface.tab(grant.chromeId);
+      // Chrome marks a new document loading before its content boundary is ready.
+      // Wait inside ONE READ; do not burn the backend recovery budget polling it.
+      // Never retry the navigation/action that caused this transition.
+      const readyDeadline = Math.min(request.deadlineAt, this.now() + 2000);
+      if (request.operation === 'observe' && tab.status === 'loading') {
+        trace({stage:'CONTENT_TRANSPORT',boundary:'EXTENSION',dispatch:'NOT_ATTEMPTED',failureReason:'DOCUMENT_INITIALIZING'});
+        for (let poll=0; poll<20 && tab.status==='loading' && tab.url && siteOrigin(tab.url)===grant.origin && this.now()<readyDeadline; ++poll) {
+          await this.pause(Math.min(100, readyDeadline-this.now()));
+          this.check(request);
+          if (!this.grants.has(grant.scopeId) || grant.suspended || grant.handoff || grant.expiresAt<=this.now()) throw new Error('ACCESS_DENIED');
+          tab = await this.surface.tab(grant.chromeId);
+        }
+        this.check(request);
+        if (!this.grants.has(grant.scopeId) || grant.expiresAt<=this.now()) throw new Error('ACCESS_DENIED');
+        if (grant.persistent && !await this.sites?.allows(grant.origin)) { await this.revokeOrigin(grant.origin); throw new Error('ACCESS_DENIED'); }
+      }
+      if (tab.status === 'loading' && tab.url && siteOrigin(tab.url)===grant.origin) {
+        trace({stage:'CONTENT_TRANSPORT',boundary:'EXTENSION',dispatch:'NOT_ATTEMPTED',failureReason:'DOCUMENT_INITIALIZING'});
+        return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};
+      }
       if (!tab.url || siteOrigin(tab.url) !== grant.origin) {
         const changed = await this.transition(grant,request,tab.url ? siteOrigin(tab.url) : undefined,tab.title ?? '');
         if (changed.reply) return changed.reply;

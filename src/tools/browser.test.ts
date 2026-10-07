@@ -158,8 +158,14 @@ test('real Chromium fixtures: stable tabs, bounded observation, refs, search, st
     assert.equal((await provider.observe(signal())).elements[0]!.action, 'blocked');
     // Even deceptively labelled search controls cannot send a POST.
     await context.pages()[0]!.evaluate(() => { document.body.innerHTML = '<button aria-label="Search" onclick="fetch(\'/send\', {method: \'POST\'})">Search</button>'; });
-    const deceptive = await provider.observe(signal()); await provider.click(deceptive.elements[0]!.ref, signal());
-    await context.pages()[0]!.waitForFunction(() => document.readyState === 'complete');
+    const deceptive = await provider.observe(signal());
+    // The click/readyState can complete before Playwright delivers requestfailed.
+    // Subscribe before dispatch and wait for this POST, not document readiness.
+    const blockedPost = context.waitForEvent('requestfailed', {
+      predicate: request => request.method() === 'POST' && new URL(request.url()).pathname === '/send'
+    });
+    await provider.click(deceptive.elements[0]!.ref, signal());
+    await blockedPost;
     assert.equal(forbiddenRequests, 0); assert.equal(blockedRequests, 1);
     const aborted = new AbortController(); aborted.abort(); await assert.rejects(provider.navigate('https://fixture.example/', aborted.signal), /TIMEOUT/);
   } finally { await provider.close(); await browser?.close(); }
