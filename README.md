@@ -1330,3 +1330,24 @@ payloads and failed diagnostic sinks cannot change execution.
 For the acknowledgement-cut investigation, compare PRESENTATION with
 `muteReason=RESPONSE_CREATED` against PLAYBACK for the earlier response. Capture
 both consoles; the browser-side lifecycle is not printed in PowerShell.
+
+### OBSERVE boundary diagnostics (unreleased)
+
+With `BROWSER_TRACE=true`, the backend prints `[ATLAS browser observe]` rows:
+`OBSERVE_AUTH`, `CONTENT_TRANSPORT`, `OBSERVE_RESULT`, `WORKFLOW_TRANSITION`.
+Opaque request/task/admission IDs correlate individual READs, including recovery.
+Extension metadata returns through the existing bridge; no extra native host or
+MV3 permissions are required. Rebuild/reload the extension when testing this
+instrumentation. It is off by default and does not authorize or retry actions.
+
+Chrome host permission, saved exact-origin Atlas ALLOW, operational grant,
+injection/init/dispatch/reply, snapshot schema validity, binding coherence and
+READ budget are reported separately. `INJECTED` means the existing idempotent
+injection call succeeded; it does not claim the script was newly installed.
+Initialization OK proves the content handler answered. Missing diagnostic fields
+mean unavailable evidence, not false. A saved ALLOW may coexist with a removed
+Chrome permission. No origins, URLs, titles, content, refs, written values or raw
+errors are printed; counts are bounded. A tool's outer success may contain a
+failed recovery READ—use `OBSERVE_RESULT` and the budget transition to distinguish
+it from READY context. Diagnostic authorization probes are read-only, only on
+trace-enabled authorized requests, and can add measurement overhead.

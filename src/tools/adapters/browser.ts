@@ -1,3 +1,4 @@
+import { observeTracer } from '../../diagnostics/browser-observe.js';
 import { endTaskSchema } from '../../browser/task-lifecycle.js';
 import type { ContinuationReceipt } from '../../browser/task-lifecycle.js';
 import { BrowserTaskDiagnostics } from '../../diagnostics/browser-task.js';
@@ -23,7 +24,7 @@ export class BrowserAdapter implements ToolAdapter {
   private presentations=new Map<string,{signature:string;revision:number}>();
   private executionScope = new AsyncLocalStorage<string>();
   private executionStates = new Map<string, BrowserExecutionState>();
-  private mark(state: BrowserExecutionState): void { const id = this.executionScope.getStore(); if (id) this.executionStates.set(id,state); }
+  private mark(state: BrowserExecutionState): void { const id = this.executionScope.getStore(); if (id) {const from=this.executionStates.get(id)??'NONE';this.executionStates.set(id,state);if(this.diagnostics.enabled&&this.provider instanceof AttachedChromeProvider){const taskId=this.provider.state(id).taskId;observeTracer(true)({stage:'WORKFLOW_TRANSITION',boundary:'BACKEND',from,to:state,...(taskId?{taskId}:{}),failureReason:state==='RECOVERING_CONTEXT'?'READ_RECOVERY':state==='INCONCLUSIVE'?'RECOVERY_INCONCLUSIVE':state==='RUNNING'&&from==='RECOVERING_CONTEXT'?'RECOVERY_COMPLETED':'TOOL_RESULT'});}} }
   readonly integration = 'browser'; readonly transport = 'local' as const;
   constructor(private readonly provider: BrowserProvider, readonly diagnostics = new BrowserDiagnostics(),private readonly taskDiagnostics=new BrowserTaskDiagnostics()) {}
   get presentationEnabled():boolean{return this.provider instanceof AttachedChromeProvider;}

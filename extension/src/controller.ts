@@ -1,3 +1,4 @@
+import { observeTracer, type ObserveTrace } from '../../src/diagnostics/browser-observe.js';
 import type { PopupDiagnostics } from '../../src/diagnostics/popup.js';
 import { parseRequest, replySchema, helloSchema, cancelSchema } from '../../src/browser/attached/protocol.js';
 import type { Request, Reply, AuthorizedTab } from '../../src/browser/attached/protocol.js';
@@ -5,6 +6,7 @@ import { navigationUrl, displayUrl, privateText } from '../../src/browser/policy
 import { siteOrigin } from './site-authorization.js';
 import type { SiteAuthorization } from './site-authorization.js';
 export interface Surface {
+  observeAuthorization?(grant:Grant):Promise<Pick<ObserveTrace,'chromePermission'|'persistentPolicy'|'sameOrigin'>>;
   tab?(id: number): Promise<{ id: number; url?: string; title?: string; status?: string }>;
   current(): Promise<{ id: number; url: string; title: string }>;
   create(url: string): Promise<number>;
@@ -20,10 +22,12 @@ export class ExtensionController {
   epoch?: string; readonly grants = new Map<string, Grant>(); readonly tickets = new Map<string, Ticket>();
   private results = new Map<string, { signature: string; result: Promise<Reply>; session: string }>();
   private cancelled = new Set<string>(); private ended = new Set<string>(); private endedTasks = new Set<string>(); private tail: Promise<unknown> = Promise.resolve();
+  private retiredScopes=new Map<string,'REVOKED'|'EXPIRED'>();
   private approving = false; private activeTasks = new Set<string>();
   constructor(private readonly surface: Surface, private readonly emit: (event: unknown) => void, private readonly now = Date.now, private readonly id = () => crypto.randomUUID(), private readonly sites?: Pick<SiteAuthorization, 'allows' | 'allowAlways'>, private readonly diagnostics?:PopupDiagnostics) {}
   async reset(raw?: unknown): Promise<void> {
     this.epoch = raw === undefined ? undefined : helloSchema.parse(raw).connectionEpoch;
+    this.retiredScopes.clear();
     const old = [...this.grants.values()]; this.grants.clear(); this.tickets.clear(); this.results.clear(); this.cancelled.clear(); this.ended.clear(); this.endedTasks.clear(); this.activeTasks.clear();
     await Promise.all(old.map(grant => this.surface.invalidate(grant.chromeId).catch(() => {})));
   }
@@ -45,10 +49,19 @@ export class ExtensionController {
     const queuedAt = performance.now();
     const result = this.tail.catch(() => {}).then(async (): Promise<Reply> => {
       const queueMs = Math.min(30_000, Math.max(0, Math.round(performance.now() - queuedAt)));
-      try { this.check(request); const reply = await this.execute(request); if (!['endSession', 'endTask'].includes(request.operation)) this.check(request); return replySchema.parse({ ...reply, timings: { ...reply.timings, queueMs } }); }
-      catch (error) { const code = error instanceof Error ? error.message : ''; return { outcome: 'ERROR', code: ['TIMEOUT', 'ACCESS_DENIED', 'EXPIRED', 'STALE_REF', 'REJECTED'].includes(code) ? code as 'REJECTED' : 'UNSUPPORTED' }; }
+      const rows:ObserveTrace[]=[];const trace=observeTracer(request.observeTrace===true&&request.operation==='observe',row=>rows.push(row));
+      const decorate=(reply:Reply):Reply=>rows.length?{...reply,observeTrace:[...rows,...(reply.observeTrace??[])].slice(0,12)}:reply;
+      try { this.check(request); if(request.observeTrace&&request.operation==='observe')await this.observeAuthorization(request,trace); const reply = await this.execute(request); if (!['endSession', 'endTask'].includes(request.operation)) this.check(request); return replySchema.parse(decorate({ ...reply, timings: { ...reply.timings, queueMs } })); }
+      catch (error) { const code = error instanceof Error ? error.message : ''; return decorate({ outcome: 'ERROR', code: ['TIMEOUT', 'ACCESS_DENIED', 'EXPIRED', 'STALE_REF', 'REJECTED'].includes(code) ? code as 'REJECTED' : 'UNSUPPORTED' }); }
     });
     this.tail = result; this.results.set(request.requestId, { signature, result, session: request.backendSessionId }); return result;
+  }
+  private async observeAuthorization(request:Request,trace:(raw:unknown)=>void):Promise<void> {
+    const grant=this.grants.get(String(request.args.scopeId));
+    const taskGrant:ObserveTrace['taskGrant']=!grant?this.retiredScopes.get(String(request.args.scopeId))??'MISSING':grant.expiresAt<=this.now()?'EXPIRED':grant.suspended||grant.handoff||grant.session!==request.backendSessionId||grant.lifetime==='task'&&grant.task!==request.taskId||grant.tabId!==request.args.tabId?'INCOMPATIBLE':'PRESENT';
+    let facts:Pick<ObserveTrace,'chromePermission'|'persistentPolicy'|'sameOrigin'>={};let failureReason:ObserveTrace['failureReason']='NONE';
+    if(grant&&taskGrant==='PRESENT'&&this.surface.observeAuthorization)try{facts=await this.surface.observeAuthorization(grant);}catch{failureReason='AUTH_DIAGNOSTIC_UNAVAILABLE';}
+    trace({stage:'OBSERVE_AUTH',boundary:'EXTENSION',taskGrant,...facts,failureReason});
   }
   private dto(grant: Grant): AuthorizedTab { return { id: grant.tabId, scopeId: grant.scopeId, title: grant.title, url: grant.url, active: false, expiresAt: grant.expiresAt, state: grant.suspended ? 'SUSPENDED_ORIGIN' : grant.handoff ? 'MANUAL_INTERVENTION' : 'ACTIVE' }; }
   private cleanup(): void { for (const grant of [...this.grants.values()]) if (grant.expiresAt <= this.now()) void this.revoke(grant.scopeId); for (const [id, ticket] of this.tickets) if (ticket.expiresAt <= this.now() || this.ended.has(ticket.request.backendSessionId)) this.tickets.delete(id); }
@@ -144,7 +157,7 @@ export class ExtensionController {
     return {reply:this.ticket(accessRequest,grant.chromeId,origin,grant.scopeId)};
   }
   async revoke(scopeId: string, preserveTicketId?: string): Promise<void> {
-    const grant = this.grants.get(scopeId); if (!grant) return; this.grants.delete(scopeId);
+    const grant = this.grants.get(scopeId); if (!grant) return; this.retiredScopes.set(scopeId,grant.expiresAt<=this.now()?'EXPIRED':'REVOKED');if(this.retiredScopes.size>100)this.retiredScopes.delete(this.retiredScopes.keys().next().value!); this.grants.delete(scopeId);
     for (const [id,ticket] of this.tickets) if (ticket.priorScope === scopeId && id !== preserveTicketId) this.deny(id);
     await this.surface.invalidate(grant.chromeId).catch(() => {});
     if (this.epoch) this.emit({ protocol: 'atlas.browser', version: 1, kind: 'event', connectionEpoch: this.epoch, backendSessionId: grant.session, event: 'accessRevoked', scopeId });

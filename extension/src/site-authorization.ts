@@ -46,6 +46,11 @@ export class SiteAuthorization {
       return !this.blocked.has(origin) && this.sites.has(origin) && await this.env.contains(hostPattern(origin)) && !this.blocked.has(origin);
     } catch { return false; }
   }
+  // Read-only diagnostic view: never reconcile, persist or grant permissions.
+  async diagnosticStatus(origin:string):Promise<{chromePermission:boolean;persistentPolicy:'ALLOW'|'ASK'}> {
+    await this.ready;
+    return {chromePermission:await this.env.contains(hostPattern(origin)),persistentPolicy:!this.blocked.has(origin)&&this.sites.has(origin)?'ALLOW':'ASK'};
+  }
   // Only the packaged popup handler calls this, after the popup's real gesture
   // requests Chrome permission. Backend/native/content messages cannot call it.
   async allowAlways(origin: string): Promise<void> {
