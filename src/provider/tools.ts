@@ -1,5 +1,5 @@
 import { BrowserTaskAdmission } from './browser-task-admission.js';
-import { explicitBrowserCancellation } from '../browser/task-lifecycle.js';
+import { continuationReceiptSchema, explicitBrowserCancellation } from '../browser/task-lifecycle.js';
 import { BrowserTaskDiagnostics } from '../diagnostics/browser-task.js';
 import { PopupDiagnostics } from '../diagnostics/popup.js';
 import { actionOutcomeSchema, outcomeInstruction } from '../browser/action-outcome.js';
@@ -27,9 +27,13 @@ export async function toolRequest(path: string, data?: unknown, method = 'POST',
   return response.json();
 }
 export class VoiceToolBridge {
+  get browserTraceEnabled():boolean {return this.taskDiagnostics.enabled;}
   pending: PendingConfirmation | null = null;
   get confirmationActive(): boolean { return Boolean(this.pending || this.decisionInFlight || this.intentInFlight); }
   private readonly taskDiagnostics=new BrowserTaskDiagnostics();
+  private responseTrace=new Map<string,{producedMessage:boolean;producedFunctionCall:boolean;tokens:string[]}>();
+  private requestedTraceTokens:string[]=[];
+  private traceSchedule(){return {toolInFlight:this.browserInvocations>0||this.sdkPending.size>0,sdkAwaitingResponse:this.sdkAwaitingResponse,sdkPendingCalls:this.sdkPending.size,sdkAnnouncedCalls:this.sdkAnnounced.size,sdkActiveResponses:this.sdkResponses.size,activeInvocations:this.browserInvocations};}
   private sdkPending=new Set<string>();
   private sdkToolNames=new Set<string>();private sdkCommitted=new Set<string>();
   private sdkAnnounced=new Set<string>();private sdkResponses=new Set<string>();private sdkAwaitingResponse=false;
@@ -43,8 +47,20 @@ export class VoiceToolBridge {
     this.sdkAwaitingResponse=true;
     let output:unknown;try{output=JSON.parse(raw);}catch{output=undefined;}
     const receipt=output&&typeof output==='object'?(output as {browserContinuation?:unknown}).browserContinuation:undefined;
+    const parsedReceipt=continuationReceiptSchema.safeParse(receipt);this.requestedTraceTokens=parsedReceipt.success?parsedReceipt.data.tokens:[];
+    this.taskDiagnostics.event({stage:'RESPONSE_REQUESTED',relation:'REQUEST',...this.browserContinuation.traceContext(),source:'SDK_OUTPUT',...(/^call_[A-Za-z0-9_-]{1,100}$/.test(callId)?{callId}:{}),tokens:this.requestedTraceTokens,...this.traceSchedule()});
     this.browserContinuation.committed(receipt,this.browserBusy());
     this.taskDiagnostics.event({stage:'TOOL_COMMITTED',...this.browserContinuation.traceContext(),...(/^call_[A-Za-z0-9_-]{1,100}$/.test(callId)?{callId}:{}),toolInFlight:this.browserInvocations>0});
+  }
+  private traceResponse(event:{type:string;[key:string]:unknown}):void {
+    if(!this.taskDiagnostics.enabled)return;
+    const response=event.response as {id?:string;status?:string;output?:{type?:string}[]}|undefined;const id=typeof event.response_id==='string'?event.response_id:response?.id;
+    if(!id||!/^resp_[A-Za-z0-9_-]{1,100}$/.test(id))return;
+    if(event.type==='response.created'){this.responseTrace.set(id,{producedMessage:false,producedFunctionCall:false,tokens:this.requestedTraceTokens});this.requestedTraceTokens=[];while(this.responseTrace.size>256)this.responseTrace.delete(this.responseTrace.keys().next().value!);}
+    const row=this.responseTrace.get(id);
+    if(event.type==='response.output_item.added'&&row){const item=event.item as {type?:string}|undefined;row.producedMessage ||= item?.type==='message';row.producedFunctionCall ||= item?.type==='function_call';}
+    if(event.type==='response.done'&&row){row.producedMessage ||= response?.output?.some(item=>item.type==='message')===true;row.producedFunctionCall ||= response?.output?.some(item=>item.type==='function_call')===true;}
+    if(['response.done','response.output_item.added'].includes(event.type))this.taskDiagnostics.event({stage:event.type==='response.done'?'RESPONSE_DONE':'RESPONSE_OUTPUT',relation:'NEXT_RESPONSE_CANDIDATE',...this.browserContinuation.traceContext(),responseId:id,...this.traceSchedule(),tokens:row?.tokens??[],producedMessage:row?.producedMessage??false,producedFunctionCall:row?.producedFunctionCall??false,...(event.type==='response.done'?{status:['completed','cancelled','failed','incomplete','in_progress'].includes(response?.status??'')?response?.status:'UNKNOWN'}:{})});
   }
   private lifecycleEnabled=false;private admission=new BrowserTaskAdmission();private admissionInFlight?:Promise<void>;private lastBrowserState?:BrowserExecutionState;
   private presentationRevision=0;private browserInvocations=0;
@@ -63,7 +79,7 @@ export class VoiceToolBridge {
   private browserTrace: BrowserDiagnosticSink = () => {};
   private browserSequence = 0;
   private readonly accessDiagnostics=new PopupDiagnostics();
-  private browserContinuation = new BrowserContinuation((handoffId, utterance) => toolRequest('browser-resume', { handoffId, utterance }), message => { if (!this.closed) this.notify(message); },this.accessDiagnostics,this.taskDiagnostics,receipt=>{this.receiptAcks=this.receiptAcks.catch(()=>{}).then(()=>toolRequest('browser-continuation',receipt)).catch(()=>{});});
+  private browserContinuation = new BrowserContinuation((handoffId, utterance) => toolRequest('browser-resume', { handoffId, utterance }), message => { if (!this.closed) {this.requestedTraceTokens=this.browserContinuation.deliveryTokens();this.taskDiagnostics.event({stage:'RESPONSE_REQUESTED',relation:'REQUEST',...this.browserContinuation.traceContext(),source:'NOTIFICATION',tokens:this.requestedTraceTokens,...this.traceSchedule()});this.notify(message);} },this.accessDiagnostics,this.taskDiagnostics,receipt=>{this.receiptAcks=this.receiptAcks.catch(()=>{}).then(()=>toolRequest('browser-continuation',receipt)).catch(()=>{});},()=>this.traceSchedule());
   private diagnostic(event: string, reason: string, extra: Partial<ConfirmationTrace> = {}): void {
     this.trace({ event, reason, pendingId: this.pending?.confirmationId, armed: this.armed, promptResponseId: this.promptPlayback?.responseId, ...extra });
   }
@@ -163,6 +179,7 @@ export class VoiceToolBridge {
         responseId: typeof event.response_id === 'string' ? event.response_id : typeof response?.id === 'string' ? response.id : undefined,
         itemId: typeof event.item_id === 'string' ? event.item_id : typeof item?.id === 'string' ? item.id : undefined });
     }
+    this.traceResponse(event);
     // Response lifecycle schedules deferred decisions only; it never closes a task.
     if(event.type==='response.output_item.added'){
       const item=event.item as {type?:string;name?:string;call_id?:string}|undefined;
@@ -179,7 +196,7 @@ export class VoiceToolBridge {
     switch (event.type) {
       case 'response.created': {
         const response = event.response as { id?: unknown } | undefined;
-        if (typeof response?.id === 'string') {this.registerPromptResponse(response.id);this.taskDiagnostics.event({stage:'RESPONSE_CREATED',...this.browserContinuation.traceContext(),...(/^resp_[A-Za-z0-9_-]{1,100}$/.test(response.id)?{responseId:response.id}:{}),toolInFlight:this.browserInvocations>0});}
+        if (typeof response?.id === 'string') {this.registerPromptResponse(response.id);this.taskDiagnostics.event({stage:'RESPONSE_CREATED',relation:'NEXT_RESPONSE_CANDIDATE',...this.browserContinuation.traceContext(),...(/^resp_[A-Za-z0-9_-]{1,100}$/.test(response.id)?{responseId:response.id}:{}),...this.traceSchedule(),tokens:this.responseTrace.get(response.id)?.tokens??[]});}
         break;
       }
       case 'response.done': {
@@ -304,5 +321,5 @@ export class VoiceToolBridge {
       if (data.browser) {const state=browserExecutionStateSchema.safeParse((data.browser as {executionState?:unknown}).executionState);if(state.success&&this.browserInvocations===0)this.present(data.browser);this.browserContinuation.update(data.browser, this.confirmationActive,this.browserBusy());}
     } catch { /* Polling never breaks voice playback. Tool requests report failures. */ }
   }
-  close(): void { this.diagnostic('bridge.close', 'session_closed'); this.closed = true; this.admission.clear(); this.browserContinuation.close(); this.sdkPending.clear();this.sdkCommitted.clear();this.sdkToolNames.clear();this.sdkAnnounced.clear();this.sdkResponses.clear();this.sdkAwaitingResponse=false;this.browserUserTurns.clear();this.observedResponses.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE').catch(() => undefined); }
+  close(): void { this.diagnostic('bridge.close', 'session_closed'); this.closed = true; this.admission.clear(); this.browserContinuation.close(); this.sdkPending.clear();this.sdkCommitted.clear();this.sdkToolNames.clear();this.sdkAnnounced.clear();this.sdkResponses.clear();this.sdkAwaitingResponse=false;this.browserUserTurns.clear();this.responseTrace.clear();this.requestedTraceTokens=[];this.observedResponses.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE').catch(() => undefined); }
 }

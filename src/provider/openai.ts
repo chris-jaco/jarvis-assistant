@@ -1,3 +1,4 @@
+import { BrowserTaskDiagnostics } from '../diagnostics/browser-task.js';
 import { PresentationGate } from './presentation-gate.js';
 import { OpenAIRealtimeWebRTC, RealtimeAgent, RealtimeSession } from '@openai/agents-realtime';
 import { ASSISTANT_NAME, JARVIS_INSTRUCTIONS, REALTIME_MODEL, JARVIS_VOICE, TURN_EAGERNESS } from '../core/personality.js';
@@ -53,10 +54,12 @@ export class OpenAIVoiceProvider implements VoiceProvider {
         throw new ClientError('No se pudo autorizar esta conversación.');
       }
       if (!current()) return;
-      const gate=new PresentationGate(muted=>{this.audio.muted=muted;});this.presentation=gate;
+      const playbackDiagnostics=new BrowserTaskDiagnostics();
+      const gate=new PresentationGate(muted=>{this.audio.muted=muted;},playbackDiagnostics,()=>({visibility:document.visibilityState,paused:this.audio.paused,ended:this.audio.ended}));this.presentation=gate;
       const bridge = new VoiceToolBridge((rows, pending) => { if (current()) this.observer.tools?.(rows, pending); }, message => { if (current()&&this.session){const id=crypto.randomUUID();gate.internal(id);this.session.sendMessage(message,{item:{id,type:'message',role:'user',content:[{type:'input_text',text:message}]}});} },undefined,undefined,{state:state=>gate.update(state),tool:browser=>{gate.tool();if(browser)gate.beginBrowser();}});
       this.tools = bridge;
       const toolConfig = await bridge.initialize();
+      playbackDiagnostics.enabled=bridge.browserTraceEnabled;
       if (!current()) { bridge.close(); return; }
       const transport = new OpenAIRealtimeWebRTC({ mediaStream: stream, audioElement: this.audio });
       const baseInstructions = `${JARVIS_INSTRUCTIONS}\n${toolConfig.context}`;
@@ -91,6 +94,9 @@ export class OpenAIVoiceProvider implements VoiceProvider {
         if(event.type==='response.output_item.added'&&responseId){const item=event.item as {id?:string;type?:string}|undefined;if(item?.id)gate.item(responseId,item.id,item.type);if(item?.type==='function_call')gate.tool(responseId);}
         if(event.type==='input_audio_buffer.speech_started')gate.turn(bridge.confirmationActive);
         if(event.type==='output_audio_buffer.started')gate.playback(responseId);
+        if(event.type==='output_audio_buffer.started')gate.playbackEvent('STARTED',responseId);
+        if(event.type==='output_audio_buffer.stopped')gate.playbackEvent('STOPPED',responseId);
+        if(event.type==='output_audio_buffer.cleared')gate.playbackEvent('CLEARED',responseId);
         if(event.type==='response.done'&&responseId)gate.done(responseId);
         void bridge.transportEvent(event).catch(() => undefined);
         if (event.type === 'input_audio_buffer.speech_started' && typeof event.item_id === 'string') memory.speechStarted(event.item_id);

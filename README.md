@@ -1283,3 +1283,41 @@ Minimum Windows acceptance after publishing this patch separately:
    be reported as successful objective completion. Chrome stays open.
 5. If a premature closure is diagnosed, expect OBJECTIVE_PENDING and continuation,
    not a final answer or scope teardown. Repeat with tracing enabled only when needed.
+
+### Temporary browser runtime trace (unreleased, instrumentation only)
+
+`BROWSER_TRACE` remains false by default. When enabled locally, collect
+`[ATLAS browser task]` alongside `[ATLAS browser]`: backend events appear in the
+server terminal and Realtime/presentation events in Atlas's DevTools console.
+This instrumentation does not change task admission, guards, retries, SDK
+scheduling, output eligibility, mute decisions or Chrome permissions.
+
+All events pass a strict allowlist. `at` is a local wall-clock timestamp;
+durations use a local monotonic clock. Task/admission/continuation IDs are opaque
+UUIDs, not authentication tokens. No transcript, prompt, message, page content,
+URL, argument, cookie, credential or header is included. Invalid diagnostic
+payloads and failed diagnostic sinks cannot change execution.
+
+- `ADMISSION`: frozen intent, TRANSCRIPT/FALLBACK source and admission-time state.
+- `END_TASK_GUARD` / GUARD: requested reason, boolean guard facts and guardMs.
+  ACCEPTED here means **only that the guard passed**.
+- `END_TASK` / TRANSPORT: actual bridge wait and ACCEPTED/ERROR outcome.
+  A rejected guard never enters this phase.
+- `END_TASK` / RESULT: final ACCEPTED/REJECTED result and state before/after.
+- `CONTINUATION`: per-ID RECEIVED/PENDING/DELIVERED/CONSUMED, access/recovery/
+  close-rejection source, coalescing and SDK-output incorporation.
+- `CONTINUATION_BLOCKED`: pending ID, blocked cause and SDK/invocation state.
+- `RESPONSE_REQUESTED`: logical SDK-output or internal-notification request.
+  This is not a server acknowledgement or proof of wire dispatch. SDK transport
+  sequencing can defer the request.
+- `RESPONSE_CREATED`, `RESPONSE_OUTPUT`, `RESPONSE_DONE`: server events, status
+  and producedMessage/producedFunctionCall booleans. Token relations labelled
+  NEXT_RESPONSE_CANDIDATE are local correlation candidates, not proven causal
+  acknowledgements (an unrelated user response may arrive first).
+- `PRESENTATION`: the existing mute command, reason and response/state.
+- `PLAYBACK`: server buffer STARTED/STOPPED/CLEARED with current visibility and
+  safe audio-element paused/ended flags. These do not prove physical audibility.
+
+For the acknowledgement-cut investigation, compare PRESENTATION with
+`muteReason=RESPONSE_CREATED` against PLAYBACK for the earlier response. Capture
+both consoles; the browser-side lifecycle is not printed in PowerShell.

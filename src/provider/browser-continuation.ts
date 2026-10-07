@@ -12,31 +12,32 @@ export class BrowserContinuation {
   private taskId?:string;
   private pending=new Map<string,'RECEIVED'|'PENDING'|'DELIVERED'|'CONSUMED'>();
   private held=false; private confirmation=false; private running=false; private latest?:z.infer<typeof stateSchema>;
-  constructor(private readonly resume: (handoffId: string, utterance: string) => Promise<unknown>, private readonly notify: (message: string) => void,private readonly diagnostics?:PopupDiagnostics,private readonly taskDiagnostics=new BrowserTaskDiagnostics(),private readonly acknowledge?:(receipt:ContinuationReceipt)=>void) {}
+  constructor(private readonly resume: (handoffId: string, utterance: string) => Promise<unknown>, private readonly notify: (message: string) => void,private readonly diagnostics?:PopupDiagnostics,private readonly taskDiagnostics=new BrowserTaskDiagnostics(),private readonly acknowledge?:(receipt:ContinuationReceipt)=>void,private readonly scheduling:()=>{toolInFlight:boolean;sdkAwaitingResponse:boolean}=()=>({toolInFlight:this.held,sdkAwaitingResponse:false})) {}
   traceContext():{taskId?:string;taskState?:z.infer<typeof browserExecutionStateSchema>} {return {taskId:this.taskId,taskState:this.latest?.executionState};}
+  deliveryTokens():string[] {return [...this.pending].filter(([,status])=>status==='DELIVERED').map(([token])=>token).slice(0,3);}
   incorporatedState():{browserContinuation:ContinuationReceipt;browserExecutionState:'RUNNING';browserRevision?:number;browserTaskActive?:boolean}|undefined {const receipt=this.receipt();return this.running&&receipt?.tokens.length?{browserContinuation:receipt,browserExecutionState:'RUNNING',browserRevision:this.latest?.revision,browserTaskActive:this.latest?.taskActive}:undefined;}
   receipt():ContinuationReceipt|undefined {return this.taskId?{taskId:this.taskId,tokens:[...this.pending].filter(([,status])=>status==='PENDING').map(([token])=>token)}:undefined;}
   // Only the SDK's committed function output proves that its next decision has
   // incorporated these tokens. HTTP completion alone is not that proof.
   committed(raw:unknown,toolInFlight=false):void {
     const parsed=continuationReceiptSchema.safeParse(raw);
-    if(parsed.success&&parsed.data.taskId===this.taskId){for(const token of parsed.data.tokens)if(this.pending.get(token)==='PENDING'){this.transition(token,'DELIVERED');this.transition(token,'CONSUMED');}this.acknowledge?.(parsed.data);}
+    if(parsed.success&&parsed.data.taskId===this.taskId){for(const token of parsed.data.tokens)if(this.pending.get(token)==='PENDING'){this.transition(token,'DELIVERED',true);this.transition(token,'CONSUMED',true);}this.acknowledge?.(parsed.data);}
     this.held=toolInFlight;this.flush();
   }
   released(toolInFlight=false):void {this.held=toolInFlight;this.flush();}
-  private transition(token:string,status:'RECEIVED'|'PENDING'|'DELIVERED'|'CONSUMED'):void {
+  private transition(token:string,status:'RECEIVED'|'PENDING'|'DELIVERED'|'CONSUMED',incorporatedBySdkOutput=false):void {
     this.pending.set(token,status);
     // Keep consumed deduplication bounded; backend removes acknowledged tokens.
-    if(this.pending.size>256)for(const [old,state] of this.pending){if(state==='CONSUMED'){this.pending.delete(old);break;}}this.taskDiagnostics.event({stage:'CONTINUATION',taskId:this.taskId,tokenState:status,toolInFlight:this.held,taskState:this.latest?.executionState});
+    if(this.pending.size>256)for(const [old,state] of this.pending){if(state==='CONSUMED'){this.pending.delete(old);break;}}this.taskDiagnostics.event({stage:'CONTINUATION',taskId:this.taskId,tokenId:token,tokenState:status,...this.scheduling(),taskState:this.latest?.executionState,incorporatedBySdkOutput,coalesced:[...this.pending.values()].filter(s=>s==='PENDING'||s==='DELIVERED').length>1,source:incorporatedBySdkOutput?'SDK_OUTPUT':status==='RECEIVED'||status==='PENDING'?'BACKEND_EVENT':'NOTIFICATION',tokenReason:token===this.latest?.ready?'ACCESS_READY':token===this.latest?.contextRecovery?.ready?'CONTEXT_READY':this.latest?.continuation?.tokens.includes(token)?'CLOSE_REJECTED':'UNSPECIFIED'});
   }
   private flush():void {
-    if(this.held||this.confirmation||!this.running)return;
+    if(this.held||this.confirmation||!this.running){for(const [token,status] of this.pending)if(status==='PENDING')this.taskDiagnostics.event({stage:'CONTINUATION_BLOCKED',taskId:this.taskId,tokenId:token,tokenState:'PENDING',...this.scheduling(),taskState:this.latest?.executionState,blockedBy:this.held?'TOOL_OR_RESPONSE_IN_FLIGHT':this.confirmation?'CONFIRMATION':'NOT_RUNNING'});return;}
     const tokens=[...this.pending].filter(([,status])=>status==='PENDING').map(([token])=>token);if(!tokens.length)return;
     tokens.forEach(token=>this.transition(token,'DELIVERED'));
     if(this.latest?.accessCorrelation)this.diagnostics?.event(this.latest.accessCorrelation,'continuation_sent');
     try {
     this.notify('Estado del backend de browser: RUNNING. Acceso/contexto listos o cierre prematuro rechazado. Continuá la tarea original en silencio, sin acknowledgement ni narración: usá refs frescas o browser.observe READ si no recibiste el snapshot. No abras otra pestaña innecesaria ni repitas la acción anterior ejecutada; continuá con el siguiente paso distinto. '+(this.latest?.actionOutcome?outcomeInstruction(this.latest.actionOutcome):''));
-    }catch{tokens.forEach(token=>this.transition(token,'PENDING'));return;}
+    }catch{tokens.forEach(token=>{this.transition(token,'PENDING');this.taskDiagnostics.event({stage:'CONTINUATION_BLOCKED',taskId:this.taskId,tokenId:token,blockedBy:'NOTIFY_FAILED',...this.scheduling()});});return;}
     tokens.forEach(token=>this.transition(token,'CONSUMED'));if(this.taskId)this.acknowledge?.({taskId:this.taskId,tokens});
   }
   private handoff?: string; private captured = new Map<string, string>(); private handled = new Set<string>();

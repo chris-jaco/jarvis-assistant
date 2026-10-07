@@ -21,6 +21,7 @@ export class BrowserDiagnostics {
     try { return await this.scope.run(call, work); }
     finally { this.active.delete(owner); }
   }
+  callId():string|undefined {return this.scope.getStore()?.call;}
   event(stage: BrowserStage, code: BrowserDiagnostic['code'], elapsedMs = 0, state: Pick<BrowserDiagnostic, 'channel' | 'connected' | 'initializing'> = {}): void {
     this.sink({ ...this.scope.getStore(), stage, code, elapsedMs: Math.max(0, Math.round(elapsedMs)), ...state });
   }

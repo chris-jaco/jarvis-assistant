@@ -16,17 +16,16 @@ import type { ToolAdapter, ToolDefinition } from '../types.js';
 const empty = z.object({}).strict(); const ref = z.string().uuid();
 const url = z.string().url().max(2000);
 export class BrowserAdapter implements ToolAdapter {
-  private readonly taskDiagnostics=new BrowserTaskDiagnostics();
   private confirmations=new Set<string>();
   acknowledge(receipt:ContinuationReceipt):void {if(this.provider instanceof AttachedChromeProvider)this.provider.acknowledge(receipt);}
-  async admitGoal(admission:string,utterance?:string):Promise<void> {if(this.provider instanceof AttachedChromeProvider)await this.provider.admitGoal(admission,utterance);}
+  async admitGoal(admission:string,utterance?:string):Promise<void> {if(this.provider instanceof AttachedChromeProvider)await this.provider.admitGoal(admission,utterance,this.executionStates.get(this.executionScope.getStore()??'')??'RUNNING');}
   cancelFromUser():void {if(this.provider instanceof AttachedChromeProvider)this.provider.cancelFromUser();}
   private presentations=new Map<string,{signature:string;revision:number}>();
   private executionScope = new AsyncLocalStorage<string>();
   private executionStates = new Map<string, BrowserExecutionState>();
   private mark(state: BrowserExecutionState): void { const id = this.executionScope.getStore(); if (id) this.executionStates.set(id,state); }
   readonly integration = 'browser'; readonly transport = 'local' as const;
-  constructor(private readonly provider: BrowserProvider, readonly diagnostics = new BrowserDiagnostics()) {}
+  constructor(private readonly provider: BrowserProvider, readonly diagnostics = new BrowserDiagnostics(),private readonly taskDiagnostics=new BrowserTaskDiagnostics()) {}
   get presentationEnabled():boolean{return this.provider instanceof AttachedChromeProvider;}
   inSession<T>(id: string, work: () => Promise<T>): Promise<T> { return this.executionScope.run(id, () => this.provider instanceof AttachedChromeProvider ? this.provider.inSession(id, work) : work()); }
   state(id: string, confirmation = false) { if(confirmation)this.confirmations.add(id);else this.confirmations.delete(id); const state = this.provider instanceof AttachedChromeProvider ? this.provider.state(id) : undefined;if(!state)return;const result={...state,taskActive:this.executionStates.has(id),executionState:confirmation ? 'WAITING_CONFIRMATION' as const : state.accessRevoked ? 'FAILED' as const : executionState(this.contextState(id,state),state.workflow,confirmation,!!state.ready)};const signature=JSON.stringify(result);const previous=this.presentations.get(id);const revision=previous?.signature===signature?previous.revision:(previous?.revision??0)+1;this.presentations.set(id,{signature,revision});return {...result,revision}; }
@@ -43,7 +42,7 @@ export class BrowserAdapter implements ToolAdapter {
   tools(): ToolDefinition[] {
     const tool = (id: string, description: string, schema: z.ZodType, execute: ToolDefinition['execute'], read = false): ToolDefinition => ({ id: `browser.${id}`, name: `browser_${id}`, description, integration: this.integration, capability: id, permission: read ? 'READ' : 'WRITE', confirm: false, schema, timeoutMs: 18_000, execute: (input, signal) => this.diagnostics.run('adapter', async () => {
       const sessionId=this.executionScope.getStore() ?? '';const confirmation=this.confirmations.has(sessionId);
-      const taskId=this.state(sessionId,confirmation)?.taskId;
+      const before=this.state(sessionId,confirmation);const taskId=before?.taskId;
       this.mark('RUNNING');
       const abort = this.diagnostics.capture('execution_abort', 'TIMEOUT');
       signal.addEventListener('abort', abort, { once: true });
@@ -51,7 +50,7 @@ export class BrowserAdapter implements ToolAdapter {
         const attached = this.provider instanceof AttachedChromeProvider ? this.provider : undefined;
         attached?.resetMeasurements();
         const action = attached && ['click','type','press','scroll','media','navigate','switch','back','forward','reload'].includes(id);
-        const result = action ? await attached.interact(id, input, () => execute(input, signal), signal) : await execute(input, signal); this.diagnostics.event('provider_result', 'OK'); if (id === 'endTask') {const close=result as {outcome:string;reason?:string};this.mark(close.outcome==='END_TASK_REJECTED'?'RUNNING':close.reason==='INCONCLUSIVE'?'INCONCLUSIVE':close.reason==='TERMINAL'?'FAILED':'COMPLETED');this.taskDiagnostics.enabled=this.diagnostics.enabled;this.taskDiagnostics.event({stage:'END_TASK',taskId,taskState:this.state(sessionId,confirmation)?.executionState,requestedReason:(input as {reason?:unknown}).reason,outcome:close.outcome==='END_TASK_REJECTED'?'REJECTED':'ACCEPTED',...(close.outcome==='END_TASK_REJECTED'?{reason:'OBJECTIVE_PENDING'}:{})});} return attached && id !== 'resume' && result && typeof result === 'object' && !Array.isArray(result) ? { ...result, browserTimings: attached.measurements() } : result; }
+        const result = action ? await attached.interact(id, input, () => execute(input, signal), signal) : await execute(input, signal); this.diagnostics.event('provider_result', 'OK'); if (id === 'endTask') {const close=result as {outcome:string;reason?:string};this.mark(close.outcome==='END_TASK_REJECTED'?'RUNNING':close.reason==='INCONCLUSIVE'?'INCONCLUSIVE':close.reason==='TERMINAL'?'FAILED':'COMPLETED');this.taskDiagnostics.enabled=this.diagnostics.enabled;const after=this.state(sessionId,confirmation);this.taskDiagnostics.event({stage:'END_TASK',phase:'RESULT',taskId,call:this.diagnostics.callId(),stateBefore:before?.executionState,stateAfter:after?.executionState,taskState:after?.executionState,requestedReason:(input as {reason?:unknown}).reason,outcome:close.outcome==='END_TASK_REJECTED'?'REJECTED':'ACCEPTED',...(close.outcome==='END_TASK_REJECTED'?{reason:'OBJECTIVE_PENDING'}:{})});} return attached && id !== 'resume' && result && typeof result === 'object' && !Array.isArray(result) ? { ...result, browserTimings: attached.measurements() } : result; }
       catch (error) {
         if (this.provider instanceof AttachedChromeProvider && ['observe','verify'].includes(id) && error instanceof ToolError && (['UPSTREAM','TIMEOUT'].includes(error.category) || error.browserRecovery?.recoverable)) {
           const state=this.provider.state(this.executionScope.getStore()!);

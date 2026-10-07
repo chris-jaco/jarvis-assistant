@@ -1,3 +1,5 @@
+import type { BrowserExecutionState } from '../execution-state.js';
+import { BrowserTaskDiagnostics } from '../../diagnostics/browser-task.js';
 import { classifyTaskIntent, type TaskIntent } from '../task-intent.js';
 import { canEndTask, endTaskSchema } from '../task-lifecycle.js';
 import type { ContinuationReceipt, EndTaskRequest } from '../task-lifecycle.js';
@@ -19,7 +21,7 @@ interface Session { intent?:TaskIntent; readAdmission?:string; inventory?:{admis
 export class BrowserWorkflow extends Error { constructor(readonly reply: Exclude<Reply, { outcome: 'OK' }>) { super(reply.outcome); } }
 export class AttachedChromeProvider implements BrowserProvider {
   readonly attached = true; private scope = new AsyncLocalStorage<Session>(); private sessions = new Map<string, Session>();
-  constructor(private readonly transport: BrowserTransport, private readonly enabled = true, private readonly configuredConnection?: string, private readonly diagnostics?: BrowserDiagnostics, private readonly accessDiagnostics?:PopupDiagnostics) {
+  constructor(private readonly transport: BrowserTransport, private readonly enabled = true, private readonly configuredConnection?: string, private readonly diagnostics?: BrowserDiagnostics, private readonly accessDiagnostics?:PopupDiagnostics,private readonly taskDiagnostics=new BrowserTaskDiagnostics()) {
     transport.subscribe((connection, event) => {
       const session = this.sessions.get(event.backendSessionId); if (!session || session.closed || session.connection !== connection) return;
       if(event.trace){session.accessCorrelation=event.trace.correlationId;session.traceNext=true;this.accessDiagnostics?.event(event.trace.correlationId,'backend_received');}
@@ -37,13 +39,15 @@ export class AttachedChromeProvider implements BrowserProvider {
   state(id: string) { const session = this.sessions.get(id); return session && !session.closed ? { taskId:session.task,continuation:this.receipt(session), workflow: session.workflow ?? null, ready: session.ready ?? null, accessRevoked: session.accessRevoked ?? false, actionOutcome:session.actionRecord?.result() ?? null, accessCorrelation:session.accessCorrelation ?? null, contextRecovery:session.contextRecovery ?? null } : { workflow: null, ready: null }; }
   private receipt(session:Session):ContinuationReceipt {return {taskId:session.task,tokens:[session.ready,session.contextRecovery?.status==='READY'?session.contextRecovery.ready:undefined,session.rejectionToken].filter((token):token is string=>!!token&&!session.acknowledged.has(token))};}
   acknowledge(receipt:ContinuationReceipt):void {const session=this.session();if(receipt.taskId!==session.task)return;const available=this.receipt(session).tokens;for(const token of receipt.tokens)if(available.includes(token))session.acknowledged.add(token);}
-  async admitGoal(admission:string, utterance?:string):Promise<void> {
+  async admitGoal(admission:string, utterance?:string,traceState:BrowserExecutionState='RUNNING'):Promise<void> {
     const session=this.session();await session.tail.catch(()=>{});
     if(session.admission===admission||session.workflow)return;
     // A trusted new user turn starts a new progress ledger, not a new Chrome
     // permission. Never import an earlier objective's action as completion proof.
     session.admission=admission;session.intent=classifyTaskIntent(utterance);session.readAdmission=undefined;session.inventory=undefined;session.progress.clear();session.terminal=false;session.cancelled=false;
+    this.traceTask({stage:'ADMISSION',taskId:session.task,admissionId:admission,intent:session.intent.intent,source:utterance?'TRANSCRIPT':'FALLBACK',taskState:traceState});
   }
+  private traceTask(raw:unknown):void {this.taskDiagnostics.enabled=this.diagnostics?.enabled===true;this.taskDiagnostics.event(raw);}
   cancelFromUser():void {this.session().cancelled=true;}
   terminalFailure():void {this.session().terminal=true;}
   private session(): Session { const session = this.scope.getStore(); if (!session || session.closed) throw new ToolError('REJECTED'); return session; }
@@ -268,8 +272,9 @@ export class AttachedChromeProvider implements BrowserProvider {
     const record=[...session.progress.values()].at(-1);
     const evidence=request.evidence?.actionId ? session.progress.get(request.evidence.actionId) : record&&session.progress.get(record.actionId);
     const tab=session.tabs.get(session.active??'');
-    const accepted=canEndTask(request,{
-      intent:session.intent?.intent??'ACTION_REQUIRED',
+    const guardStarted=performance.now();
+    const facts={
+      intent:session.intent?.intent??'ACTION_REQUIRED' as const,
       readObtained:!!session.admission&&(session.intent?.intent==='READ_ONLY'&&session.intent.context==='TABS'?session.inventory?.admission===session.admission:session.readAdmission===session.admission),
       progress:!!evidence && evidence===record && evidence.result().execution==='EXECUTED',
       pending:confirmation||!!session.workflow||!!session.pendingStep||this.receipt(session).tokens.length>0||!!session.contextRecovery&&['REQUIRED','RECOVERING'].includes(session.contextRecovery.status),
@@ -278,9 +283,14 @@ export class AttachedChromeProvider implements BrowserProvider {
       verificationRequired:!!record?.verifiable,verified:record?.result().outcome==='ACTION_VERIFIED',verificationExhausted:!!record?.verificationExhausted,
       cancelled:!!session.cancelled,terminal:!!session.terminal||!!session.accessRevoked||session.workflow?.outcome==='REQUIRES_USER_INTERACTION',
       recoveryExhausted:session.contextRecovery?.status==='INCONCLUSIVE'&&session.contextRecovery.attempts>=2
-    });
+    };
+    const accepted=canEndTask(request,facts);
+    this.traceTask({stage:'END_TASK_GUARD',phase:'GUARD',taskId:session.task,admissionId:session.admission,call:this.diagnostics?.callId(),requestedReason:request.reason,outcome:accepted?'ACCEPTED':'REJECTED',...(accepted?{}:{reason:'OBJECTIVE_PENDING'}),guardMs:Math.min(30000,performance.now()-guardStarted),guard:facts});
     if(!accepted){session.rejectionToken??=randomUUID();return {outcome:'END_TASK_REJECTED',reason:'OBJECTIVE_PENDING'};}
-    this.unwrap(await this.call('endTask', {}, signal));
+    const transportStarted=performance.now();
+    try{this.unwrap(await this.call('endTask', {}, signal));}
+    catch(error){this.traceTask({stage:'END_TASK',phase:'TRANSPORT',taskId:session.task,admissionId:session.admission,call:this.diagnostics?.callId(),requestedReason:request.reason,outcome:'ERROR',transportMs:Math.min(30000,performance.now()-transportStarted)});throw error;}
+    this.traceTask({stage:'END_TASK',phase:'TRANSPORT',taskId:session.task,admissionId:session.admission,call:this.diagnostics?.callId(),requestedReason:request.reason,outcome:'ACCEPTED',transportMs:Math.min(30000,performance.now()-transportStarted)});
     session.admission=undefined;session.intent=undefined;session.readAdmission=undefined;session.inventory=undefined;session.accessRevoked=false;session.task=randomUUID();session.progress.clear();session.acknowledged.clear();session.rejectionToken=undefined;session.cancelled=false;session.terminal=false;
     session.pendingStep=undefined;session.completed=undefined;session.failures=0;session.observation=undefined;session.workflow=undefined;session.ready=undefined;session.contextRecovery=undefined;
     // No fallible post-close READ may undo accepted task termination.
