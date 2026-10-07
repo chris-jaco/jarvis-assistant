@@ -28,7 +28,7 @@ export class AttachedChromeProvider implements BrowserProvider {
       session.inventory=undefined;
       if (event.event === 'accessRequired' && event.access) { session.workflow = event.access; session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; }
       if (event.event === 'accessGranted' || event.scopeId === session.tabs.get(session.active ?? '')?.scopeId) { session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; session.invalidation = 'DOCUMENT_CHANGED'; }
-      if (event.event === 'accessGranted' && event.tab) { session.accessRevoked = false; session.failures = 0; session.pendingStep = undefined; session.completed = undefined; session.contextRecovery = undefined; session.tabs.set(event.tab.id, event.tab); session.active = event.tab.id; if (session.workflow?.outcome === 'ACCESS_PENDING' && (!event.accessRequestId || event.accessRequestId === session.workflow.accessRequestId)) { session.workflow = undefined; session.ready = randomUUID(); } else if (session.workflow?.outcome === 'REQUIRES_USER_INTERACTION' && session.workflow.reason === 'ORIGIN_PERMISSION') { session.workflow = undefined; session.ready = randomUUID(); } }
+      if (event.event === 'accessGranted' && event.tab) { const reused=session.tabs.get(event.tab.id)?.scopeId===event.tab.scopeId; session.accessRevoked = false; if(!reused){session.failures = 0; session.pendingStep = undefined; session.completed = undefined; session.contextRecovery = undefined;} session.tabs.set(event.tab.id, event.tab); session.active = event.tab.id; if (session.workflow?.outcome === 'ACCESS_PENDING' && (!event.accessRequestId || event.accessRequestId === session.workflow.accessRequestId)) { session.workflow = undefined; session.ready = randomUUID(); } else if (session.workflow?.outcome === 'REQUIRES_USER_INTERACTION' && session.workflow.reason === 'ORIGIN_PERMISSION') { session.workflow = undefined; session.ready = randomUUID(); } }
       else if (event.event === 'accessRevoked') { if (event.accessRequestId && (session.workflow?.outcome !== 'ACCESS_PENDING' || session.workflow.accessRequestId !== event.accessRequestId)) return; session.accessRevoked = true; session.ready = undefined; for (const [id, tab] of session.tabs) if (tab.scopeId === event.scopeId) { session.tabs.delete(id); if (session.active === id) session.active = undefined; } session.workflow = undefined; }
     });
   }
@@ -45,6 +45,9 @@ export class AttachedChromeProvider implements BrowserProvider {
     // A trusted new user turn starts a new progress ledger, not a new Chrome
     // permission. Never import an earlier objective's action as completion proof.
     session.admission=admission;session.intent=classifyTaskIntent(utterance);session.readAdmission=undefined;session.inventory=undefined;session.progress.clear();session.terminal=false;session.cancelled=false;
+    // New admission gets fresh operational context, never old completion proof.
+    // Keep the uncertainty latch and Chrome consent/scopes intact.
+    session.contextRecovery=undefined;session.observation=undefined;session.lastObservation=undefined;session.context='OBSERVATION_REQUIRED';session.completed=undefined;session.pendingStep=undefined;session.failures=0;session.rejectionToken=undefined;session.ready=undefined;
     this.traceTask({stage:'ADMISSION',taskId:session.task,admissionId:admission,intent:session.intent.intent,source:utterance?'TRANSCRIPT':'FALLBACK',taskState:traceState});
   }
   private traceTask(raw:unknown):void {this.taskDiagnostics.enabled=this.diagnostics?.enabled===true;this.taskDiagnostics.event(raw);}
@@ -227,7 +230,11 @@ export class AttachedChromeProvider implements BrowserProvider {
   }
   private async recoverReads(signal: AbortSignal, deadlineAt: number, initial: ObservationResult): Promise<ObservationResult> {
     const session = this.session();
-    if (initial.status === 'OK' || !this.canRecoverContext()) return initial;
+    if (initial.status === 'OK') {
+      if (session.observation && session.observation.expires-Date.now()>250 && session.context==='READY') session.contextRecovery={status:'READY',attempts:session.contextRecovery?.attempts??0,ready:session.contextRecovery?.ready??null};
+      return initial;
+    }
+    if (!this.canRecoverContext()) return initial;
     if (!contextReadReasons.includes(initial.reason)) return initial;
     session.contextRecovery ??= {status:'REQUIRED', attempts:0, ready:null};
     // A cancelled caller cannot authorize another READ. A later fresh request
@@ -246,7 +253,8 @@ export class AttachedChromeProvider implements BrowserProvider {
   async recoverContext(signal: AbortSignal): Promise<{observation:ObservationResult; actionOutcome:ReturnType<ActionRecord['result']> | null; contextRecovery:ContextRecovery | null}> {
     const session = this.session();
     const work = session.tail.catch(()=>{}).then(async()=>{
-      const observation = await this.recoverReads(signal, Date.now()+8000, {status:'FAILED',reason:'UPSTREAM'});
+      const fresh=session.context==='READY'&&session.observation&&session.lastObservation&&session.observation.expires-Date.now()>250;
+      const observation = await this.recoverReads(signal, Date.now()+8000, fresh ? {status:'OK',data:session.lastObservation!} : {status:'FAILED',reason:'UPSTREAM'});
       return {observation,actionOutcome:session.actionRecord?.result() ?? null,contextRecovery:session.contextRecovery ?? null};
     }); session.tail=work; return work;
   }

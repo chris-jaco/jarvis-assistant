@@ -807,3 +807,50 @@ test('actual admission and endTask traces distinguish guarded rejection from acc
   assert.ok(rows.some(r=>r.stage==='ADMISSION'&&r.intent==='ACTION_REQUIRED'&&r.source==='FALLBACK'));assert.ok(rows.some(r=>r.stage==='ADMISSION'&&r.intent==='READ_ONLY'&&r.source==='TRANSCRIPT'));assert.ok(rows.some(r=>r.stage==='END_TASK'&&r.outcome==='ACCEPTED'&&r.transportMs!==undefined));assert.ok(rows.some(r=>r.stage==='END_TASK'&&r.stateAfter==='COMPLETED'));assert.ok(!JSON.stringify(rows).includes('Poné música'));
  });}finally{await provider.close();h.close();}
 });
+
+test('known open plus fresh observe allows distinct action without reopening or premature INCONCLUSIVE',async()=>{
+ const h=harness();let opens=0;const base=h.transport;const provider=new AttachedChromeProvider({...base,request:async(c,req,s)=>{if(req.operation==='openTab')++opens;return base.request(c,req,s);}});const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{
+  await provider.admitGoal(id(),'Buscá una canción');await assert.rejects(provider.openTab('https://workspace.example/',signal()),BrowserWorkflow);await h.controller.approve(h.controller.pending()[0]!.id);
+  const seen:any=await adapter.tools().find(t=>t.id==='browser.observe')!.execute({},signal());assert.equal(adapter.state(session)!.executionState,'RUNNING');
+  const typed:any=await adapter.tools().find(t=>t.id==='browser.type')!.execute({ref:seen.elements[0].ref,text:'fixture',mode:'replace'},signal());assert.equal(typed.action.status,'COMPLETED');assert.equal(opens,1);
+ });}finally{await provider.close();h.close();}
+});
+test('fresh context satisfies recovery without another READ or another action',async()=>{
+ const f=await grantedRuntime();try{await f.provider.inSession(session,async()=>{
+  const seen=await f.provider.observe(signal());await f.provider.interact('type',{ref:seen.elements[0]!.ref,text:'fixture',mode:'replace'},()=>f.provider.type(seen.elements[0]!.ref,'fixture','replace',signal()),signal());
+  const fresh=await f.provider.observe(signal());const result=await f.provider.recoverContext(signal());assert.equal(result.observation.status,'OK');if(result.observation.status==='OK')assert.equal(result.observation.data.snapshotId,(fresh as any).snapshotId);assert.equal(result.contextRecovery?.status,'READY');assert.equal(result.contextRecovery?.attempts,0);
+ });}finally{await f.provider.close();f.h.close();}
+});
+test('new admission resets exhausted recovery but preserves task grant and execution uncertainty',async()=>{
+ const f=await grantedRuntime();try{await f.provider.inSession(session,async()=>{
+  await f.provider.admitGoal(id(),'Buscá algo');const taskBefore=f.provider.state(session).taskId;const scope=f.h.controller.authorized()[0]!.scopeId;
+  const seen=await f.provider.observe(signal());await f.provider.type(seen.elements[0]!.ref,'fixture','replace',signal());await f.provider.admitGoal(id(),'Buscá otra cosa');assert.equal(f.provider.state(session).taskId,taskBefore);assert.equal(f.h.controller.authorized()[0]!.scopeId,scope);assert.equal(f.provider.state(session).contextRecovery,null);await assert.rejects(f.provider.press(seen.elements[0]!.ref,'Enter',signal()));
+ });}finally{await f.provider.close();f.h.close();}
+});
+
+test('open completed with invalid snapshots recovers at most two READs, later valid READ restores RUNNING without reopening',async()=>{
+ const h=harness();const base=h.transport;let bad=true,reads=0,opens=0;
+ const provider=new AttachedChromeProvider({...base,request:async(c,req,s)=>{if(req.operation==='openTab')++opens;const result=await base.request(c,req,s);if(req.operation==='observe'){++reads;if(bad&&result.outcome==='OK')return {...result,data:{...result.data,expiresAt:Date.now()-1}} as Reply;}return result;}});
+ const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{
+  await provider.admitGoal(id(),'Buscá un resultado');await assert.rejects(provider.openTab('https://workspace.example/',signal()),BrowserWorkflow);await h.controller.approve(h.controller.pending()[0]!.id);
+  const result:any=await adapter.tools().find(t=>t.id==='browser.observe')!.execute({},signal());assert.equal(result.observation.status,'FAILED');assert.equal(reads,3);assert.equal(adapter.state(session)!.executionState,'INCONCLUSIVE');assert.equal(provider.state(session).actionOutcome!.execution,'EXECUTED');
+  bad=false;const fresh:any=await adapter.tools().find(t=>t.id==='browser.observe')!.execute({},signal());assert.equal(adapter.state(session)!.executionState,'RUNNING');assert.ok(fresh.snapshotId);assert.equal(opens,1);
+  provider.acknowledge(provider.state(session).continuation!);const typed:any=await adapter.tools().find(t=>t.id==='browser.type')!.execute({ref:fresh.elements[0].ref,text:'fixture',mode:'replace'},signal());assert.equal(typed.action.status,'COMPLETED');assert.equal(opens,1);
+ });}finally{await provider.close();h.close();}
+});
+test('new admission never clears EXECUTION_UNKNOWN or permits another dispatch',async()=>{
+ let writes=0;const f=await grantedRuntime(base=>({...base,request:async(c,req,s)=>{if(req.operation==='type'){++writes;return {outcome:'ERROR',code:'EXECUTION_UNKNOWN'};}return base.request(c,req,s);}}));
+ try{await f.provider.inSession(session,async()=>{
+  const seen=await f.provider.observe(signal());await assert.rejects(f.provider.type(seen.elements[0]!.ref,'fixture','replace',signal()),(e:any)=>e.category==='EXECUTION_UNKNOWN');await f.provider.admitGoal(id(),'Buscá otra cosa');const fresh=await f.provider.observe(signal());await assert.rejects(f.provider.type(fresh.elements[0]!.ref,'other','replace',signal()),(e:any)=>e.category==='EXECUTION_UNKNOWN');assert.equal(writes,1);
+ });}finally{await f.provider.close();f.h.close();}
+});
+test('reusing task access never resets completed-action deduplication',async()=>{
+ let writes=0;const f=await grantedRuntime(base=>({...base,request:async(c,req,s)=>{if(req.operation==='type')++writes;return base.request(c,req,s);}}));
+ try{await f.provider.inSession(session,async()=>{
+  const seen=await f.provider.observe(signal());const input={ref:seen.elements[0]!.ref,text:'fixture',mode:'replace'};
+  await f.provider.interact('type',input,()=>f.provider.type(input.ref,input.text,'replace',signal()),signal());const access=await f.provider.requestTabAccess({target:{kind:'current'},purpose:'Continue',lifetime:'task'},signal());assert.equal(access.outcome,'OK');
+  const duplicate=await f.provider.interact('type',input,()=>f.provider.type(input.ref,input.text,'replace',signal()),signal());assert.equal(duplicate.action.status,'COMPLETED');assert.equal(writes,1);
+ });}finally{await f.provider.close();f.h.close();}
+});

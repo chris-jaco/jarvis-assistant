@@ -56,7 +56,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       if (!current()) return;
       const playbackDiagnostics=new BrowserTaskDiagnostics();
       const gate=new PresentationGate(muted=>{this.audio.muted=muted;},playbackDiagnostics,()=>({visibility:document.visibilityState,paused:this.audio.paused,ended:this.audio.ended}));this.presentation=gate;
-      const bridge = new VoiceToolBridge((rows, pending) => { if (current()) this.observer.tools?.(rows, pending); }, message => { if (current()&&this.session){const id=crypto.randomUUID();gate.internal(id);this.session.sendMessage(message,{item:{id,type:'message',role:'user',content:[{type:'input_text',text:message}]}});} },undefined,undefined,{state:state=>gate.update(state),tool:browser=>{gate.tool();if(browser)gate.beginBrowser();}});
+      const bridge = new VoiceToolBridge((rows, pending) => { if (current()) this.observer.tools?.(rows, pending); }, message => { if (current()&&this.session){const id=crypto.randomUUID();gate.internal(id);transport.sendMessage(message,{item:{id,type:'message',role:'user',content:[{type:'input_text',text:message}]}},{triggerResponse:false});transport.requestResponse({metadata:{atlas_presentation_source:'INTERNAL_BROWSER_CONTINUATION'}});} },undefined,undefined,{state:state=>gate.update(state),tool:browser=>{gate.tool();if(browser)gate.beginBrowser();}});
       this.tools = bridge;
       const toolConfig = await bridge.initialize();
       playbackDiagnostics.enabled=bridge.browserTraceEnabled;
@@ -88,9 +88,9 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       session.on('transport_event', event => {
         if (!current()) return;
         const raw=event as unknown as {response_id?:unknown;response?:unknown};
-        const response=raw.response as {id?:string;output?:{type?:string;id?:string}[]}|undefined;
+        const response=raw.response as {id?:string;metadata?:Record<string,unknown>;output?:{type?:string;id?:string}[]}|undefined;
         const responseId=typeof raw.response_id==='string'?raw.response_id:response?.id;
-        if(event.type==='response.created'&&responseId)gate.response(responseId);
+        if(event.type==='response.created'&&responseId)gate.response(responseId,response?.metadata?.atlas_presentation_source==='INTERNAL_BROWSER_CONTINUATION');
         if(event.type==='response.output_item.added'&&responseId){const item=event.item as {id?:string;type?:string}|undefined;if(item?.id)gate.item(responseId,item.id,item.type);if(item?.type==='function_call')gate.tool(responseId);}
         if(event.type==='input_audio_buffer.speech_started')gate.turn(bridge.confirmationActive);
         if(event.type==='output_audio_buffer.started')gate.playback(responseId);

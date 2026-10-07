@@ -20,12 +20,12 @@ function storage() {
   const env:SiteEnvironment={load:async()=>structuredClone(file),save:async value=>{file=structuredClone(value);},contains:async p=>permissions.has(p),remove:async p=>permissions.delete(p)};
   return {env,permissions,invalidations,policy:()=>new SiteAuthorization(env,async origin=>{invalidations.push(origin);})};
 }
-function runtime(diagnostics?:PopupDiagnostics) {
+function runtime(diagnostics?:PopupDiagnostics, now=Date.now) {
   const store=storage(); let controller:ExtensionController; let reads=0,navigations=0,invalidations=0; const events:any[]=[];const listeners=new Set<(connection:string,event:any)=>void>();const connection=id();
   const tab={id:7,url:A+'/',title:'Fixture',status:'complete'};
   const policy=new SiteAuthorization(store.env,async origin=>controller.revokeOrigin(origin));
   const surface:Surface={current:async()=>tab,tab:async()=>tab,create:async url=>{tab.url=url;return tab.id;},activate:async()=>{},navigate:async(_,url)=>{++navigations;tab.url=url;},history:async()=>{},invalidate:async()=>{++invalidations;},content:async(_tab,grant)=>{++reads;return {outcome:'OK',data:{tabId:grant.tabId,scopeId:grant.scopeId,truncated:false,title:'Fixture',url:grant.origin+'/',documentId:id(),snapshotId:id(),expiresAt:Date.now()+15000,elements:[]}};}};
-  controller=new ExtensionController(surface,event=>{events.push(event);for(const listener of listeners)listener(connection,event);},Date.now,id,policy,diagnostics);
+  controller=new ExtensionController(surface,event=>{events.push(event);for(const listener of listeners)listener(connection,event);},now,id,policy,diagnostics);
   const session=id(),task=id(); let epoch=id();
   const req=(operation:string,args:unknown={},extra:object={})=>({protocol:'atlas.browser',version:1,kind:'request',requestId:id(),backendSessionId:session,taskId:task,connectionEpoch:epoch,deadlineAt:Date.now()+20000,operation,args,...extra});
   const reset=async()=>{epoch=id();await controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});};
@@ -137,4 +137,22 @@ test('opt-in authorization diagnostics correlate policy/grant/post/backend/conti
   for(const stage of ['policy_saved','grant_created','notification_posted','backend_received','continuation_sent','next_task_tool'])assert.ok(rows.some(row=>row.stage===stage&&row.correlationId===correlation),stage);
   assert.ok(!JSON.stringify(rows).includes(A));assert.ok(rows.every(row=>Object.keys(row).every(key=>['correlationId','stage','outcome','durationMs'].includes(key))));assert.equal(notifications.length,1);
  });}finally{await provider.close();}
+});
+
+test('compatible task grant reuse preserves scope, expiry and persistent consent',async()=>{
+ const r=runtime();await r.reset();await r.allow(A);const first:any=await r.access();assert.equal(first.outcome,'OK');const second:any=await r.access();assert.equal(second.outcome,'OK');assert.equal(second.data.scopeId,first.data.scopeId);assert.equal(second.data.expiresAt,first.data.expiresAt);assert.equal(r.controller.authorized().length,1);assert.equal(r.stats().reads,0);
+});
+for(const mode of ['other-task','other-session','cross-origin','revoked','permission-removed'] as const)test(`task grant cannot be reused: ${mode}`,async()=>{
+ const r=runtime();await r.reset();await r.allow(A);const first:any=await r.access();
+ if(mode==='cross-origin')r.tab.url=B+'/';
+ if(mode==='revoked')await r.controller.revoke(first.data.scopeId);
+ if(mode==='permission-removed')r.store.permissions.delete(hostPattern(A));
+ const extra=mode==='other-task'?{taskId:id()}:mode==='other-session'?{backendSessionId:id()}:{};
+ const result:any=await r.controller.receive(r.req('requestTabAccess',{target:{kind:'current'},purpose:'Explicit task',lifetime:'task'},extra));
+ assert.ok(result.outcome!=='OK'||result.data.scopeId!==first.data.scopeId);
+});
+test('expired task grant never reuses old scope or expiry',async()=>{
+ let now=Date.now();const r=runtime(undefined,()=>now);await r.reset();await r.allow(A);const first:any=await r.access();now=first.data.expiresAt+1;
+ const result:any=await r.controller.receive(r.req('requestTabAccess',{target:{kind:'current'},purpose:'Explicit task',lifetime:'task'},{deadlineAt:now+20000}));
+ assert.ok(result.outcome!=='OK'||result.data.scopeId!==first.data.scopeId);
 });

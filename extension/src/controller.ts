@@ -171,6 +171,15 @@ export class ExtensionController {
       }
       if (target.kind === 'current') {
         const selected = await this.surface.current().catch(() => undefined);
+        if (selected?.url) {
+          const compatible = [...this.grants.values()].find(grant => grant.chromeId === selected.id && grant.session === request.backendSessionId && grant.task === request.taskId && grant.lifetime === 'task' && request.args.lifetime === 'task' && !grant.suspended && !grant.handoff && grant.expiresAt > this.now() && grant.origin === siteOrigin(selected.url!));
+          if (compatible && (!compatible.persistent || await this.sites?.allows(compatible.origin))) {
+            this.check(request);
+            if (!this.grants.has(compatible.scopeId)) throw new Error('ACCESS_DENIED');
+            this.emit({protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:this.epoch,backendSessionId:compatible.session,event:'accessGranted',tab:this.dto(compatible)});
+            return {outcome:'OK',data:this.dto(compatible)};
+          }
+        }
         if (selected?.url) { const existing = [...this.grants.values()].find(grant => grant.chromeId === selected.id && grant.session === request.backendSessionId && grant.lifetime === 'session');
           if (existing && !existing.persistent && !existing.suspended && existing.expiresAt > this.now() && existing.origin === siteOrigin(selected.url)) {
             existing.task = request.taskId; await this.surface.invalidate(existing.chromeId,true);

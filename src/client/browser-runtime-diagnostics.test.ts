@@ -18,8 +18,8 @@ test('runtime diagnostics reject payloads, unknown states, private IDs and sensi
 test('presentation diagnostic reasons and playback snapshots leave the original mute/eligibility sequence unchanged',()=>{
  const {rows,diagnostic}=trace();const plain:boolean[]=[],instrumented:boolean[]=[];
  const ordinary=new PresentationGate(v=>plain.push(v));const observed=new PresentationGate(v=>instrumented.push(v),diagnostic,()=>({visibility:'hidden',paused:false,ended:false}));
- for(const gate of [ordinary,observed]){gate.turn();gate.response('resp_ack');gate.item('resp_ack','ack');gate.playback('resp_ack');gate.playbackEvent('STARTED','resp_ack');gate.tool();gate.beginBrowser();gate.done('resp_ack');gate.response('resp_work');gate.playbackEvent('STOPPED','resp_ack');gate.playbackEvent('CLEARED','resp_ack');gate.turn();gate.response('resp_user');gate.item('resp_user','hidden');gate.playback('resp_user');assert.equal(gate.visible('hidden'),false);gate.close();}
- assert.deepEqual(instrumented,plain);assert.ok(rows.some(r=>r.responseId==='resp_work'&&r.muted===true&&r.muteReason==='RESPONSE_CREATED'));
+ for(const gate of [ordinary,observed]){gate.turn();gate.response('resp_ack');gate.item('resp_ack','ack');gate.playback('resp_ack');gate.playbackEvent('STARTED','resp_ack');gate.tool();gate.beginBrowser();gate.done('resp_ack');gate.response('resp_work');gate.playbackEvent('STOPPED','resp_ack');gate.playbackEvent('CLEARED','resp_ack');gate.turn();gate.response('resp_user');gate.item('resp_user','hidden');gate.playback('resp_user');assert.equal(gate.visible('hidden'),true);gate.close();}
+ assert.deepEqual(instrumented,plain);assert.ok(rows.some(r=>r.responseId==='resp_work'&&r.muted===false&&r.muteReason==='RESPONSE_CREATED'));
  assert.deepEqual(rows.filter(r=>r.stage==='PLAYBACK').map(r=>r.playback),['STARTED','STOPPED','CLEARED']);assert.ok(rows.every(r=>r.visibility==='hidden'&&r.paused===false&&r.ended===false));
  const throwing=new PresentationGate(()=>{},diagnostic,()=>{throw new Error('private');});assert.doesNotThrow(()=>throwing.response('resp_safe'));
 });

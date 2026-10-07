@@ -34,6 +34,7 @@ export class BrowserAdapter implements ToolAdapter {
     // Rejecting completion cannot turn an unknown-execution latch into RUNNING.
     if(state.actionOutcome?.execution==='UNKNOWN')return 'FAILED';
     if (base === 'COMPLETED' || state.actionOutcome?.execution !== 'EXECUTED') return base;
+    if (state.contextRecovery?.status === 'READY' && ['RECOVERING_CONTEXT','INCONCLUSIVE'].includes(base)) return 'RUNNING';
     if (state.contextRecovery?.status === 'INCONCLUSIVE') return 'INCONCLUSIVE';
     if (state.contextRecovery && ['REQUIRED','RECOVERING'].includes(state.contextRecovery.status)) return 'RECOVERING_CONTEXT';
     return base;

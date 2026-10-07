@@ -1207,6 +1207,15 @@ verificación, aplica silencio RUNNING en audio/transcript y añade diagnostics
 opt-in del popup. La admisión permite un único acknowledgement inicial opcional; luego RUNNING y RECOVERING_CONTEXT son silenciosos. No añade una ronda para la conversación ordinaria.
 Contrato, configuración y límites en [browser-attached.md](docs/browser-attached.md#v0521--estabilización-de-resultados-y-presentación).
 
+La estabilización adicional (pendiente de acceptance Windows) conserva el playback
+ya admitido al crear respuestas internas. Las continuaciones llevan metadata de
+presentación; un turno explícito tiene su propia elegibilidad audible, sin habilitar
+narración RUNNING. Contexto fresco validado satisface la recuperación READ sin
+reabrir ni repetir acciones. Grants de tarea compatibles se reutilizan conservando
+scope, caducidad y consentimiento; una nueva admisión no hereda contexto agotado
+ni pruebas de completion. EXECUTION_UNKNOWN permanece bloqueado. BROWSER_TRACE
+sigue desactivado por defecto.
+
 ### Browser task lifecycle stabilization (unreleased)
 
 A response ending, an acknowledgement ending, a tool returning and an observation

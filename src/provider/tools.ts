@@ -235,7 +235,7 @@ export class VoiceToolBridge {
     }
   }
   speechStarted(itemId: string): void {
-    if(this.lifecycleEnabled&&!this.confirmationActive&&!['RUNNING','RECOVERING_CONTEXT','WAITING_ACCESS','WAITING_MANUAL','WAITING_CONFIRMATION'].includes(this.lastBrowserState??''))this.admission.begin(itemId);
+    if(this.lifecycleEnabled&&!this.confirmationActive&&!['WAITING_ACCESS','WAITING_MANUAL','WAITING_CONFIRMATION'].includes(this.lastBrowserState??''))this.admission.begin(itemId);
     if(!this.confirmationActive&&!this.closed&&this.browserUserTurns.size<200)this.browserUserTurns.add(itemId);
     this.browserContinuation.speechStarted(itemId, this.confirmationActive);
     // A new turn supersedes an unresolved semantic decision. Old classification
