@@ -76,6 +76,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
         } }
       });
       this.session = session;
+      session.on('agent_tool_end', (_context,_agent,_tool,result,details) => {if(current()&&'callId' in details.toolCall)bridge.toolOutputCommitted(details.toolCall.callId,result);});
       let speaking = false;
       session.on('error', () => { if (current()) this.fail('Se interrumpió la conversación. Revisá tu conexión y volvé a conectar.'); });
       transport.on('connection_change', status => {

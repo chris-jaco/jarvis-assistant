@@ -1206,3 +1206,80 @@ V0.5.2.1 (working tree, acceptance Windows pendiente): separa ejecución de
 verificación, aplica silencio RUNNING en audio/transcript y añade diagnostics
 opt-in del popup. La admisión permite un único acknowledgement inicial opcional; luego RUNNING y RECOVERING_CONTEXT son silenciosos. No añade una ronda para la conversación ordinaria.
 Contrato, configuración y límites en [browser-attached.md](docs/browser-attached.md#v0521--estabilización-de-resultados-y-presentación).
+
+### Browser task lifecycle stabilization (unreleased)
+
+A response ending, an acknowledgement ending, a tool returning and an observation
+returning do **not** end a browser task. One optional initial acknowledgement is a
+very short acceptance, without a plan or viability assessment. Tools start without
+waiting for playback; intermediate RUNNING/RECOVERING_CONTEXT output remains silent.
+
+Access/context continuation events have RECEIVED → PENDING → DELIVERED → CONSUMED
+states. Events arriving during a tool are deferred and coalesced. The HTTP output
+includes a task-scoped receipt, including events discovered during its final READ
+refresh. Only the SDK `agent_tool_end` event, emitted after committing the function
+output and requesting its next response, consumes that receipt without another
+response. Remaining events get one silent internal continuation. A same-origin,
+session-authenticated acknowledgement endpoint removes matching backend tokens;
+old-task or invented token IDs cannot acknowledge another task. Events arriving
+after SDK response creation wait for that decision; they do not create a parallel
+response. Superseded pending identities are discarded when the backend provides
+a new authoritative receipt. Neither receipts
+nor acknowledgement endpoints execute browser actions.
+
+`browser.endTask` accepts `{ reason, evidence?: { actionId } }`. Reasons are:
+
+- `COMPLETED`: ACTION_REQUIRED needs a completed relevant action in this task;
+  READ_ONLY needs sufficient current-admission READ context. Both require fresh
+  authorized context, no pending workflow/continuation/confirmation/recovery and
+  no unknown execution. A supplied actionId must name the latest relevant action.
+  Available effect conditions must be verified. The trusted initial/new user-task
+  admission resets only the progress ledger, so earlier objectives cannot provide
+  completion evidence. It does not reset refs, recovery budgets, duplicate-action
+  protection, unknown execution or Chrome/site permissions. Preparatory tabs/access/switch/
+  observe alone cannot close an ACTION_REQUIRED task. A READ_ONLY task instead
+  requires fresh sufficient context obtained during its current admission.
+- `CANCELLED`: explicit user cancellation, recorded through the non-model browser
+  lifecycle endpoint. For voice, say **“Atlas, cancelá la tarea del navegador.”**
+  This is distinct from any pending action confirmation; a model reason alone
+  cannot manufacture cancellation.
+- `TERMINAL`: a recorded nonrecoverable failure, revocation or manual challenge.
+- `INCONCLUSIVE`: exhausted context recovery or applicable effect-verification
+  budget, retaining known execution semantics.
+
+Missing reasons (including legacy `{}`) and unsupported closure claims return
+`END_TASK_REJECTED / OBJECTIVE_PENDING` as a business result. The task/grants/refs
+are retained, RUNNING continues silently, and the model must choose the next
+necessary distinct step. Repeated identical rejections share one continuation
+identity. This is a structural guard, **not** a universal objective verifier:
+playback evidence does not prove content identity or requested duration. Admission freezes READ_ONLY or ACTION_REQUIRED from the captured user transcript,
+never from model tool arguments. Narrow unambiguous reading requests qualify as
+READ_ONLY; missing, ambiguous or mixed requests default to ACTION_REQUIRED. Page
+reading requires a fresh authorized snapshot from the current admission; tab
+inventory requires a fresh READ of authorized tabs only, even when empty. Existing
+pending, grant, unknown-execution and applicable verification guards remain.
+The first browser call waits at most 1.5 seconds for its captured speech turn;
+a late transcript cannot change the admitted classification. The backend neither
+retains nor logs the raw transcript used for classification.
+Verification remains optional for continuing a multi-step task; it never repeats
+an executed action. EXECUTION_UNKNOWN still blocks retries, including after task
+closure or fresh observations.
+
+With `BROWSER_TRACE=true` only, `[ATLAS browser task]` diagnostics report opaque
+identifiers, task states, token states, tool-in-flight state, closure decisions and
+sanitized workflow outcomes/reasons. They omit arguments, page data, titles, URLs,
+written values and credentials. No extension permission, site policy, Search/Media,
+Native Messaging or consequential-action confirmation changes are required.
+
+Minimum Windows acceptance after publishing this patch separately:
+
+1. Start attached mode; request a multi-step search/play task. Expect at most one
+   brief acknowledgement, then silence while tools run.
+2. Authorize the tab if requested. Verify the task resumes once, uses fresh refs
+   and performs actions beyond tabs/access/switch/observe before completion.
+3. If auto-observation fails, verify only bounded READ recovery occurs; no completed
+   type/click/press is repeated to verify its effect.
+4. Test the explicit browser cancellation phrase and a revoked grant. Neither may
+   be reported as successful objective completion. Chrome stays open.
+5. If a premature closure is diagnosed, expect OBJECTIVE_PENDING and continuation,
+   not a final answer or scope teardown. Repeat with tracing enabled only when needed.

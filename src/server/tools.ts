@@ -1,3 +1,4 @@
+import { continuationReceiptSchema, explicitBrowserCancellation } from '../browser/task-lifecycle.js';
 import { PopupDiagnostics } from '../diagnostics/popup.js';
 import { IsolatedBrowserProvider } from '../browser/isolated.js';
 import { AttachedChromeProvider } from '../browser/attached/provider.js';
@@ -93,7 +94,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
       const id = randomBytes(32).toString('hex');
       sessions.set(id, { browserSessionId: randomUUID(), executor: new ToolExecutor(registry, dependencies.now ?? Date.now, 60_000, undefined, trace), expiresAt: Date.now() + lifetime, busy: false, seenTurns: new Set(), workingIds: [], memoryGeneration: 0, lastMemorySequence: 0, spellingEvidence: '', jobs: new Set(), closed: false });
       res.setHeader('Set-Cookie', `jarvis_session=${id}; HttpOnly; SameSite=Strict; Path=/api/tools; Max-Age=1800${origin?.startsWith('https:') ? '; Secure' : ''}`);
-      send(200, { tools: registry.descriptors().filter(tool => tool.id !== 'memory.ingest' && tool.id !== 'browser.resume'), timezone, now: new Date().toISOString(), confirmationTrace, browserTrace: browserDiagnostics.enabled, accessTrace:env.ATLAS_ACCESS_TRACE==='true',browserPresentation:browser?.presentationEnabled===true }); return true;
+      send(200, { tools: registry.descriptors().filter(tool => tool.id !== 'memory.ingest' && tool.id !== 'browser.resume'), timezone, now: new Date().toISOString(), confirmationTrace, browserTrace: browserDiagnostics.enabled, accessTrace:env.ATLAS_ACCESS_TRACE==='true',browserPresentation:browser?.presentationEnabled===true,browserTaskLifecycle:browser?.presentationEnabled===true }); return true;
     }
     const id = /(?:^|;\s*)jarvis_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
     const session = id ? sessions.get(id) : undefined;
@@ -101,12 +102,15 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
     if (path === '/api/tools/session' && req.method === 'DELETE') { browserDiagnostics.lifecycle(session.executor, 'session_closed'); session.closed = true; session.executor.close(); void browser?.endSession(session.browserSessionId).catch(() => {}); sessions.delete(id!); send(200, { closed: true }); return true; }
     if (path === '/api/tools/activity' && req.method === 'GET') { const pending=session.executor.pendingState();const state=browser?.state(session.browserSessionId,!!pending);send(200, { activity: session.executor.telemetry.snapshot(), pending, ...(state ? { browser:state } : {}) }); return true; }
     if (req.method !== 'POST') { send(405, { error: 'Método no permitido.' }); return true; }
-    const contextualRead = path === '/api/tools/memory-context' || path === '/api/tools/memory-turn';
+    const contextualRead = path === '/api/tools/memory-context' || path === '/api/tools/memory-turn' || path === '/api/tools/browser-continuation' || path === '/api/tools/browser-cancel';
     if (session.busy && !contextualRead) { browserDiagnostics.lifecycle(session.executor, 'http_busy'); send(429, { error: 'Una herramienta sigue ejecutándose.' }); return true; }
     if (!contextualRead) session.busy = true;
     try {
       const input = await body(req);
-      if (path === '/api/tools/memory-context') {
+      if(path==='/api/tools/browser-continuation'){const receipt=continuationReceiptSchema.parse(input);await browser?.inSession(session.browserSessionId,async()=>browser.acknowledge(receipt));send(200,{acknowledged:true});
+      } else if(path==='/api/tools/browser-admit'){const p=z.object({admissionId:z.string().uuid(),userTurn:z.object({itemId:z.string().min(1).max(128),utterance:z.string().min(1).max(2000)}).strict().optional()}).strict().parse(input);if(session.executor.pendingState())throw new Error();await browser?.inSession(session.browserSessionId,()=>browser.admitGoal(p.admissionId,p.userTurn?.utterance));send(200,{admitted:true});
+      } else if(path==='/api/tools/browser-cancel'){const p=z.object({itemId:z.string().min(1).max(128),utterance:z.string().max(120)}).strict().parse(input);const accepted=!!browser?.presentationEnabled&&!session.executor.pendingState()&&explicitBrowserCancellation(p.utterance)&&session.seenTurns.size<1000&&!session.seenTurns.has(p.itemId);if(accepted){session.seenTurns.add(p.itemId);await browser?.inSession(session.browserSessionId,async()=>browser.cancelFromUser());}send(200,{cancelled:accepted});
+      } else if (path === '/api/tools/memory-context') {
         const p = z.object({ query: z.string().min(1).max(500) }).strict().parse(input);
         let context = ''; const lookupStarted = performance.now();
         if (memory && !session.executor.pendingState()) {
@@ -178,7 +182,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
           if (browserCall) browserDiagnostics.event('executor_result', result.status === 'error' ? browserCode(result.category) : 'OK', performance.now() - started);
           return result;
         };
-        const priorActionId=browser?.state(session.browserSessionId)?.actionOutcome?.actionId;
+        const priorActionId=browser?.state(session.browserSessionId,!!session.executor.pendingState())?.actionOutcome?.actionId;
         const result = browserCall ? await browserDiagnostics.inCall(session.executor, browserCall, run) : await run();
         if (browserCall) await browserDiagnostics.inCall(session.executor, browserCall, async () => { browserDiagnostics.event('http_result', result.status === 'error' ? browserCode(result.category) : 'OK', performance.now() - started); });
         if (p.toolId.startsWith('memory.') && result.status === 'error') {
@@ -193,7 +197,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
         }
         const state=p.toolId.startsWith('browser.')?browser?.state(session.browserSessionId,!!session.executor.pendingState()):undefined;
         const currentOutcome=result.status==='success'&&result.data&&typeof result.data==='object'&&'actionOutcome' in result.data;
-        send(200, {...result,...(state ? {browserExecutionState:state.executionState,browserActionOutcome:state.actionOutcome??null,browserOutcomeRelation:currentOutcome||state.actionOutcome?.actionId!==priorActionId?'CURRENT_ACTION':'LAST_ACTION',browserRevision:state.revision,browserTaskActive:state.taskActive} : {})});
+        send(200, {...result,...(state ? {browserExecutionState:state.executionState,browserActionOutcome:state.actionOutcome??null,browserOutcomeRelation:currentOutcome||state.actionOutcome?.actionId!==priorActionId?'CURRENT_ACTION':'LAST_ACTION',browserRevision:state.revision,browserTaskActive:state.taskActive,browserContinuation:state.continuation} : {})});
       } else if (path === '/api/tools/browser-resume') {
         const p = z.object({ handoffId: z.string().uuid(), utterance: z.string().max(80) }).strict().parse(input);
         if (session.executor.pendingState() || !/^(listo|lista|ya est[aá]|done)[.!\s]*$/i.test(p.utterance.trim()) || !browser) throw new Error();

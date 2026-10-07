@@ -1,3 +1,6 @@
+import { endTaskSchema } from '../../browser/task-lifecycle.js';
+import type { ContinuationReceipt } from '../../browser/task-lifecycle.js';
+import { BrowserTaskDiagnostics } from '../../diagnostics/browser-task.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { executionState } from '../../browser/execution-state.js';
 import type { BrowserExecutionState } from '../../browser/execution-state.js';
@@ -13,6 +16,11 @@ import type { ToolAdapter, ToolDefinition } from '../types.js';
 const empty = z.object({}).strict(); const ref = z.string().uuid();
 const url = z.string().url().max(2000);
 export class BrowserAdapter implements ToolAdapter {
+  private readonly taskDiagnostics=new BrowserTaskDiagnostics();
+  private confirmations=new Set<string>();
+  acknowledge(receipt:ContinuationReceipt):void {if(this.provider instanceof AttachedChromeProvider)this.provider.acknowledge(receipt);}
+  async admitGoal(admission:string,utterance?:string):Promise<void> {if(this.provider instanceof AttachedChromeProvider)await this.provider.admitGoal(admission,utterance);}
+  cancelFromUser():void {if(this.provider instanceof AttachedChromeProvider)this.provider.cancelFromUser();}
   private presentations=new Map<string,{signature:string;revision:number}>();
   private executionScope = new AsyncLocalStorage<string>();
   private executionStates = new Map<string, BrowserExecutionState>();
@@ -21,18 +29,21 @@ export class BrowserAdapter implements ToolAdapter {
   constructor(private readonly provider: BrowserProvider, readonly diagnostics = new BrowserDiagnostics()) {}
   get presentationEnabled():boolean{return this.provider instanceof AttachedChromeProvider;}
   inSession<T>(id: string, work: () => Promise<T>): Promise<T> { return this.executionScope.run(id, () => this.provider instanceof AttachedChromeProvider ? this.provider.inSession(id, work) : work()); }
-  state(id: string, confirmation = false) { const state = this.provider instanceof AttachedChromeProvider ? this.provider.state(id) : undefined;if(!state)return;const result={...state,taskActive:this.executionStates.has(id),executionState:confirmation ? 'WAITING_CONFIRMATION' as const : state.accessRevoked ? 'FAILED' as const : executionState(this.contextState(id,state),state.workflow,confirmation,!!state.ready)};const signature=JSON.stringify(result);const previous=this.presentations.get(id);const revision=previous?.signature===signature?previous.revision:(previous?.revision??0)+1;this.presentations.set(id,{signature,revision});return {...result,revision}; }
+  state(id: string, confirmation = false) { if(confirmation)this.confirmations.add(id);else this.confirmations.delete(id); const state = this.provider instanceof AttachedChromeProvider ? this.provider.state(id) : undefined;if(!state)return;const result={...state,taskActive:this.executionStates.has(id),executionState:confirmation ? 'WAITING_CONFIRMATION' as const : state.accessRevoked ? 'FAILED' as const : executionState(this.contextState(id,state),state.workflow,confirmation,!!state.ready)};const signature=JSON.stringify(result);const previous=this.presentations.get(id);const revision=previous?.signature===signature?previous.revision:(previous?.revision??0)+1;this.presentations.set(id,{signature,revision});return {...result,revision}; }
   private contextState(id:string,state:ReturnType<AttachedChromeProvider['state']>): BrowserExecutionState {
     const base=this.executionStates.get(id) ?? 'RUNNING';
+    // Rejecting completion cannot turn an unknown-execution latch into RUNNING.
+    if(state.actionOutcome?.execution==='UNKNOWN')return 'FAILED';
     if (base === 'COMPLETED' || state.actionOutcome?.execution !== 'EXECUTED') return base;
     if (state.contextRecovery?.status === 'INCONCLUSIVE') return 'INCONCLUSIVE';
     if (state.contextRecovery && ['REQUIRED','RECOVERING'].includes(state.contextRecovery.status)) return 'RECOVERING_CONTEXT';
     return base;
   }
-  endSession(id: string): Promise<void> { this.executionStates.delete(id);this.presentations.delete(id); return this.provider instanceof AttachedChromeProvider ? this.provider.endSession(id) : Promise.resolve(); }
+  endSession(id: string): Promise<void> { this.executionStates.delete(id);this.presentations.delete(id);this.confirmations.delete(id); return this.provider instanceof AttachedChromeProvider ? this.provider.endSession(id) : Promise.resolve(); }
   tools(): ToolDefinition[] {
     const tool = (id: string, description: string, schema: z.ZodType, execute: ToolDefinition['execute'], read = false): ToolDefinition => ({ id: `browser.${id}`, name: `browser_${id}`, description, integration: this.integration, capability: id, permission: read ? 'READ' : 'WRITE', confirm: false, schema, timeoutMs: 18_000, execute: (input, signal) => this.diagnostics.run('adapter', async () => {
-      const previousState=this.state(this.executionScope.getStore() ?? '')?.executionState;
+      const sessionId=this.executionScope.getStore() ?? '';const confirmation=this.confirmations.has(sessionId);
+      const taskId=this.state(sessionId,confirmation)?.taskId;
       this.mark('RUNNING');
       const abort = this.diagnostics.capture('execution_abort', 'TIMEOUT');
       signal.addEventListener('abort', abort, { once: true });
@@ -40,7 +51,7 @@ export class BrowserAdapter implements ToolAdapter {
         const attached = this.provider instanceof AttachedChromeProvider ? this.provider : undefined;
         attached?.resetMeasurements();
         const action = attached && ['click','type','press','scroll','media','navigate','switch','back','forward','reload'].includes(id);
-        const result = action ? await attached.interact(id, input, () => execute(input, signal), signal) : await execute(input, signal); this.diagnostics.event('provider_result', 'OK'); if (id === 'endTask') this.mark(previousState==='INCONCLUSIVE'||previousState==='FAILED'?previousState:'COMPLETED'); return attached && id !== 'resume' && result && typeof result === 'object' && !Array.isArray(result) ? { ...result, browserTimings: attached.measurements() } : result; }
+        const result = action ? await attached.interact(id, input, () => execute(input, signal), signal) : await execute(input, signal); this.diagnostics.event('provider_result', 'OK'); if (id === 'endTask') {const close=result as {outcome:string;reason?:string};this.mark(close.outcome==='END_TASK_REJECTED'?'RUNNING':close.reason==='INCONCLUSIVE'?'INCONCLUSIVE':close.reason==='TERMINAL'?'FAILED':'COMPLETED');this.taskDiagnostics.enabled=this.diagnostics.enabled;this.taskDiagnostics.event({stage:'END_TASK',taskId,taskState:this.state(sessionId,confirmation)?.executionState,requestedReason:(input as {reason?:unknown}).reason,outcome:close.outcome==='END_TASK_REJECTED'?'REJECTED':'ACCEPTED',...(close.outcome==='END_TASK_REJECTED'?{reason:'OBJECTIVE_PENDING'}:{})});} return attached && id !== 'resume' && result && typeof result === 'object' && !Array.isArray(result) ? { ...result, browserTimings: attached.measurements() } : result; }
       catch (error) {
         if (this.provider instanceof AttachedChromeProvider && ['observe','verify'].includes(id) && error instanceof ToolError && (['UPSTREAM','TIMEOUT'].includes(error.category) || error.browserRecovery?.recoverable)) {
           const state=this.provider.state(this.executionScope.getStore()!);
@@ -52,6 +63,7 @@ export class BrowserAdapter implements ToolAdapter {
             return {...recovered,browserTimings:this.provider.measurements()};
           }
         }
+        if(attachedTerminal(error)&&this.provider instanceof AttachedChromeProvider)this.provider.terminalFailure();
         if (error instanceof BrowserWorkflow) { this.mark(error.reply.outcome === 'ACCESS_PENDING' ? 'WAITING_ACCESS' : 'WAITING_MANUAL'); return { browserState: error.reply }; } this.mark(error instanceof ToolError && error.browserRecovery?.recoverable ? 'RUNNING' : 'FAILED'); this.diagnostics.event('provider_result', error instanceof ToolError ? browserCode(error.category) : 'UPSTREAM'); if (error instanceof ToolError && this.provider instanceof AttachedChromeProvider) { this.diagnostics.metadata(this.provider.measurements(), error.browserRecovery?.reason); throw new ToolError(error.category, error.browserRecovery, error.browserObservation, this.provider.measurements()); } throw error; }
       finally { signal.removeEventListener('abort', abort); }
     }, signal) });
@@ -77,7 +89,7 @@ export class BrowserAdapter implements ToolAdapter {
         tool('requestAccess', 'Pide acceso a una pestaña seleccionada por el usuario. ACCESS_PENDING no es confirmación de acción ni éxito; el usuario debe pulsar el icono de la extensión. Usa lifetime task por defecto.', accessArgs, (raw, signal) => attached.requestTabAccess(raw as Parameters<typeof attached.requestTabAccess>[0], signal).then(browserState => ({ browserState }))),
         tool('revokeAccess', 'Revoca acceso a una pestaña autorizada; no cierra Chrome.', z.object({ tabId: ref }).strict(), (raw, signal) => attached.revokeTabAccess((raw as { tabId: string }).tabId, signal)),
         tool('verify', 'Verificación READ opcional de un efecto con condición verificable, máximo dos intentos. Sin condición devuelve NOT_APPLICABLE; presupuesto agotado devuelve INCONCLUSIVE. No es requisito para continuar con contexto fresco. Nunca reejecuta la acción.',empty,(_,signal)=>attached.verify(signal),true),
-        tool('endTask', 'Termina o cancela la tarea browser actual y revoca sus grants task. No cierra tabs. Usa sólo al completar/cancelar la tarea.', empty, (_, signal) => attached.endTask(signal)),
+        tool('endTask', 'Cierra scope sólo con reason COMPLETED/CANCELLED/TERMINAL/INCONCLUSIVE y evidencia actionId real opcional. Sólo tabs/access/switch/observe no completa el objetivo. END_TASK_REJECTED/OBJECTIVE_PENDING mantiene RUNNING: continúa en silencio con el siguiente paso distinto; nunca repitas una acción ejecutada. CANCELLED requiere cancelación real del usuario. No cierra tabs.', endTaskSchema, (input, signal) => attached.endTask(signal,input as import('../../browser/task-lifecycle.js').EndTaskRequest,this.confirmations.has(this.executionScope.getStore()??''))),
         tool('resume', 'Server-only READ resume; not model facing.', z.object({ handoffId: ref }).strict(), (raw, signal) => attached.resume((raw as { handoffId: string }).handoffId, signal), true),
         tool('waitForMedia', 'Sólo para una tarea multimedia solicitada: hasta tres comprobaciones READ silenciosas en diez segundos; si hay un único SKIP_AD permitido lo pulsa una sola vez y devuelve su auto-observe. Nunca repitas esta tool para prolongar el polling ni repitas el skip.', empty, (_, signal) => pollMedia({ observe: s => attached.observe(s), skip: (ref, s) => attached.interact('click', { ref }, async () => { await attached.click(ref, s); return { interacted: true }; }, s) }, signal)),
         tool('media', 'Reproduce/pausa una ref multimedia autorizada; un bloqueo de gesto exige intervención manual.', z.object({ ref, action: z.enum(['play', 'pause']) }).strict(), (raw, signal) => { const p = raw as { ref: string; action: 'play' | 'pause' }; return attached.media(p.ref, p.action, signal); })];
@@ -86,3 +98,5 @@ export class BrowserAdapter implements ToolAdapter {
   }
   close() { return this.provider.close(); }
 }
+
+function attachedTerminal(error:unknown):boolean {return error instanceof ToolError&&!error.browserRecovery?.recoverable&&['UNCONFIGURED','UPSTREAM','REJECTED','EXPIRED'].includes(error.category)&&!error.browserObservation;}

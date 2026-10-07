@@ -120,7 +120,7 @@ test('production adapter preserves COMPLETED cross-origin navigation plus failed
     await r.policy.revoke(A); // Does not revoke a separately authorized B grant.
     assert.equal(r.controller.authorized().length,1);await r.controller.revoke(r.controller.authorized()[0]!.scopeId);assert.equal(adapter.state(r.session)!.executionState,'FAILED');
     const access=adapter.tools().find(tool=>tool.id==='browser.requestAccess')!;await access.execute({target:{kind:'current'},purpose:'New request',lifetime:'task'},new AbortController().signal);assert.equal(adapter.state(r.session)!.executionState,'WAITING_ACCESS');
-    const ticket=r.controller.pending()[0]!;await r.controller.approve(ticket.id,B);const end=adapter.tools().find(tool=>tool.id==='browser.endTask')!;await end.execute({},new AbortController().signal);assert.equal(adapter.state(r.session)!.executionState,'COMPLETED');
+    const ticket=r.controller.pending()[0]!;await r.controller.approve(ticket.id,B);const end=adapter.tools().find(tool=>tool.id==='browser.endTask')!;provider.acknowledge(provider.state(r.session).continuation!);await provider.observe(new AbortController().signal);await end.execute({reason:'COMPLETED'},new AbortController().signal);assert.equal(adapter.state(r.session)!.executionState,'COMPLETED');
   });await provider.close();
 });
 test('continuation never resumes from FAILED or WAITING state, even if an old ready token exists',()=>{

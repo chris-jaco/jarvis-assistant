@@ -1,3 +1,6 @@
+import { classifyTaskIntent, type TaskIntent } from '../task-intent.js';
+import { canEndTask, endTaskSchema } from '../task-lifecycle.js';
+import type { ContinuationReceipt, EndTaskRequest } from '../task-lifecycle.js';
 import type { PopupDiagnostics } from '../../diagnostics/popup.js';
 import { ActionRecord } from '../action-outcome.js';
 import type { z } from 'zod';
@@ -12,7 +15,7 @@ import type { Operation, Reply, AuthorizedTab, BrowserConflictDetail, AttachedOb
 import type { BrowserTransport } from './transport.js';
 const contextReadReasons: readonly string[] = ['UPSTREAM','TIMEOUT','OBSERVATION_REQUIRED','SNAPSHOT_EXPIRED','DOCUMENT_CHANGED','ELEMENT_CHANGED','SNAPSHOT_CONSUMED'];
 interface ContextRecovery { status: 'READY' | 'REQUIRED' | 'RECOVERING' | 'INCONCLUSIVE'; attempts: number; ready: string | null }
-interface Session { contextRecovery?: ContextRecovery; accessCorrelation?:string; traceNext?:boolean; actionRecord?: ActionRecord; accessRevoked?: boolean; id: string; task: string; connection?: string; active?: string; tabs: Map<string, AuthorizedTab>; workflow?: Exclude<Reply, { outcome: 'OK' } | { outcome: 'ERROR' }>; ready?: string; observation?: { tabId: string; scopeId: string; documentId: string; snapshotId: string; refs: Set<string>; expires: number }; closed?: boolean; failures: number; uncertain?: boolean; invalidation?: BrowserConflictDetail['reason']; context: 'READY' | 'OBSERVATION_REQUIRED'; pendingStep?: string; completed?: { key: string; result: unknown; record:ActionRecord }; knownRefs: Map<string, string>; lastObservation?: AttachedObservation; timings: BrowserTimings; tail: Promise<unknown>; deadline?: number }
+interface Session { intent?:TaskIntent; readAdmission?:string; inventory?:{admission:string;expires:number}; admission?:string; progress:Map<string,ActionRecord>; acknowledged:Set<string>; rejectionToken?:string; cancelled?:boolean; terminal?:boolean; contextRecovery?: ContextRecovery; accessCorrelation?:string; traceNext?:boolean; actionRecord?: ActionRecord; accessRevoked?: boolean; id: string; task: string; connection?: string; active?: string; tabs: Map<string, AuthorizedTab>; workflow?: Exclude<Reply, { outcome: 'OK' } | { outcome: 'ERROR' }>; ready?: string; observation?: { tabId: string; scopeId: string; documentId: string; snapshotId: string; refs: Set<string>; expires: number }; closed?: boolean; failures: number; uncertain?: boolean; invalidation?: BrowserConflictDetail['reason']; context: 'READY' | 'OBSERVATION_REQUIRED'; pendingStep?: string; completed?: { key: string; result: unknown; record:ActionRecord }; knownRefs: Map<string, string>; lastObservation?: AttachedObservation; timings: BrowserTimings; tail: Promise<unknown>; deadline?: number }
 export class BrowserWorkflow extends Error { constructor(readonly reply: Exclude<Reply, { outcome: 'OK' }>) { super(reply.outcome); } }
 export class AttachedChromeProvider implements BrowserProvider {
   readonly attached = true; private scope = new AsyncLocalStorage<Session>(); private sessions = new Map<string, Session>();
@@ -20,6 +23,7 @@ export class AttachedChromeProvider implements BrowserProvider {
     transport.subscribe((connection, event) => {
       const session = this.sessions.get(event.backendSessionId); if (!session || session.closed || session.connection !== connection) return;
       if(event.trace){session.accessCorrelation=event.trace.correlationId;session.traceNext=true;this.accessDiagnostics?.event(event.trace.correlationId,'backend_received');}
+      session.inventory=undefined;
       if (event.event === 'accessRequired' && event.access) { session.workflow = event.access; session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; }
       if (event.event === 'accessGranted' || event.scopeId === session.tabs.get(session.active ?? '')?.scopeId) { session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; session.invalidation = 'DOCUMENT_CHANGED'; }
       if (event.event === 'accessGranted' && event.tab) { session.accessRevoked = false; session.failures = 0; session.pendingStep = undefined; session.completed = undefined; session.contextRecovery = undefined; session.tabs.set(event.tab.id, event.tab); session.active = event.tab.id; if (session.workflow?.outcome === 'ACCESS_PENDING' && (!event.accessRequestId || event.accessRequestId === session.workflow.accessRequestId)) { session.workflow = undefined; session.ready = randomUUID(); } else if (session.workflow?.outcome === 'REQUIRES_USER_INTERACTION' && session.workflow.reason === 'ORIGIN_PERMISSION') { session.workflow = undefined; session.ready = randomUUID(); } }
@@ -27,10 +31,21 @@ export class AttachedChromeProvider implements BrowserProvider {
     });
   }
   inSession<T>(id: string, work: () => Promise<T>): Promise<T> {
-    let session = this.sessions.get(id); if (!session) { if (this.sessions.size >= 10) throw new ToolError('LIMIT'); session = { id, task: randomUUID(), tabs: new Map(), failures: 0, context: 'OBSERVATION_REQUIRED', knownRefs: new Map(), timings: {}, tail: Promise.resolve() }; this.sessions.set(id, session); }
+    let session = this.sessions.get(id); if (!session) { if (this.sessions.size >= 10) throw new ToolError('LIMIT'); session = { id, task: randomUUID(), progress:new Map(),acknowledged:new Set(),tabs: new Map(), failures: 0, context: 'OBSERVATION_REQUIRED', knownRefs: new Map(), timings: {}, tail: Promise.resolve() }; this.sessions.set(id, session); }
     if (session.closed) throw new ToolError('REJECTED'); return this.scope.run(session, work);
   }
-  state(id: string) { const session = this.sessions.get(id); return session && !session.closed ? { workflow: session.workflow ?? null, ready: session.ready ?? null, accessRevoked: session.accessRevoked ?? false, actionOutcome:session.actionRecord?.result() ?? null, accessCorrelation:session.accessCorrelation ?? null, contextRecovery:session.contextRecovery ?? null } : { workflow: null, ready: null }; }
+  state(id: string) { const session = this.sessions.get(id); return session && !session.closed ? { taskId:session.task,continuation:this.receipt(session), workflow: session.workflow ?? null, ready: session.ready ?? null, accessRevoked: session.accessRevoked ?? false, actionOutcome:session.actionRecord?.result() ?? null, accessCorrelation:session.accessCorrelation ?? null, contextRecovery:session.contextRecovery ?? null } : { workflow: null, ready: null }; }
+  private receipt(session:Session):ContinuationReceipt {return {taskId:session.task,tokens:[session.ready,session.contextRecovery?.status==='READY'?session.contextRecovery.ready:undefined,session.rejectionToken].filter((token):token is string=>!!token&&!session.acknowledged.has(token))};}
+  acknowledge(receipt:ContinuationReceipt):void {const session=this.session();if(receipt.taskId!==session.task)return;const available=this.receipt(session).tokens;for(const token of receipt.tokens)if(available.includes(token))session.acknowledged.add(token);}
+  async admitGoal(admission:string, utterance?:string):Promise<void> {
+    const session=this.session();await session.tail.catch(()=>{});
+    if(session.admission===admission||session.workflow)return;
+    // A trusted new user turn starts a new progress ledger, not a new Chrome
+    // permission. Never import an earlier objective's action as completion proof.
+    session.admission=admission;session.intent=classifyTaskIntent(utterance);session.readAdmission=undefined;session.inventory=undefined;session.progress.clear();session.terminal=false;session.cancelled=false;
+  }
+  cancelFromUser():void {this.session().cancelled=true;}
+  terminalFailure():void {this.session().terminal=true;}
   private session(): Session { const session = this.scope.getStore(); if (!session || session.closed) throw new ToolError('REJECTED'); return session; }
   private async connection(session: Session, signal: AbortSignal): Promise<string> {
     if (!this.enabled || this.transport.configuration?.().configured === false) throw new ToolError('UNCONFIGURED');
@@ -78,6 +93,7 @@ export class AttachedChromeProvider implements BrowserProvider {
   async listAuthorizedTabs(signal: AbortSignal): Promise<BrowserTab[]> { return this.listTabs(signal); }
   async listTabs(signal: AbortSignal): Promise<BrowserTab[]> {
     const tabs = this.unwrap<AuthorizedTab[]>(await this.call('listAuthorizedTabs', {}, signal)); const session = this.session(); session.tabs = new Map(tabs.map(tab => [tab.id, tab])); if (!session.tabs.has(session.active ?? '')) session.active = tabs[0]?.id;
+    session.inventory={admission:session.admission??'',expires:Math.min(Date.now()+15000,...tabs.map(tab=>tab.expiresAt))};
     return tabs.map(tab => ({ id: tab.id, title: tab.title, url: tab.url, active: tab.id === session.active }));
   }
   async getActiveTab(signal: AbortSignal): Promise<BrowserTab | null> { return (await this.listTabs(signal)).find(tab => tab.active) ?? null; }
@@ -85,8 +101,14 @@ export class AttachedChromeProvider implements BrowserProvider {
   async closeTab(_id: string, _signal: AbortSignal): Promise<void> { throw new ToolError('REJECTED'); } // Personal tabs may contain unsaved work; manual only.
   async openTab(url: string, signal: AbortSignal): Promise<BrowserTab> {
     navigationUrl(url); const reply = await this.requestTabAccess({ target: { kind: 'new', url }, purpose: 'Abrir y usar esta pestaña para la tarea solicitada', lifetime: 'task' }, signal);
-    if (reply.outcome !== 'ACCESS_PENDING') return this.unwrap(reply);
-    return this.unwrap(await this.call('openTab', { accessRequestId: reply.accessRequestId }, signal));
+    const opened=reply.outcome==='ACCESS_PENDING'?await this.call('openTab',{accessRequestId:reply.accessRequestId},signal):reply;
+    // These replies acknowledge tab creation; authorization remains separate.
+    // Track the existing operation's structural progress without adding actions.
+    if(opened.outcome==='OK'||opened.outcome==='ACCESS_PENDING'){
+      const record=new ActionRecord({kind:'navigation',target:url});record.executed();
+      const session=this.session();session.actionRecord=record;session.progress.set(record.actionId,record);
+    }
+    return this.unwrap(opened);
   }
   async navigate(url: string, signal: AbortSignal): Promise<BrowserTab> { navigationUrl(url); this.session().observation = undefined; this.unwrap(await this.call('navigate', { ...this.binding(), url }, signal)); const tab = this.session().tabs.get(this.session().active ?? '')!; return { id: tab.id, title: tab.title, url: tab.url, active: true }; }
   async observe(signal: AbortSignal): Promise<BrowserObservation> { const session = this.session(); const work = session.tail.catch(() => {}).then(() => this.observeWithResume(signal)); session.tail = work; return work; }
@@ -96,9 +118,10 @@ export class AttachedChromeProvider implements BrowserProvider {
     const data = observationSchema.parse(this.unwrap(reply));
     if (signal.aborted) throw new ToolError('TIMEOUT');
     if (data.expiresAt - Date.now() <= 250) { session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; throw new ToolError('CONFLICT', { reason: 'SNAPSHOT_EXPIRED', execution: 'NOT_EXECUTED', recoverable: session.failures < 3, remainingRecoveries: Math.max(0, Math.min(2, 3 - session.failures)) }); }
-    session.lastObservation = data; session.context = 'READY'; const tab = session.tabs.get(data.tabId); if (tab) { tab.title = data.title; tab.url = data.url; }
+    session.lastObservation = data; session.context = 'READY';session.terminal=false; const tab = session.tabs.get(data.tabId); if (tab) { tab.title = data.title; tab.url = data.url; }
     for (const element of data.elements) session.knownRefs.set(element.ref, JSON.stringify([data.scopeId, element.role, element.name, element.type, element.action]));
     while (session.knownRefs.size > 160) session.knownRefs.delete(session.knownRefs.keys().next().value!);
+    session.readAdmission=session.admission;
     session.observation = { tabId: data.tabId, scopeId: data.scopeId, documentId: data.documentId, snapshotId: data.snapshotId, refs: new Set(data.elements.map(el => el.ref)), expires: data.expiresAt }; if (handoffId) { session.workflow = undefined; session.ready = randomUUID(); } session.actionRecord?.observe({status:'OK',data});
     if (session.contextRecovery && ['REQUIRED','RECOVERING','INCONCLUSIVE'].includes(session.contextRecovery.status)) session.contextRecovery = { ...session.contextRecovery, status:'READY', ready:randomUUID() };
     return data;
@@ -181,7 +204,8 @@ export class AttachedChromeProvider implements BrowserProvider {
       }
       // Commit completion before READ. Nothing after this point can change it
       // into a failed/uncertain action, or cause execute() to run a second time.
-      record.executed();
+      record.executed();session.terminal=false;
+      if (operation!=='switch') {session.progress.set(record.actionId,record);while(session.progress.size>100)session.progress.delete(session.progress.keys().next().value!);}
       session.contextRecovery = {status:'READY',attempts:0,ready:null};
       session.completed = { key, result,record }; session.pendingStep = undefined; session.failures = 0;
       session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; session.invalidation = 'SNAPSHOT_CONSUMED';
@@ -239,7 +263,30 @@ export class AttachedChromeProvider implements BrowserProvider {
   async scroll(direction: 'up' | 'down', signal: AbortSignal): Promise<void> { this.session().observation = undefined; this.unwrap(await this.call('scroll', { ...this.binding(), direction }, signal)); }
   private async history(operation: 'back' | 'forward' | 'reload', signal: AbortSignal): Promise<BrowserTab> { this.session().observation = undefined; this.unwrap(await this.call(operation, this.binding(), signal)); const tab = this.session().tabs.get(this.session().active ?? '')!; return { id: tab.id, title: tab.title, url: tab.url, active: true }; }
   back(signal: AbortSignal) { return this.history('back', signal); } forward(signal: AbortSignal) { return this.history('forward', signal); } reload(signal: AbortSignal) { return this.history('reload', signal); }
-  async endTask(signal: AbortSignal): Promise<unknown> { const session = this.session(); this.unwrap(await this.call('endTask', {}, signal)); session.accessRevoked = false; session.task = randomUUID(); session.pendingStep = undefined; session.completed = undefined; session.failures = 0; session.observation = undefined; session.workflow = undefined; session.ready = undefined; await this.listTabs(signal); return { completed: true }; }
+  async endTask(signal: AbortSignal, raw:EndTaskRequest = {}, confirmation=false): Promise<unknown> {
+    const session=this.session(),request=endTaskSchema.parse(raw);
+    const record=[...session.progress.values()].at(-1);
+    const evidence=request.evidence?.actionId ? session.progress.get(request.evidence.actionId) : record&&session.progress.get(record.actionId);
+    const tab=session.tabs.get(session.active??'');
+    const accepted=canEndTask(request,{
+      intent:session.intent?.intent??'ACTION_REQUIRED',
+      readObtained:!!session.admission&&(session.intent?.intent==='READ_ONLY'&&session.intent.context==='TABS'?session.inventory?.admission===session.admission:session.readAdmission===session.admission),
+      progress:!!evidence && evidence===record && evidence.result().execution==='EXECUTED',
+      pending:confirmation||!!session.workflow||!!session.pendingStep||this.receipt(session).tokens.length>0||!!session.contextRecovery&&['REQUIRED','RECOVERING'].includes(session.contextRecovery.status),
+      unknown:!!session.uncertain||record?.result().execution==='UNKNOWN',
+      fresh:session.intent?.intent==='READ_ONLY'&&session.intent.context==='TABS'?!!session.inventory&&session.inventory.expires-Date.now()>250&&!session.accessRevoked:session.context==='READY'&&!!session.observation&&session.observation.expires-Date.now()>250&&!!tab&&tab.expiresAt>Date.now(),
+      verificationRequired:!!record?.verifiable,verified:record?.result().outcome==='ACTION_VERIFIED',verificationExhausted:!!record?.verificationExhausted,
+      cancelled:!!session.cancelled,terminal:!!session.terminal||!!session.accessRevoked||session.workflow?.outcome==='REQUIRES_USER_INTERACTION',
+      recoveryExhausted:session.contextRecovery?.status==='INCONCLUSIVE'&&session.contextRecovery.attempts>=2
+    });
+    if(!accepted){session.rejectionToken??=randomUUID();return {outcome:'END_TASK_REJECTED',reason:'OBJECTIVE_PENDING'};}
+    this.unwrap(await this.call('endTask', {}, signal));
+    session.admission=undefined;session.intent=undefined;session.readAdmission=undefined;session.inventory=undefined;session.accessRevoked=false;session.task=randomUUID();session.progress.clear();session.acknowledged.clear();session.rejectionToken=undefined;session.cancelled=false;session.terminal=false;
+    session.pendingStep=undefined;session.completed=undefined;session.failures=0;session.observation=undefined;session.workflow=undefined;session.ready=undefined;session.contextRecovery=undefined;
+    // No fallible post-close READ may undo accepted task termination.
+    session.tabs.clear();session.active=undefined;
+    return {outcome:'END_TASK_ACCEPTED',reason:request.reason};
+  }
   async revokeTabAccess(tabId: string, signal: AbortSignal): Promise<unknown> { const session = this.session(); const tab = session.tabs.get(tabId); if (!tab) throw new ToolError('REJECTED'); this.unwrap(await this.call('revokeTabAccess', { scopeId: tab.scopeId }, signal)); session.tabs.delete(tabId); session.observation = undefined; return { revoked: true }; }
   async endSession(id: string): Promise<void> {
     const session = this.sessions.get(id); if (!session) return;

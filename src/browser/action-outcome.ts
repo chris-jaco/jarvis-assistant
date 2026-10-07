@@ -33,6 +33,7 @@ export class ActionRecord {
     if(this.expected?.kind==='navigation'){try{const target=new URL(this.expected.target),actual=new URL(data.url);if(!target.search&&!target.hash&&actual.origin===target.origin&&actual.pathname===target.pathname)return 'TARGET_LOCATION';}catch{}}
     return;
   }
+  get verificationExhausted():boolean {return this.verifiable&&this.execution==='EXECUTED'&&this.verification!=='VERIFIED'&&this.reads>=2;}
   get verifiable(): boolean { return this.expected !== undefined; }
   verificationRead(): 'READ' | 'VERIFIED' | 'NOT_APPLICABLE' | 'INCONCLUSIVE' {
     if (!this.verifiable) return 'NOT_APPLICABLE';

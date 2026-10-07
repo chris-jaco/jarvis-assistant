@@ -635,7 +635,7 @@ test('two failed recovery READs end TASK INCONCLUSIVE while action remains EXECU
     const result:any=await adapter.tools().find(t=>t.id==='browser.type')!.execute({ref:seen.elements[0]!.ref,text:'fixture',mode:'replace'},signal());
     assert.equal(result.actionOutcome.execution,'EXECUTED');assert.equal(reads,3);assert.equal(writes,1);assert.equal(adapter.state(session)!.executionState,'INCONCLUSIVE');assert.equal(adapter.state(session)!.contextRecovery!.attempts,2);
     const verification:any=await adapter.tools().find(t=>t.id==='browser.verify')!.execute({},signal());assert.equal(verification.step,'NOT_APPLICABLE');assert.equal(reads,3);assert.notEqual(adapter.state(session)!.executionState,'FAILED');
-    await adapter.tools().find(t=>t.id==='browser.endTask')!.execute({},signal());assert.equal(adapter.state(session)!.executionState,'INCONCLUSIVE');
+    provider.acknowledge(provider.state(session).continuation!);await adapter.tools().find(t=>t.id==='browser.endTask')!.execute({reason:'INCONCLUSIVE'},signal());assert.equal(adapter.state(session)!.executionState,'INCONCLUSIVE');
     afterAction=false;await provider.requestTabAccess({target:{kind:'current'},purpose:'New explicit task',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);assert.equal(provider.state(session).contextRecovery,null);
   });}finally{await provider.close();h.close();}
 });
@@ -677,11 +677,11 @@ test('attached adapter → real HTTP → VoiceToolBridge → continuation preser
   try{
     const config=await bridge.initialize();const invoke=async(name:string,input:unknown={})=>{const raw=await config.tools.find(t=>t.name==='browser_'+name)!.invoke(new RunContext(),JSON.stringify({inputJson:JSON.stringify(input)}));return typeof raw==='string'?JSON.parse(raw):raw as any;};
     await invoke('requestAccess',{target:{kind:'current'},purpose:'Fixture',lifetime:'task'});await h.controller.approve(h.controller.pending()[0]!.id);
-    const seen=await invoke('observe');const typed=await invoke('type',{ref:seen.data.elements[0].ref,text:'fixture',mode:'replace'});
+    const seen=await invoke('observe');await bridge.transportEvent({type:'response.done',response:{id:'resp_observation',status:'completed'}});assert.equal(states.at(-1),'RUNNING');const typed=await invoke('type',{ref:seen.data.elements[0].ref,text:'fixture',mode:'replace'});
     const pressed=await invoke('press',{ref:typed.data.observation.data.elements[0].ref,key:'Enter'});
     assert.equal(pressed.browserExecutionState,'RUNNING');assert.equal(pressed.browserActionOutcome.execution,'EXECUTED');assert.equal(pressed.data.observation.status,'OK');assert.match(pressed.instruction,/siguiente paso distinto/);
     const clicked=await invoke('click',{ref:pressed.data.observation.data.elements.find((el:any)=>el.role==='link').ref});assert.equal(clicked.status,'success');assert.equal(submits,1);assert.equal(clicks,1);assert.equal(operations.filter(op=>op==='press').length,1);assert.ok(!states.includes('FAILED'));assert.ok(!notifications.some(text=>/Sigue detenido/.test(text)));
-    const verified=await invoke('verify');assert.equal(verified.data.step,'NOT_APPLICABLE');assert.equal(verified.browserExecutionState,'RUNNING');await invoke('endTask');assert.equal(states.at(-1),'COMPLETED');
+    const verified=await invoke('verify');assert.equal(verified.data.step,'NOT_APPLICABLE');assert.equal(verified.browserExecutionState,'RUNNING');const ended=await invoke('endTask',{reason:'COMPLETED',evidence:{actionId:clicked.browserActionOutcome.actionId}});assert.equal(ended.data.outcome,'END_TASK_ACCEPTED');assert.equal(states.at(-1),'COMPLETED');
   }finally{bridge.close();globalThis.fetch=nativeFetch;runtime.close();await new Promise<void>(resolve=>server.close(()=>resolve()));await provider.close();h.close();}
 });
 
@@ -699,4 +699,100 @@ for(const intervention of ['revoked','challenge'] as const)test(`context recover
     const result:any=await adapter.tools().find(t=>t.id==='browser.type')!.execute({ref:seen.elements[0]!.ref,text:'fixture',mode:'replace'},signal());
     assert.equal(result.actionOutcome.execution,'EXECUTED');assert.equal(writes,1);assert.equal(reads,2);assert.equal(adapter.state(session)!.executionState,intervention==='revoked'?'FAILED':'WAITING_MANUAL');
   });}finally{await provider.close();h.close();}
+});
+
+test('backend rejects prep-only endTask silently without teardown, then permits real progress and close',async()=>{
+ const h=harness();const provider=new AttachedChromeProvider(h.transport);const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{
+  const tools=adapter.tools(),end=tools.find(t=>t.id==='browser.endTask')!;
+  await tools.find(t=>t.id==='browser.tabs')!.execute({},signal());await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);
+  const tab=h.controller.authorized()[0]!;await tools.find(t=>t.id==='browser.switch')!.execute({tabId:tab.id},signal());const seen:any=await tools.find(t=>t.id==='browser.observe')!.execute({},signal());
+  provider.acknowledge(provider.state(session).continuation!);const before=provider.state(session).taskId;
+  const rejected:any=await end.execute({reason:'COMPLETED'},signal());assert.deepEqual({outcome:rejected.outcome,reason:rejected.reason},{outcome:'END_TASK_REJECTED',reason:'OBJECTIVE_PENDING'});assert.equal(adapter.state(session)!.executionState,'RUNNING');assert.equal(provider.state(session).taskId,before);assert.equal(h.controller.authorized().length,1);
+  const notices:string[]=[];const c=new BrowserContinuation(async()=>({}),m=>notices.push(m),undefined,undefined,receipt=>provider.acknowledge(receipt));c.update(adapter.state(session),false,true);c.released();c.released();assert.equal(notices.length,1);
+  const typed:any=await tools.find(t=>t.id==='browser.type')!.execute({ref:seen.elements[0].ref,text:'fixture',mode:'replace'},signal());assert.equal(typed.action.status,'COMPLETED');assert.equal(adapter.state(session)!.executionState,'RUNNING');
+  const closed:any=await end.execute({reason:'COMPLETED',evidence:{actionId:typed.actionOutcome.actionId}},signal());assert.equal(closed.outcome,'END_TASK_ACCEPTED');assert.equal(adapter.state(session)!.executionState,'COMPLETED');assert.equal(h.controller.authorized().length,0);
+ });}finally{await provider.close();h.close();}
+});
+test('backend does not trust model cancellation; trusted user signal permits cancellation',async()=>{
+ const h=harness();const provider=new AttachedChromeProvider(h.transport);const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{
+  await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);const end=adapter.tools().find(t=>t.id==='browser.endTask')!;
+  assert.equal((await end.execute({reason:'CANCELLED'},signal()) as any).outcome,'END_TASK_REJECTED');provider.cancelFromUser();assert.equal((await end.execute({reason:'CANCELLED'},signal()) as any).outcome,'END_TASK_ACCEPTED');assert.equal(h.controller.authorized().length,0);
+ });}finally{await provider.close();h.close();}
+});
+test('real revocation permits terminal close without asserting completion',async()=>{
+ const h=harness();const provider=new AttachedChromeProvider(h.transport);const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{
+  await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);await h.controller.revoke(h.controller.authorized()[0]!.scopeId);
+  assert.equal((await adapter.tools().find(t=>t.id==='browser.endTask')!.execute({reason:'TERMINAL'},signal()) as any).outcome,'END_TASK_ACCEPTED');assert.equal(adapter.state(session)!.executionState,'FAILED');
+ });}finally{await provider.close();h.close();}
+});
+
+test('EXECUTION_UNKNOWN cannot complete or repeat even after rejected endTask and READ',async()=>{
+ const h=harness();const base=h.transport;let writes=0;const provider=new AttachedChromeProvider({...base,request:async(c,req,abort)=>{if(req.operation==='type'){++writes;return {outcome:'ERROR',code:'EXECUTION_UNKNOWN'};}return base.request(c,req,abort);}});const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{
+  await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);let seen=await provider.observe(signal());const type=adapter.tools().find(t=>t.id==='browser.type')!;
+  await assert.rejects(type.execute({ref:seen.elements[0]!.ref,text:'fixture',mode:'replace'},signal()),(e:any)=>e.category==='EXECUTION_UNKNOWN');
+  const rejected:any=await adapter.tools().find(t=>t.id==='browser.endTask')!.execute({reason:'COMPLETED'},signal());assert.equal(rejected.outcome,'END_TASK_REJECTED');assert.equal(provider.state(session).actionOutcome!.execution,'UNKNOWN');assert.equal(adapter.state(session)!.executionState,'FAILED');
+  seen=await provider.observe(signal());await assert.rejects(type.execute({ref:seen.elements[0]!.ref,text:'fixture',mode:'replace'},signal()),(e:any)=>e.category==='EXECUTION_UNKNOWN');assert.equal(writes,1);
+ });}finally{await provider.close();h.close();}
+});
+
+test('fresh READ recovery still pending must be incorporated before relevant action can close',async()=>{
+ const h=harness();const base=h.transport;let after=false,fail=true,writes=0;const provider=new AttachedChromeProvider({...base,request:async(c,req,abort)=>{if(req.operation==='observe'&&after&&fail){fail=false;return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};}const result=await base.request(c,req,abort);if(req.operation==='type'){after=true;++writes;}return result;}});const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{
+  await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);const seen=await provider.observe(signal());provider.acknowledge(provider.state(session).continuation!);
+  const typed:any=await adapter.tools().find(t=>t.id==='browser.type')!.execute({ref:seen.elements[0]!.ref,text:'fixture',mode:'replace'},signal());assert.equal(typed.observation.status,'OK');assert.ok(provider.state(session).contextRecovery?.ready);const end=adapter.tools().find(t=>t.id==='browser.endTask')!;
+  assert.equal((await end.execute({reason:'COMPLETED',evidence:{actionId:typed.actionOutcome.actionId}},signal()) as any).outcome,'END_TASK_REJECTED');assert.equal(adapter.state(session)!.executionState,'RUNNING');
+  provider.acknowledge(provider.state(session).continuation!);assert.equal((await end.execute({reason:'COMPLETED',evidence:{actionId:typed.actionOutcome.actionId}},signal()) as any).outcome,'END_TASK_ACCEPTED');assert.equal(writes,1);
+ });}finally{await provider.close();h.close();}
+});
+test('opening a real tab is structural progress, but completion waits for authorized fresh location evidence',async()=>{
+ const h=harness();const provider=new AttachedChromeProvider(h.transport);const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{
+  const opened:any=await adapter.tools().find(t=>t.id==='browser.open')!.execute({url:'https://workspace.example/'},signal());assert.equal(opened.browserState.outcome,'ACCESS_PENDING');const action=provider.state(session).actionOutcome!;assert.equal(action.execution,'EXECUTED');const end=adapter.tools().find(t=>t.id==='browser.endTask')!;
+  assert.equal((await end.execute({reason:'COMPLETED'},signal()) as any).outcome,'END_TASK_REJECTED');await h.controller.approve(h.controller.pending()[0]!.id);await provider.observe(signal());provider.acknowledge(provider.state(session).continuation!);
+  assert.equal(provider.state(session).actionOutcome!.outcome,'ACTION_VERIFIED');assert.equal((await end.execute({reason:'COMPLETED',evidence:{actionId:action.actionId}},signal()) as any).outcome,'END_TASK_ACCEPTED');
+ });}finally{await provider.close();h.close();}
+});
+
+test('trusted new task admission cannot import an earlier objective action as completion evidence',async()=>{
+ const h=harness();const provider=new AttachedChromeProvider(h.transport);const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{
+  await provider.admitGoal(id());await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);let seen=await provider.observe(signal());provider.acknowledge(provider.state(session).continuation!);
+  const type=adapter.tools().find(t=>t.id==='browser.type')!,end=adapter.tools().find(t=>t.id==='browser.endTask')!;
+  const prior:any=await type.execute({ref:seen.elements[0]!.ref,text:'first objective',mode:'replace'},signal());await provider.admitGoal(id());seen=await provider.observe(signal());
+  const rejected:any=await end.execute({reason:'COMPLETED',evidence:{actionId:prior.actionOutcome.actionId}},signal());assert.equal(rejected.outcome,'END_TASK_REJECTED');assert.equal(provider.state(session).actionOutcome!.execution,'EXECUTED');assert.equal(h.controller.authorized().length,1);
+  provider.acknowledge(provider.state(session).continuation!);const next:any=await type.execute({ref:seen.elements[0]!.ref,text:'distinct objective',mode:'replace'},signal());assert.equal(next.action.status,'COMPLETED');assert.notEqual(next.actionOutcome.actionId,prior.actionOutcome.actionId);assert.equal((await end.execute({reason:'COMPLETED',evidence:{actionId:next.actionOutcome.actionId}},signal()) as any).outcome,'END_TASK_ACCEPTED');
+ });}finally{await provider.close();h.close();}
+});
+
+for(const operation of ['scroll','reload'] as const)test(`${operation} is real reversible progress; closure guard does not regress that existing capability`,async()=>{
+ const h=harness();h.f.dom.window.scrollBy=()=>{};const provider=new AttachedChromeProvider(h.transport);const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{
+  await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);await provider.observe(signal());provider.acknowledge(provider.state(session).continuation!);
+  const result:any=await adapter.tools().find(t=>t.id==='browser.'+operation)!.execute(operation==='scroll'?{direction:'down'}:{},signal());assert.equal(result.action.status,'COMPLETED');assert.equal(result.observation.status,'OK');
+  const closed:any=await adapter.tools().find(t=>t.id==='browser.endTask')!.execute({reason:'COMPLETED',evidence:{actionId:result.actionOutcome.actionId}},signal());assert.equal(closed.outcome,'END_TASK_ACCEPTED');
+ });}finally{await provider.close();h.close();}
+});
+
+for(const mode of ['read','action','ambiguous','failed','old-context','frozen','frozen-action','expired'] as const)test(`admission completion guard: ${mode}`,async()=>{
+ const h=harness();let fail=false;const base=h.transport;const provider=new AttachedChromeProvider({...base,request:async(c,req,abort)=>fail&&req.operation==='observe'?{outcome:'ERROR',code:'CONTENT_UNAVAILABLE'}:base.request(c,req,abort)});const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{
+  const admission=id();await provider.admitGoal(admission,['action','frozen-action'].includes(mode)?'Poné un set de música':mode==='ambiguous'?'Ayudame':'¿Qué dice esta página?');
+  await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);await provider.switchTab(h.controller.authorized()[0]!.id,signal());await provider.observe(signal());provider.acknowledge(provider.state(session).continuation!);
+  if(mode==='failed'){fail=true;await assert.rejects(provider.observe(signal()));}
+  if(mode==='old-context')await provider.admitGoal(id(),'¿Qué dice esta página?');
+  if(mode==='frozen')await provider.admitGoal(admission,'Poné un set de música');
+  if(mode==='frozen-action')await provider.admitGoal(admission,'¿Qué dice esta página?');
+
+  await assert.rejects(provider.endTask(signal(),{reason:'COMPLETED',intent:'READ_ONLY'} as any));
+  const original=Date.now;if(mode==='expired')Date.now=()=>original()+16000;
+  try{const result:any=await provider.endTask(signal(),{reason:'COMPLETED'});assert.equal(result.outcome,['read','frozen'].includes(mode)?'END_TASK_ACCEPTED':'END_TASK_REJECTED');}finally{Date.now=original;}
+ });}finally{await provider.close();h.close();}
+});
+test('READ tab inventory can complete without page access and never enumerates unauthorized tabs',async()=>{
+ const h=harness();const provider=new AttachedChromeProvider(h.transport);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await provider.inSession(session,async()=>{await provider.admitGoal(id(),'¿Qué pestañas tengo abiertas?');assert.deepEqual(await provider.listTabs(signal()),[]);assert.equal((await provider.endTask(signal(),{reason:'COMPLETED'}) as any).outcome,'END_TASK_ACCEPTED');});}finally{await provider.close();h.close();}
 });

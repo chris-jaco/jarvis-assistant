@@ -1,3 +1,6 @@
+import { BrowserTaskAdmission } from './browser-task-admission.js';
+import { explicitBrowserCancellation } from '../browser/task-lifecycle.js';
+import { BrowserTaskDiagnostics } from '../diagnostics/browser-task.js';
 import { PopupDiagnostics } from '../diagnostics/popup.js';
 import { actionOutcomeSchema, outcomeInstruction } from '../browser/action-outcome.js';
 import type { BrowserExecutionState } from '../browser/execution-state.js';
@@ -26,14 +29,33 @@ export async function toolRequest(path: string, data?: unknown, method = 'POST',
 export class VoiceToolBridge {
   pending: PendingConfirmation | null = null;
   get confirmationActive(): boolean { return Boolean(this.pending || this.decisionInFlight || this.intentInFlight); }
+  private readonly taskDiagnostics=new BrowserTaskDiagnostics();
+  private sdkPending=new Set<string>();
+  private sdkToolNames=new Set<string>();private sdkCommitted=new Set<string>();
+  private sdkAnnounced=new Set<string>();private sdkResponses=new Set<string>();private sdkAwaitingResponse=false;
+  private browserBusy():boolean {return this.browserInvocations>0||this.sdkPending.size>0||this.sdkAnnounced.size>0||this.sdkAwaitingResponse||this.sdkResponses.size>0;}
+  private receiptAcks:Promise<unknown>=Promise.resolve();
+  toolOutputCommitted(callId:string,raw:string):void {
+    const owned=this.sdkPending.delete(callId)||this.sdkAnnounced.has(callId);this.sdkAnnounced.delete(callId);if(!owned||this.closed)return;
+    // SDK already requested its next response. Hold newly arriving events until
+    // that decision finishes or its own tool output incorporates them.
+    this.sdkCommitted.add(callId);while(this.sdkCommitted.size>256)this.sdkCommitted.delete(this.sdkCommitted.values().next().value!);
+    this.sdkAwaitingResponse=true;
+    let output:unknown;try{output=JSON.parse(raw);}catch{output=undefined;}
+    const receipt=output&&typeof output==='object'?(output as {browserContinuation?:unknown}).browserContinuation:undefined;
+    this.browserContinuation.committed(receipt,this.browserBusy());
+    this.taskDiagnostics.event({stage:'TOOL_COMMITTED',...this.browserContinuation.traceContext(),...(/^call_[A-Za-z0-9_-]{1,100}$/.test(callId)?{callId}:{}),toolInFlight:this.browserInvocations>0});
+  }
+  private lifecycleEnabled=false;private admission=new BrowserTaskAdmission();private admissionInFlight?:Promise<void>;private lastBrowserState?:BrowserExecutionState;
   private presentationRevision=0;private browserInvocations=0;
-  private present(raw:unknown):void {const parsed=z.object({executionState:browserExecutionStateSchema,revision:z.number().int().positive().optional(),taskActive:z.boolean().optional()}).passthrough().safeParse(raw);if(!parsed.success)return;const state=parsed.data;if(state.revision!==undefined){if(state.revision<=this.presentationRevision)return;this.presentationRevision=state.revision;}if(state.taskActive!==false||state.executionState==='WAITING_CONFIRMATION')this.presentation?.state(state.executionState);}
+  private present(raw:unknown):void {const parsed=z.object({executionState:browserExecutionStateSchema,revision:z.number().int().positive().optional(),taskActive:z.boolean().optional()}).passthrough().safeParse(raw);if(!parsed.success)return;const state=parsed.data;if(state.revision!==undefined){if(state.revision<=this.presentationRevision)return;this.presentationRevision=state.revision;}if(state.taskActive!==false||state.executionState==='WAITING_CONFIRMATION')this.presentation?.state(state.executionState);this.lastBrowserState=state.executionState;}
   private armed = false;
   private decisionInFlight = false;
   private intentRevision = 0;
   private intentInFlight = 0;
   private promptPlayback?: { confirmationId: string; responseId: string; interrupted: boolean };
   private observedResponses = new Set<string>();
+  private browserUserTurns=new Set<string>();
   private captured = new Map<string, { id: string; approvable: boolean }>();
   private closed = false;
   private polling?: ReturnType<typeof setInterval>;
@@ -41,14 +63,17 @@ export class VoiceToolBridge {
   private browserTrace: BrowserDiagnosticSink = () => {};
   private browserSequence = 0;
   private readonly accessDiagnostics=new PopupDiagnostics();
-  private browserContinuation = new BrowserContinuation((handoffId, utterance) => toolRequest('browser-resume', { handoffId, utterance }), message => { if (!this.closed) this.notify(message); },this.accessDiagnostics);
+  private browserContinuation = new BrowserContinuation((handoffId, utterance) => toolRequest('browser-resume', { handoffId, utterance }), message => { if (!this.closed) this.notify(message); },this.accessDiagnostics,this.taskDiagnostics,receipt=>{this.receiptAcks=this.receiptAcks.catch(()=>{}).then(()=>toolRequest('browser-continuation',receipt)).catch(()=>{});});
   private diagnostic(event: string, reason: string, extra: Partial<ConfirmationTrace> = {}): void {
     this.trace({ event, reason, pendingId: this.pending?.confirmationId, armed: this.armed, promptResponseId: this.promptPlayback?.responseId, ...extra });
   }
   constructor(private readonly activity: (rows: ToolActivity[], pending: PendingConfirmation | null) => void,
     private readonly notify: (message: string) => void, private readonly traceSink?: TraceSink, private readonly browserSink?: BrowserDiagnosticSink, private readonly presentation?: {state(state:BrowserExecutionState):void;tool(browser:boolean):void}) {}
   async initialize() {
-    const config = await toolRequest('session', {}) as { tools: Descriptor[]; timezone: string; now: string; confirmationTrace?: boolean; browserTrace?: boolean; accessTrace?:boolean;browserPresentation?:boolean };
+    const config = await toolRequest('session', {}) as { tools: Descriptor[]; timezone: string; now: string; confirmationTrace?: boolean; browserTrace?: boolean; accessTrace?:boolean;browserPresentation?:boolean;browserTaskLifecycle?:boolean };
+    this.lifecycleEnabled=config.browserTaskLifecycle===true;if(this.lifecycleEnabled)this.admission.begin();
+    this.sdkToolNames=new Set(config.tools.filter(tool=>tool.id.startsWith('browser.')).map(tool=>tool.id.replaceAll('.','_')));
+    this.taskDiagnostics.enabled=config.browserTrace===true;
     this.accessDiagnostics.enabled=config.accessTrace===true;
     this.browserTrace = browserTracer(config.browserTrace === true, this.browserSink);
     this.trace = confirmationTracer(config.confirmationTrace === true, this.traceSink);
@@ -68,19 +93,26 @@ export class VoiceToolBridge {
           if (this.pending) { this.diagnostic('tool.invoke', 'blocked_while_pending'); return { status: 'pending', ...this.pending }; }
           let input: unknown; try { input = JSON.parse(inputJson); } catch { return { status: 'error', message: 'JSON inválido.' }; }
           this.presentation?.tool(descriptor.id.startsWith('browser.')&&config.browserPresentation!==false);
-          if(descriptor.id.startsWith('browser.'))++this.browserInvocations;
+          const sdkCall=descriptor.id.startsWith('browser.')?details?.toolCall?.callId:undefined;
+          if(descriptor.id.startsWith('browser.')){if(sdkCall){this.sdkPending.add(sdkCall);this.sdkAnnounced.delete(sdkCall);}++this.browserInvocations;}
           const sequence = ++this.browserSequence; const browserTool = config.browserTrace === true && isBrowserTool(descriptor.id) ? descriptor.id : undefined;
           const browserStarted = performance.now(); let browserCall: string | undefined;
           if (browserTool) this.browserTrace({ stage: 'realtime_received', code: 'RUNNING', elapsedMs: 0, clientRequest: sequence, tool: browserTool });
           const browserResult = (code: import('../diagnostics/browser.js').BrowserCode) => { if (browserTool) this.browserTrace({ stage: 'realtime_result', code, elapsedMs: Math.round(performance.now() - browserStarted), clientRequest: sequence, tool: browserTool, ...(browserCall ? { call: browserCall } : {}) }); };
           try {
+            if(descriptor.id.startsWith('browser.')){await this.receiptAcks;const admitting=this.admissionInFlight??=(async()=>{const admission=await this.admission.request();if(this.closed)throw new Error('closed');if(admission)await toolRequest('browser-admit',admission);})();try{await admitting;}finally{if(this.admissionInFlight===admitting)this.admissionInFlight=undefined;}}
             this.diagnostic('POST /invoke', 'request');
             const result = await toolRequest('invoke', { invocationId: details?.toolCall?.callId ?? crypto.randomUUID(), toolId: descriptor.id, input }, 'POST', browserTool ? { sequence, response: call => { browserCall = call; } } : undefined) as ToolResult;
             if (this.closed) { browserResult('CLOSED'); return { status: 'error', message: 'Sesión cerrada.' }; }
             this.pending = result.status === 'pending' ? result : null; this.armed = false; this.promptPlayback = undefined; this.captured.clear();
             this.diagnostic('tool.result', result.status === 'pending' ? 'prepared' : 'not_pending');
             const receivedState=browserExecutionStateSchema.safeParse((result as unknown as {browserExecutionState?:unknown}).browserExecutionState);if(receivedState.success){const meta=result as unknown as {browserRevision?:number;browserTaskActive?:boolean};this.present({executionState:receivedState.data,revision:meta.browserRevision,taskActive:meta.browserTaskActive});}if(result.status==='pending')this.presentation?.state('WAITING_CONFIRMATION');
-            await this.refresh(); browserResult(result.status === 'error' ? browserCode(result.category) : 'OK');
+            await this.refresh();
+            // Include events discovered during refresh in this exact function
+            // output, before SDK response creation. agent_tool_end acknowledges
+            // this receipt; HTTP success itself never consumes pending tokens.
+            if(descriptor.id.startsWith('browser.')){const incorporated=this.browserContinuation.incorporatedState();if(incorporated)Object.assign(result,incorporated);}
+            browserResult(result.status === 'error' ? browserCode(result.category) : 'OK');
             if (descriptor.id.startsWith('browser.') && result.status === 'error' && result.browserRecovery) {
               return { ...result, instruction: result.browserRecovery.recoverable
                 ? 'Sin hablar: usa browserObservation si status es OK y resuelve el mismo paso con una ref nueva. Si FAILED, sólo observa para obtener contexto; no repitas acciones completadas. SNAPSHOT_CONSUMED significa contexto consumido, no cambios rápidos de página. Máximo dos recuperaciones, según el backend.'
@@ -95,12 +127,12 @@ export class VoiceToolBridge {
             if (descriptor.id.startsWith('browser.')) {
               try {
                 const activity=await toolRequest('activity',undefined,'GET') as {browser?:unknown};
-                if(activity.browser){this.present(activity.browser);this.browserContinuation.update(activity.browser,this.confirmationActive,true);const state=activity.browser as {executionState?:unknown;actionOutcome?:unknown};const outcome=actionOutcomeSchema.safeParse(state.actionOutcome);const flow=browserExecutionStateSchema.safeParse(state.executionState);return {status:'error',category:'UPSTREAM',browserActionOutcome:outcome.success?outcome.data:null,browserExecutionState:flow.success?flow.data:undefined,browserOutcomeRelation:'LAST_ACTION',message:outcome.success&&outcome.data.execution==='EXECUTED'?'La última acción registrada fue ejecutada. No la repitas. Esta invocación perdió su resultado HTTP: reconciliá contexto READ antes de decidir cualquier paso.':'No se recibió el resultado. No reintentes ninguna acción ni asumas éxito; reconciliá el estado mediante READ.',instruction:'No repitas la invocación sin resultado ni la sustituyas por otra acción. Sólo reconciliación READ hasta identificar su ejecución. El outcome corresponde a la última acción registrada, no prueba por sí solo la ejecución de esta invocación. '+(flow.success?executionInstruction(flow.data):'')};}
+                if(activity.browser){this.present(activity.browser);this.browserContinuation.update(activity.browser,this.confirmationActive,true);const state=activity.browser as {executionState?:unknown;actionOutcome?:unknown};const outcome=actionOutcomeSchema.safeParse(state.actionOutcome);const flow=browserExecutionStateSchema.safeParse(state.executionState);return {status:'error',category:'UPSTREAM',...(this.browserContinuation.incorporatedState()??{}),browserActionOutcome:outcome.success?outcome.data:null,browserExecutionState:flow.success?flow.data:undefined,browserOutcomeRelation:'LAST_ACTION',message:outcome.success&&outcome.data.execution==='EXECUTED'?'La última acción registrada fue ejecutada. No la repitas. Esta invocación perdió su resultado HTTP: reconciliá contexto READ antes de decidir cualquier paso.':'No se recibió el resultado. No reintentes ninguna acción ni asumas éxito; reconciliá el estado mediante READ.',instruction:'No repitas la invocación sin resultado ni la sustituyas por otra acción. Sólo reconciliación READ hasta identificar su ejecución. El outcome corresponde a la última acción registrada, no prueba por sí solo la ejecución de esta invocación. '+(flow.success?executionInstruction(flow.data):'')};}
               } catch { /* Transport uncertainty never turns into an action retry. */ }
               this.presentation?.state('INCONCLUSIVE');
             }
             return { status: 'error', message: 'No se pudo reconciliar el resultado. No reintentes la acción ni asumas éxito o fracaso; requiere comprobar el estado.' };
-          }finally{if(descriptor.id.startsWith('browser.'))--this.browserInvocations;}
+          }finally{if(descriptor.id.startsWith('browser.')){--this.browserInvocations;this.browserContinuation.released(this.browserBusy());}}
         } })) };
   }
   private registerPromptResponse(responseId: string): void {
@@ -131,10 +163,23 @@ export class VoiceToolBridge {
         responseId: typeof event.response_id === 'string' ? event.response_id : typeof response?.id === 'string' ? response.id : undefined,
         itemId: typeof event.item_id === 'string' ? event.item_id : typeof item?.id === 'string' ? item.id : undefined });
     }
+    // Response lifecycle schedules deferred decisions only; it never closes a task.
+    if(event.type==='response.output_item.added'){
+      const item=event.item as {type?:string;name?:string;call_id?:string}|undefined;
+      if(item?.type==='function_call'&&item.name&&this.sdkToolNames.has(item.name)&&item.call_id&&!this.sdkCommitted.has(item.call_id))this.sdkAnnounced.add(item.call_id);
+    }
+    if(event.type==='response.created'){
+      const response=event.response as {id?:string}|undefined;
+      if((this.sdkAwaitingResponse||['RUNNING','RECOVERING_CONTEXT'].includes(this.browserContinuation.traceContext().taskState??''))&&response?.id){this.sdkAwaitingResponse=false;this.sdkResponses.add(response.id);}
+    }
+    if(event.type==='response.done'){
+      const response=event.response as {id?:string}|undefined;if(response?.id)this.sdkResponses.delete(response.id);
+      this.browserContinuation.released(this.browserBusy());
+    }
     switch (event.type) {
       case 'response.created': {
         const response = event.response as { id?: unknown } | undefined;
-        if (typeof response?.id === 'string') this.registerPromptResponse(response.id);
+        if (typeof response?.id === 'string') {this.registerPromptResponse(response.id);this.taskDiagnostics.event({stage:'RESPONSE_CREATED',...this.browserContinuation.traceContext(),...(/^resp_[A-Za-z0-9_-]{1,100}$/.test(response.id)?{responseId:response.id}:{}),toolInFlight:this.browserInvocations>0});}
         break;
       }
       case 'response.done': {
@@ -173,6 +218,8 @@ export class VoiceToolBridge {
     }
   }
   speechStarted(itemId: string): void {
+    if(this.lifecycleEnabled&&!this.confirmationActive&&!['RUNNING','RECOVERING_CONTEXT','WAITING_ACCESS','WAITING_MANUAL','WAITING_CONFIRMATION'].includes(this.lastBrowserState??''))this.admission.begin(itemId);
+    if(!this.confirmationActive&&!this.closed&&this.browserUserTurns.size<200)this.browserUserTurns.add(itemId);
     this.browserContinuation.speechStarted(itemId, this.confirmationActive);
     // A new turn supersedes an unresolved semantic decision. Old classification
     // must not execute while the user is already correcting or changing intent.
@@ -182,7 +229,9 @@ export class VoiceToolBridge {
     this.diagnostic('speech.capture', capture ? 'captured' : 'not_captured', { itemId, capturedId: capture?.id, capturedApprovable: capture?.approvable });
   }
   async transcript(itemId: string, text: string): Promise<void> {
-    if (!this.confirmationActive) await this.browserContinuation.transcript(itemId, text, false);
+    const browserUserTurn=this.browserUserTurns.delete(itemId);
+    if(browserUserTurn&&!this.confirmationActive)this.admission.capture(itemId,text);
+    if (!this.confirmationActive) {if(this.lifecycleEnabled&&browserUserTurn&&explicitBrowserCancellation(text)){const result=await toolRequest('browser-cancel',{itemId,utterance:text}).catch(()=>undefined);if(result&&typeof result==='object'&&(result as {cancelled?:boolean}).cancelled)this.admission.clear();}await this.browserContinuation.transcript(itemId, text, false);}
     if (!this.pending || this.closed) { this.diagnostic('transcript.classify', 'no_pending_or_closed', { itemId }); return; }
     const capture = this.captured.get(itemId); this.captured.delete(itemId);
     const pendingId = this.pending.confirmationId;
@@ -252,8 +301,8 @@ export class VoiceToolBridge {
       if (this.closed) return;
       if (this.pending && this.pending.confirmationId === expectedId && (!data.pending || data.pending.confirmationId !== this.pending.confirmationId)) { this.diagnostic('activity.refresh', 'backend_pending_missing_or_changed'); this.pending = null; this.armed = false; }
       this.activity(data.activity, this.pending);
-      if (data.browser) {const state=browserExecutionStateSchema.safeParse((data.browser as {executionState?:unknown}).executionState);if(state.success&&this.browserInvocations===0)this.present(data.browser);this.browserContinuation.update(data.browser, this.confirmationActive,this.browserInvocations>0);}
+      if (data.browser) {const state=browserExecutionStateSchema.safeParse((data.browser as {executionState?:unknown}).executionState);if(state.success&&this.browserInvocations===0)this.present(data.browser);this.browserContinuation.update(data.browser, this.confirmationActive,this.browserBusy());}
     } catch { /* Polling never breaks voice playback. Tool requests report failures. */ }
   }
-  close(): void { this.diagnostic('bridge.close', 'session_closed'); this.closed = true; this.browserContinuation.close(); this.observedResponses.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE').catch(() => undefined); }
+  close(): void { this.diagnostic('bridge.close', 'session_closed'); this.closed = true; this.admission.clear(); this.browserContinuation.close(); this.sdkPending.clear();this.sdkCommitted.clear();this.sdkToolNames.clear();this.sdkAnnounced.clear();this.sdkResponses.clear();this.sdkAwaitingResponse=false;this.browserUserTurns.clear();this.observedResponses.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE').catch(() => undefined); }
 }
