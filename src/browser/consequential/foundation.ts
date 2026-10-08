@@ -1,3 +1,5 @@
+import { draftRequestSchema, draftContextSchema, resolveRecipient } from './semantic.js';
+import type { DraftContext, Conversation } from './semantic.js';
 import { createHash,randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { ToolDefinition } from '../../tools/types.js';
@@ -8,26 +10,69 @@ import { PrivateExecutionJournal } from './journal.js';
 const terminal=new Set<ActionState>(['SUCCESS','FAILURE','UNKNOWN','CANCELLED','REJECTED','EXPIRED','INVALIDATED']);
 const inputSchema=z.object({recipientHint:z.string().min(1).max(120),text:z.string().min(1).max(2000)}).strict();
 const proofSchema=z.object({simulationOnly:z.literal(true),evidence:z.literal('SIMULATED_MESSAGE_ACCEPTED')}).strict();
-interface Entry {intent:FrozenIntent;state:ActionState;confirmationId?:string;authorization?:Authorization;result?:ConsequentialResult;work?:Promise<ConsequentialResult>;cancelled?:boolean;controller?:AbortController;}
+interface Entry {draft?:{conversation:Readonly<Conversation>;snapshotId:string;contextDigest:string};intent:FrozenIntent;state:ActionState;confirmationId?:string;authorization?:Authorization;result?:ConsequentialResult;work?:Promise<ConsequentialResult>;cancelled?:boolean;controller?:AbortController;}
 export interface SimulatedExecutor {readonly simulationOnly:true;execute(intent:FrozenIntent,signal:AbortSignal):Promise<z.infer<typeof proofSchema>>;}
 const candidateOf=(intent:FrozenIntent)=>{const {intentId:_id,kind:_kind,createdAt:_created,expiresAt:_expires,summary:_summary,...candidate}=intent;return candidateSchema.parse(candidate);};
 const digest=(x:unknown)=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 function freeze<T>(x:T):T {if(x&&typeof x==='object'){for(const value of Object.values(x))freeze(value);Object.freeze(x);}return x;}
-// Foundation only: this class is NOT installed in createToolRuntime, protocol,
-// extension or BrowserProvider. Its sole executor must explicitly be simulated.
+// The only dispatch executor remains simulated and test-only. Production uses
+// the RAM-only draft mode, which cannot obtain approvals or execute.
 export class ConsequentialFoundation {
- private entries=new Map<string,Entry>();private recovered=new Map<string,'SUCCESS'|'FAILURE'|'UNKNOWN'>();private initialized=false;private unresolved=false;
+ private entries=new Map<string,Entry>();private recovered=new Map<string,'SUCCESS'|'FAILURE'|'UNKNOWN'>();private initialized=false;private unresolved=false;private draftOnly=false;
  constructor(private readonly journal:PrivateExecutionJournal,private readonly context:(signal:AbortSignal)=>Promise<TrustedContext>,private readonly sessionId:string,private readonly simulator:SimulatedExecutor,private readonly now=Date.now,private readonly cancelPending?:(confirmationId:string)=>void){if(simulator.simulationOnly!==true)throw new ToolError('REJECTED');}
+ // RAM-only FROZEN preparations share this ledger and invalidation machinery.
+ // There is deliberately no journal I/O, approval hook or dispatch in this mode.
+ static drafts(sessionId:string,now=Date.now):ConsequentialFoundation {
+  const foundation=new ConsequentialFoundation(new PrivateExecutionJournal(),async()=>{throw new ToolError('REJECTED');},sessionId,{simulationOnly:true,execute:async()=>{throw new ToolError('REJECTED');}},now);
+  foundation.initialized=true;foundation.draftOnly=true;return foundation;
+ }
+ private store(candidate:Candidate,expiresAt:number,summary:string,draft?:Entry['draft']):Entry {
+  const now=this.now();const intent=freeze(intentSchema.parse({...candidate,intentId:randomUUID(),kind:'SEND_MESSAGE',createdAt:now,expiresAt,summary}));
+  const entry:Entry={intent,state:'RESOLVING',...(draft?{draft:freeze(draft)}:{})};this.entries.set(intent.intentId,entry);entry.state='FROZEN';return entry;
+ }
+ private draftAccess(raw:DraftContext):DraftContext {
+  const context=draftContextSchema.parse(raw);
+  if(context.backendSessionId!==this.sessionId||context.origin!==context.semantic.origin||Math.min(context.snapshotExpiresAt,context.grantExpiresAt)<=this.now())throw new ToolError('EXPIRED');return context;
+ }
+ private draftDigest(context:DraftContext,conversation:Conversation):string {
+  const {snapshotId:_snapshot,snapshotExpiresAt:_expires,grantExpiresAt:_grant,semantic:_semantic,...binding}=context;
+  return digest({binding,conversation});
+ }
+ prepareDraft(raw:unknown,trusted:DraftContext,signal:AbortSignal) {
+  if(!this.draftOnly||this.entries.size>=100)throw new ToolError('REJECTED');signal.throwIfAborted();
+  const request=draftRequestSchema.parse(raw),context=this.draftAccess(trusted);
+  if(request.recipientIdentity&&!context.requestedIdentifiers.includes(request.recipientIdentity))return {status:'IDENTITY_REQUIRED' as const,candidateCount:0,draftOnly:true as const};
+  const resolved=resolveRecipient(context.semantic,request);
+  if(resolved.status!=='VERIFIED')return {...resolved,draftOnly:true as const};
+  // Replace prior drafts; editing is a new frozen preparation, never mutation.
+  this.invalidateDrafts();
+  const conversation=resolved.conversation;
+  const {semantic:_semantic,snapshotId:_snapshot,snapshotExpiresAt:_expires,grantExpiresAt:_grant,chromePermission:_chrome,siteAuthorized:_site,grantValid:_valid,requestedIdentifiers:_identifiers,...binding}=context;
+  const candidate=candidateSchema.parse({...binding,preparationId:randomUUID(),recipient:{identity:request.recipientIdentity!,displayName:conversation.recipient.name,evidenceId:conversation.conversationId,uniqueness:'PROVEN'},content:{text:request.text}});
+  const entry=this.store(candidate,Math.min(this.now()+60_000,context.snapshotExpiresAt,context.grantExpiresAt),`Borrador privado para ${JSON.stringify(conversation.recipient.name)}. No se ha escrito ni enviado.`,{conversation,snapshotId:context.snapshotId,contextDigest:this.draftDigest(context,conversation)});
+  return this.draftView(entry);
+ }
+ private draftView(entry:Entry) {return freeze({status:entry.state,draftOnly:true as const,intent:entry.intent,conversation:entry.draft!.conversation,snapshotId:entry.draft!.snapshotId,confirmationEnabled:false as const,executionEnabled:false as const});}
+ reviewDraft(id:string,trusted:DraftContext) {
+  const entry=this.entry(id);if(!entry.draft)throw new ToolError('REJECTED');
+  if(entry.intent.expiresAt<=this.now()){if(!terminal.has(entry.state))this.failure(entry,'EXPIRED','EXPIRED');return this.draftView(entry);}
+  if(!terminal.has(entry.state))try {
+   const context=this.draftAccess(trusted),conversation=context.semantic.conversations.find(c=>c.conversationId===entry.draft!.conversation.conversationId);
+   if(context.semantic.truncated||!conversation||this.draftDigest(context,conversation)!==entry.draft.contextDigest)this.invalidate(id,'PRECONDITION_CHANGED');
+  }catch{this.invalidate(id,'ACCESS_REVOKED');}
+  return this.draftView(entry);
+ }
+ reconcileDrafts(context:DraftContext) {for(const entry of this.entries.values())if(entry.draft&&!terminal.has(entry.state))this.reviewDraft(entry.intent.intentId,context);}
+ invalidateDrafts() {for(const entry of this.entries.values())if(entry.draft&&!terminal.has(entry.state))this.invalidate(entry.intent.intentId,'PRECONDITION_CHANGED');}
  async initialize(){if(this.initialized)return;for(const row of await this.journal.recover()){this.recovered.set(row.intentId,row.state==='RESERVED'?'UNKNOWN':row.state);if(row.state==='UNKNOWN')this.unresolved=true;}this.initialized=true;}
  private access(context:TrustedContext){if(!context.chromePermission||!context.siteAuthorized||!context.grantValid||context.grantExpiresAt<=this.now())throw new ToolError('REJECTED');const candidate=candidateSchema.parse(context.candidate);if(candidate.backendSessionId!==this.sessionId)throw new ToolError('REJECTED');return candidate;}
  async prepare(raw:unknown,signal:AbortSignal):Promise<{intentId:string}>{if(this.unresolved)throw new ToolError('EXECUTION_UNKNOWN');if(!this.initialized||this.entries.size>=100)throw new ToolError('UNCONFIGURED');const request=inputSchema.parse(raw);signal.throwIfAborted();const context=await this.context(signal);signal.throwIfAborted();const candidate=this.access(context);
  if(candidate.recipient.displayName!==request.recipientHint||candidate.content.text!==request.text)throw new ToolError('CONFLICT');
- const now=this.now();const intent=freeze(intentSchema.parse({...candidate,intentId:randomUUID(),kind:'SEND_MESSAGE',createdAt:now,expiresAt:Math.min(now+60_000,context.grantExpiresAt),summary:`SIMULACIÓN: ¿Confirmás enviar a ${JSON.stringify(candidate.recipient.displayName)} (${JSON.stringify(candidate.recipient.identity)}) este texto exacto: ${JSON.stringify(candidate.content.text)}? No se enviará ningún mensaje real.`}));
- this.entries.set(intent.intentId,{intent,state:'RESOLVING'});this.entry(intent.intentId).state='FROZEN';return {intentId:intent.intentId};}
+ const now=this.now();const entry=this.store(candidate,Math.min(now+60_000,context.grantExpiresAt),`SIMULACIÓN: ¿Confirmás enviar a ${JSON.stringify(candidate.recipient.displayName)} (${JSON.stringify(candidate.recipient.identity)}) este texto exacto: ${JSON.stringify(candidate.content.text)}? No se enviará ningún mensaje real.`);return {intentId:entry.intent.intentId};}
  private entry(id:string){const e=this.entries.get(id);if(!e||e.intent.backendSessionId!==this.sessionId||this.recovered.has(id))throw new ToolError('EXPIRED');return e;}
  private failure(e:Entry,state:ActionState,reason:ConsequentialResult['reason']){e.state=state;e.result=resultSchema.parse({intentId:e.intent.intentId,...(e.authorization?{executionId:e.authorization.executionId}:{}),simulationOnly:true,execution:'NOT_EXECUTED',verification:'FAILED',outcome:'CONFIRMED_FAILURE',reason});return e.result;}
  private unknown(e:Entry,reason:ConsequentialResult['reason']){this.unresolved=true;e.state='UNKNOWN';e.result=resultSchema.parse({intentId:e.intent.intentId,executionId:e.authorization!.executionId,simulationOnly:true,execution:'UNKNOWN',verification:'INCONCLUSIVE',outcome:'EXECUTION_UNKNOWN',reason});return e.result;}
- private pending(id:string,confirmationId:string,expiresAt:number){const e=this.entry(id);if(e.state!=='FROZEN'||e.intent.expiresAt<=this.now())throw new ToolError('EXPIRED');e.confirmationId=confirmationId;e.state='WAITING_CONFIRMATION';if(expiresAt<=this.now())this.failure(e,'EXPIRED','EXPIRED');}
+ private pending(id:string,confirmationId:string,expiresAt:number){const e=this.entry(id);if(e.draft||this.draftOnly)throw new ToolError('REJECTED');if(e.state!=='FROZEN'||e.intent.expiresAt<=this.now())throw new ToolError('EXPIRED');e.confirmationId=confirmationId;e.state='WAITING_CONFIRMATION';if(expiresAt<=this.now())this.failure(e,'EXPIRED','EXPIRED');}
  private decided(id:string,confirmationId:string,approved:boolean){const e=this.entry(id);if(e.state!=='WAITING_CONFIRMATION'||e.confirmationId!==confirmationId)throw new ToolError('EXPIRED');if(e.intent.expiresAt<=this.now()){this.failure(e,'EXPIRED','EXPIRED');throw new ToolError('EXPIRED');}if(!approved){this.failure(e,'REJECTED','CANCELLED');return;}e.authorization=freeze(authorizationSchema.parse({intentId:id,confirmationId,executionId:randomUUID(),backendSessionId:e.intent.backendSessionId,bindingDigest:digest(candidateOf(e.intent)),deadlineAt:e.intent.expiresAt}));e.state='REVALIDATING';}
  invalidate(intentId:string,reason:'CANCELLED'|'ACCESS_REVOKED'|'PRECONDITION_CHANGED'='CANCELLED'){const e=this.entry(intentId);if(terminal.has(e.state))return;e.cancelled=true;if(['DISPATCH_RESERVED','EXECUTING','VERIFYING'].includes(e.state))this.unknown(e,reason);else this.failure(e,reason==='PRECONDITION_CHANGED'?'INVALIDATED':'CANCELLED',reason);e.controller?.abort();if(e.confirmationId)this.cancelPending?.(e.confirmationId);}
  state(intentId:string){const e=this.entry(intentId);return {intentId,state:e.state,result:e.result?structuredClone(e.result):null};}
@@ -45,9 +90,9 @@ export class ConsequentialFoundation {
  await this.journal.finish(auth.executionId,'SUCCESS',this.now()).catch(()=>{});return e.result;
  }catch{if(terminal.has(e.state)&&e.result)return e.result;const result=dispatched?this.unknown(e,controller.signal.aborted||signal.aborted?'TIMEOUT':'DISPATCH_UNCERTAIN'):this.failure(e,'FAILURE',controller.signal.aborted||signal.aborted?'TIMEOUT':e.state==='DISPATCH_RESERVED'&&!reserved?'JOURNAL_UNAVAILABLE':'ACCESS_REVOKED');if(reserved)await this.journal.finish(auth.executionId,dispatched?'UNKNOWN':'FAILURE',this.now()).catch(()=>{});return result;
  }finally{e.controller=undefined;clearTimeout(timer);signal.removeEventListener('abort',abort);}}
- execute(intentId:string,signal:AbortSignal):Promise<ConsequentialResult>{const e=this.entry(intentId);if(e.work)return e.work;if(e.result)return Promise.resolve(e.result);if(e.state!=='REVALIDATING'||!e.authorization)throw new ToolError('REJECTED');e.work=this.run(e,signal);return e.work;}
+ execute(intentId:string,signal:AbortSignal):Promise<ConsequentialResult>{const e=this.entry(intentId);if(e.draft||this.draftOnly)throw new ToolError('REJECTED');if(e.work)return e.work;if(e.result)return Promise.resolve(e.result);if(e.state!=='REVALIDATING'||!e.authorization)throw new ToolError('REJECTED');e.work=this.run(e,signal);return e.work;}
  // Only a trusted executor lifecycle hook grants execution. Model input contains
  // no confirmationId, executionId, origin, grant or approval boolean.
- simulationTool():ToolDefinition{return {id:'browser.simulateSendMessage',name:'browser_simulateSendMessage',description:'SIMULATION ONLY: no external effect.',integration:'browser',capability:'simulateSendMessage',permission:'SENSITIVE',schema:inputSchema,timeoutMs:18_000,prepare:(raw,signal)=>this.prepare(raw,signal),summarize:raw=>this.entry((raw as {intentId:string}).intentId).intent.summary,
+ simulationTool():ToolDefinition{if(this.draftOnly)throw new ToolError('REJECTED');return {id:'browser.simulateSendMessage',name:'browser_simulateSendMessage',description:'SIMULATION ONLY: no external effect.',integration:'browser',capability:'simulateSendMessage',permission:'SENSITIVE',schema:inputSchema,timeoutMs:18_000,prepare:(raw,signal)=>this.prepare(raw,signal),summarize:raw=>this.entry((raw as {intentId:string}).intentId).intent.summary,
  confirmationLifecycle:{pending:(raw,id,expires)=>this.pending((raw as {intentId:string}).intentId,id,expires),decided:(raw,id,approved)=>this.decided((raw as {intentId:string}).intentId,id,approved),invalidated:(raw,reason)=>{const e=this.entry((raw as {intentId:string}).intentId);if(!terminal.has(e.state))this.failure(e,reason==='expired'?'EXPIRED':'CANCELLED',reason==='expired'?'EXPIRED':'CANCELLED');}},execute:(raw,signal)=>this.execute((raw as {intentId:string}).intentId,signal)};}
 }

@@ -1,3 +1,4 @@
+import { ConversationObserver } from './conversation-context.js';
 import { observationSchema, refBinding, argumentSchemas } from '../../src/browser/attached/protocol.js';
 import type { Operation, Reply } from '../../src/browser/attached/protocol.js';
 import { classifyElement, displayUrl, privateText, navigationUrl } from '../../src/browser/policy.js';
@@ -10,6 +11,7 @@ interface Access { scopeId: string; tabId: string; session: string; epoch: strin
 interface Entry { node: HTMLElement; documentId: string; snapshotId: string; action: string; href?: string; fingerprint: string; form: HTMLFormElement | null; modal?: HTMLElement; search?: SearchControl; media?: MediaControl }
 export class ContentEngine {
   private mediaState: MediaState;
+  private conversations = new ConversationObserver(() => this.id());
   private access?: Access; private documentId: string; private documentUrl: string; private refs = new Map<string, Entry>(); private snapshotExpires = 0;
   private accessTimer?: number; private snapshotTimer?: number;
   constructor(private readonly win: Window & typeof globalThis, private readonly now = Date.now, private readonly id: () => string = () => crypto.randomUUID(), private readonly settle = (ms:number):Promise<void> => new Promise(resolve=>win.setTimeout(resolve,ms))) {
@@ -150,6 +152,7 @@ export class ContentEngine {
     this.refs.clear(); const snapshotId = this.id(); this.win.clearTimeout(this.snapshotTimer);
     const doc = this.win.document;
     const modal = this.modal(); const scope = modal ?? doc;
+    const semanticBefore = modal ? undefined : this.conversations.read(doc, access.origin, el => this.visible(el));
     const media = await this.mediaState.read(scope, deadlineAt, this.now);
     const elements = []; let size = 0; let truncated = false;
     const selector = 'a[href],button,input,textarea,select,[role="button"],[role="searchbox"],[role="textbox"],[role="combobox"],video,audio';
@@ -188,8 +191,10 @@ export class ContentEngine {
     });
     if(!stable){this.refs.clear();throw new Error('CONTENT_UNAVAILABLE');}
     // Validate/build before starting the single authoritative 15-second TTL.
+    const semanticAfter = modal ? undefined : this.conversations.read(doc, access.origin, el => this.visible(el));
+    const conversationContext = JSON.stringify(semanticBefore) === JSON.stringify(semanticAfter) ? semanticAfter : undefined;
     const built = observationSchema.parse({ media, expiresAt: 1, tabId: access.tabId, scopeId: access.scopeId, documentId: this.documentId, snapshotId, url: displayUrl(this.win.location.href), title: privateText(doc.title), elements, truncated, ...(modal ? { dialog: { role: privateText(modal.getAttribute('role') ?? 'dialog',30), name: privateText(modal.getAttribute('aria-label') || modal.querySelector('h1,h2,h3')?.textContent || 'Dialog') } } : {}) });
     this.snapshotExpires = this.now() + 15_000; this.snapshotTimer = this.win.setTimeout(() => this.refs.clear(), 15_000);
-    return { ...built, expiresAt: this.snapshotExpires };
+    return { ...built, ...(conversationContext?.conversations.length&&JSON.stringify({...built,conversationContext}).length<=12_000?{conversationContext}:{}), expiresAt: this.snapshotExpires };
   }
 }

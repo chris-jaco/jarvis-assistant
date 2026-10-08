@@ -1391,4 +1391,33 @@ Un restart no restaura aprobaciones; una reserva incierta queda UNKNOWN y bloque
 reenvíos automáticos. El journal no guarda destinatarios ni mensajes en claro.
 Contratos, límites y decisiones pendientes en
 [docs/browser-consequential-foundation.md](docs/browser-consequential-foundation.md).
-V0.5.3.2 y las acciones consecuenciales reales requieren aprobación posterior.
+V0.5.3.2 agrega borradores privados según la sección siguiente; los envíos reales
+siguen bloqueados y requieren aprobación e implementación posteriores.
+
+
+## V0.5.3.2 — Semantic Conversation & Safe Draft (sin escritura web)
+
+En modo attached, `browser.observe` puede incluir `conversationContext` como
+**evidencia no confiable**, con relaciones semánticas explícitas entre destinatario,
+conversación y compositor. El título de la pestaña y un nombre coincidente nunca
+prueban identidad. `browser.prepareDraft` exige nombre e identificador visible
+exacto (correo/teléfono) aportado en la admisión del usuario; no acepta una identidad
+inventada por el modelo a partir del DOM. Homónimos sin identificación inequívoca
+requieren aclaración. Evidencia insuficiente detiene la preparación.
+
+El borrador queda únicamente en RAM de Atlas, profundamente congelado y vinculado
+al origen/session/task/admission/epoch/scope/tab/document, evidencia y compositor.
+`browser.reviewDraft` realiza una observación READ fresca y lo invalida ante cambios
+materiales. Su caducidad no supera la del snapshot inicial (15 s) o grant, y nunca
+se renueva por observar. Editar el texto crea una preparación nueva e invalida la
+anterior. No hay confirmación ejecutable, autorización de ejecución, escritura en
+el compositor, Send ni Enter. Las herramientas nuevas sólo despachan READ al bridge;
+no cambian permisos, Search/Media, audio o la máquina de confirmación.
+
+El extractor genérico requiere relaciones ARIA y evidencia visible explícitas;
+**no se presume compatibilidad real con WhatsApp Web**. Si no las expone, devuelve
+evidencia insuficiente. Un adaptador semántico aislado deberá diseñarse/aprobarse
+antes de habilitar ese acceptance, sin relajar el criterio ni agregar selectores
+al BrowserProvider. Criterio, limitaciones y pruebas manuales en
+[docs/browser-safe-draft.md](docs/browser-safe-draft.md).
+V0.5.3.3 no está implementada y ningún envío browser real está habilitado.

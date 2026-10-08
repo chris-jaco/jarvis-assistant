@@ -1,3 +1,4 @@
+import { draftRequestSchema } from '../../browser/consequential/semantic.js';
 import { observeTracer } from '../../diagnostics/browser-observe.js';
 import { endTaskSchema } from '../../browser/task-lifecycle.js';
 import type { ContinuationReceipt } from '../../browser/task-lifecycle.js';
@@ -88,6 +89,8 @@ export class BrowserAdapter implements ToolAdapter {
     if (this.provider instanceof AttachedChromeProvider) {
       const attached = this.provider;
       return [...tools.filter(tool => tool.id !== 'browser.close'),
+        tool('prepareDraft', 'Prepara sólo un borrador privado en Atlas. Requiere nombre e identificador exacto aportados por el usuario y evidencia semántica visible inequívoca. AMBIGUOUS/IDENTITY_REQUIRED requiere aclaración; INSUFFICIENT_EVIDENCE detiene preparación. Nunca escribe ni envía, no solicita confirmación ejecutable.', draftRequestSchema, (input, signal) => attached.prepareDraft(input,signal),true),
+        tool('reviewDraft', 'READ: revalida un borrador privado contra contexto fresco; cambios materiales invalidan. Nunca confirma, escribe ni envía.', z.object({intentId:ref}).strict(), (input,signal)=>attached.reviewDraft((input as {intentId:string}).intentId,signal),true),
         tool('requestAccess', 'Pide acceso a una pestaña seleccionada por el usuario. ACCESS_PENDING no es confirmación de acción ni éxito; el usuario debe pulsar el icono de la extensión. Usa lifetime task por defecto.', accessArgs, (raw, signal) => attached.requestTabAccess(raw as Parameters<typeof attached.requestTabAccess>[0], signal).then(browserState => ({ browserState }))),
         tool('revokeAccess', 'Revoca acceso a una pestaña autorizada; no cierra Chrome.', z.object({ tabId: ref }).strict(), (raw, signal) => attached.revokeTabAccess((raw as { tabId: string }).tabId, signal)),
         tool('verify', 'Verificación READ opcional de un efecto con condición verificable, máximo dos intentos. Sin condición devuelve NOT_APPLICABLE; presupuesto agotado devuelve INCONCLUSIVE. No es requisito para continuar con contexto fresco. Nunca reejecuta la acción.',empty,(_,signal)=>attached.verify(signal),true),
