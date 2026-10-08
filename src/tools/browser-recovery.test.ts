@@ -15,17 +15,18 @@ test('content transport separates pre-dispatch unavailability, origin change and
   const grant: Grant = { scopeId, tabId, chromeId: 7, origin: 'https://fixture.example', session, task: id(), lifetime: 'task', expiresAt: Date.now() + 900_000, title: 'Fixture', url: 'https://fixture.example/' };
   const request = parseRequest({ protocol: 'atlas.browser', version: 1, kind: 'request', requestId: id(), backendSessionId: session, taskId: grant.task, connectionEpoch: epoch, deadlineAt: Date.now() + 10_000, operation: 'type', args: { scopeId, tabId, ref: id(), documentId: id(), snapshotId: id(), text: 'fixture', mode: 'replace' } });
   for (const stage of ['injection','init','command','malformed'] as const) {
-    let actions = 0;
+    let actions = 0, dispatched = false;
     const api = { tabs: { update: async () => {}, get: async () => ({ url: 'https://fixture.example/results' }), sendMessage: async (_tab: number, raw: any) => {
       if (raw.kind === 'init') { if (stage === 'init') throw new Error('PRIVATE'); return { completed: true }; }
-      ++actions; if (stage === 'command') throw new Error('PRIVATE'); return { outcome: 'OK', privateData: 'PRIVATE' };
+      ++actions; dispatched = true; if (stage === 'command') throw new Error('PRIVATE'); return { outcome: 'OK', privateData: 'PRIVATE' };
     } }, scripting: { executeScript: async () => { if (stage === 'injection') throw new Error('PRIVATE'); } } } as unknown as Pick<typeof chrome, 'tabs' | 'scripting'>;
     const result = await contentRequest(api, () => epoch, 7, grant, request);
     const { timings, ...outcome } = result; assert.ok(timingSchema.safeParse(timings).success);
     assert.deepEqual(outcome, { outcome: 'ERROR', code: stage === 'command' || stage === 'malformed' ? 'EXECUTION_UNKNOWN' : 'CONTENT_UNAVAILABLE' });
     assert.equal(actions, stage === 'command' || stage === 'malformed' ? 1 : 0);
     assert.ok(!JSON.stringify(result).includes('PRIVATE'));
-    (api.tabs.get as any) = async () => ({ url: 'https://other.example/' });
+    dispatched = false;
+    (api.tabs.get as any) = async () => ({ url: stage === 'injection' || stage === 'init' || dispatched ? 'https://other.example/' : 'https://fixture.example/results' });
     const differentOrigin = await contentRequest(api, () => epoch, 7, grant, request);
     if (stage === 'injection' || stage === 'init') { assert.equal(differentOrigin.outcome, 'REQUIRES_USER_INTERACTION'); assert.equal((differentOrigin as any).reason, 'ORIGIN_PERMISSION'); }
     else { const { timings, ...outcome } = differentOrigin; assert.deepEqual(outcome, { outcome: 'ERROR', code: 'EXECUTION_UNKNOWN' }); }

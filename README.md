@@ -1352,15 +1352,20 @@ failed recovery READ—use `OBSERVE_RESULT` and the budget transition to disting
 it from READY context. Diagnostic authorization probes are read-only, only on
 trace-enabled authorized requests, and can add measurement overhead.
 
-Attached document readiness: after navigation, an `observe` READ polls Chrome's
-loading state at most 20 times (100 ms intervals, at most 2 seconds and never
-beyond the request deadline). This does not repeat the preceding action or
-increase the existing two-READ recovery budget. Grant validity, cancellation,
-connection epoch, origin and persistent policy are checked again before content
-dispatch. A still-loading document returns the existing `CONTENT_UNAVAILABLE`
-outcome with sanitized trace reason `DOCUMENT_INITIALIZING`; actual content
-injection/init/messaging failures retain their separate diagnostics. No site
-exceptions or permission changes are used. `BROWSER_TRACE` remains off by default.
+Attached document readiness uses the actual content transport, not Chrome's global
+`loading` status: an accessible document can be observed while resources load.
+A pending navigation cannot expose the previous document. Injection, initialization
+and commands target the same Chrome document when its ID is available. An unavailable
+READ receives at most two additional attempts (500/1000 ms waits), bounded by two
+seconds and the request deadline; actions are never replayed. Each attempt revalidates
+scope, grants, epoch, cancellation, origin and policy. Snapshot publication samples
+the captured controls for 80 ms and retains the strict identity/security checks;
+there is no minimum ref count or requirement for recommendations. TTL starts after
+construction. Unrelated background mutations do not invalidate controls.
+Sanitized `ELEMENT_VALIDATION` details distinguish replaced/hidden nodes, modal/form,
+functional and target changes without page contents. Status/tabs diagnostics do not
+revive a terminal task; a new explicit admission can start a new task.
+`BROWSER_TRACE` remains off by default. No site exceptions or permission changes.
 
 Context READ recovery now spaces its two retries by 500 ms and 1000 ms, within
 its existing deadline. This gives a document/content boundary time to settle

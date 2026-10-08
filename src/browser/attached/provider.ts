@@ -41,9 +41,9 @@ export class AttachedChromeProvider implements BrowserProvider {
   state(id: string) { const session = this.sessions.get(id); return session && !session.closed ? { taskId:session.task,continuation:this.receipt(session), workflow: session.workflow ?? null, ready: session.ready ?? null, accessRevoked: session.accessRevoked ?? false, actionOutcome:session.actionRecord?.result() ?? null, accessCorrelation:session.accessCorrelation ?? null, contextRecovery:session.contextRecovery ?? null } : { workflow: null, ready: null }; }
   private receipt(session:Session):ContinuationReceipt {return {taskId:session.task,tokens:[session.ready,session.contextRecovery?.status==='READY'?session.contextRecovery.ready:undefined,session.rejectionToken].filter((token):token is string=>!!token&&!session.acknowledged.has(token))};}
   acknowledge(receipt:ContinuationReceipt):void {const session=this.session();if(receipt.taskId!==session.task)return;const available=this.receipt(session).tokens;for(const token of receipt.tokens)if(available.includes(token))session.acknowledged.add(token);}
-  async admitGoal(admission:string, utterance?:string,traceState:BrowserExecutionState='RUNNING'):Promise<void> {
+  async admitGoal(admission:string, utterance?:string,traceState:BrowserExecutionState='RUNNING'):Promise<boolean> {
     const session=this.session();await session.tail.catch(()=>{});
-    if(session.admission===admission||session.workflow)return;
+    if(session.admission===admission||session.workflow)return false;
     // A trusted new user turn starts a new progress ledger, not a new Chrome
     // permission. Never import an earlier objective's action as completion proof.
     session.admission=admission;session.intent=classifyTaskIntent(utterance);session.readAdmission=undefined;session.inventory=undefined;session.progress.clear();session.terminal=false;session.cancelled=false;
@@ -51,6 +51,7 @@ export class AttachedChromeProvider implements BrowserProvider {
     // Keep the uncertainty latch and Chrome consent/scopes intact.
     session.contextRecovery=undefined;session.observation=undefined;session.lastObservation=undefined;session.context='OBSERVATION_REQUIRED';session.completed=undefined;session.pendingStep=undefined;session.pendingRecovery=undefined;session.failures=0;session.rejectionToken=undefined;session.ready=undefined;
     this.traceTask({stage:'ADMISSION',taskId:session.task,admissionId:admission,intent:session.intent.intent,source:utterance?'TRANSCRIPT':'FALLBACK',taskState:traceState});
+    return true;
   }
   private traceObserve(raw:unknown):void {if(!this.diagnostics?.enabled)return;const s=this.scope.getStore();if(!s||s.closed)return;observeTracer(this.diagnostics?.enabled===true)({boundary:'BACKEND',...(s.observeRequestId?{requestId:s.observeRequestId}:{}),...((raw&&typeof raw==='object')?raw:{}),taskId:s.task,...(s.admission?{admissionId:s.admission}:{})});}
   private traceTask(raw:unknown):void {this.taskDiagnostics.enabled=this.diagnostics?.enabled===true;this.taskDiagnostics.event(raw);}
@@ -71,7 +72,7 @@ export class AttachedChromeProvider implements BrowserProvider {
     if (['click','type','press','media','scroll','navigate','back','forward','reload'].includes(operation)) this.allowAction(session);
     const connection = await this.connection(session, signal);
     if (signal.aborted || deadlineAt <= Date.now()) throw new ToolError('TIMEOUT');
-    const request = parseRequest({ protocol: 'atlas.browser', version: 1, kind: 'request', requestId: randomUUID(), backendSessionId: session.id, taskId: session.task, connectionEpoch: this.transport.epoch, deadlineAt, operation, args, ...(operation==='observe'&&this.diagnostics?.enabled?{observeTrace:true}:{}) });
+    const request = parseRequest({ protocol: 'atlas.browser', version: 1, kind: 'request', requestId: randomUUID(), backendSessionId: session.id, taskId: session.task, connectionEpoch: this.transport.epoch, deadlineAt, operation, args, ...(this.diagnostics?.enabled?{observeTrace:true}:{}) });
     if(operation==='observe'&&this.diagnostics?.enabled)session.observeRequestId=request.requestId;
     let reply: Reply; const transportStarted = performance.now(); let rejectAbort!: (error: Error) => void;
     const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });

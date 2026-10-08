@@ -12,7 +12,7 @@ export class ContentEngine {
   private mediaState: MediaState;
   private access?: Access; private documentId: string; private documentUrl: string; private refs = new Map<string, Entry>(); private snapshotExpires = 0;
   private accessTimer?: number; private snapshotTimer?: number;
-  constructor(private readonly win: Window & typeof globalThis, private readonly now = Date.now, private readonly id: () => string = () => crypto.randomUUID()) {
+  constructor(private readonly win: Window & typeof globalThis, private readonly now = Date.now, private readonly id: () => string = () => crypto.randomUUID(), private readonly settle = (ms:number):Promise<void> => new Promise(resolve=>win.setTimeout(resolve,ms))) {
     this.mediaState = new MediaState(win);
     this.documentId = id(); this.documentUrl = win.location.href;
     win.addEventListener('popstate', this.navigationChanged);
@@ -74,7 +74,7 @@ export class ContentEngine {
     if (headings.some(el => this.visible(el) && /verify (that )?you are human|unusual traffic|security verification|verifica.*humano|tr[aá]fico inusual/i.test((el.textContent ?? '').slice(0, 200)))) return 'CHALLENGE';
     return undefined;
   }
-  async run(operation: Operation, raw: Record<string, unknown>, deadlineAt: number, identity: { session: string; epoch: string }): Promise<Reply> {
+  async run(operation: Operation, raw: Record<string, unknown>, deadlineAt: number, identity: { session: string; epoch: string }, trace:(raw:unknown)=>void=()=>{}): Promise<Reply> {
     let dispatched = false;
     try {
       const args = argumentSchemas[operation].parse(raw) as Record<string, unknown>;
@@ -87,14 +87,18 @@ export class ContentEngine {
       if (operation === 'scroll') { dispatched = true; this.win.scrollBy(0, args.direction === 'down' ? 600 : -600); this.refs.clear(); return { outcome: 'OK', data: { completed: true } }; }
       const bind = refBinding.parse(operation === 'type' || operation === 'press' || operation === 'media' ? { scopeId: args.scopeId, tabId: args.tabId, documentId: args.documentId, snapshotId: args.snapshotId, ref: args.ref } : args);
       const entry = this.refs.get(bind.ref);
-      const conflict = (reason: 'DOCUMENT_CHANGED' | 'SNAPSHOT_EXPIRED' | 'SNAPSHOT_CONSUMED' | 'ELEMENT_CHANGED'): Reply => ({ outcome: 'ERROR', code: 'STALE_REF', conflict: { reason, execution: 'NOT_EXECUTED' } });
+      const conflict = (reason: 'DOCUMENT_CHANGED' | 'SNAPSHOT_EXPIRED' | 'SNAPSHOT_CONSUMED' | 'ELEMENT_CHANGED',elementDetail?:string): Reply => { trace({stage:'ELEMENT_VALIDATION',failureReason:reason,...(elementDetail?{elementDetail}:{})});return { outcome: 'ERROR', code: 'STALE_REF', conflict: { reason, execution: 'NOT_EXECUTED' } }; };
       if (bind.documentId !== this.documentId) return conflict('DOCUMENT_CHANGED');
       if (this.snapshotExpires <= this.now()) return conflict('SNAPSHOT_EXPIRED');
       if (!entry || entry.snapshotId !== bind.snapshotId) return conflict('SNAPSHOT_CONSUMED');
       const modal = this.modal();
-      if (!entry.node.isConnected || !this.visible(entry.node) || entry.modal !== modal || modal && !modal.contains(entry.node)) return conflict('ELEMENT_CHANGED');
+      if(!entry.node.isConnected)return conflict('ELEMENT_CHANGED','NODE_REPLACED');
+      if(!this.visible(entry.node))return conflict('ELEMENT_CHANGED','NODE_NOT_VISIBLE');
+      if(entry.modal!==modal || modal&&!modal.contains(entry.node))return conflict('ELEMENT_CHANGED','MODAL_CHANGED');
       const current = this.describe(entry.node, modal);
-      if (current.form !== entry.form || current.fingerprint !== entry.fingerprint || current.action !== entry.action || current.search?.input !== entry.search?.input || current.media?.target !== entry.media?.target || current.media?.container !== entry.media?.container) return conflict('ELEMENT_CHANGED');
+      if(current.form!==entry.form)return conflict('ELEMENT_CHANGED','FORM_CHANGED');
+      if(current.fingerprint!==entry.fingerprint || current.action!==entry.action)return conflict('ELEMENT_CHANGED','FUNCTIONAL_CHANGED');
+      if(current.search?.input!==entry.search?.input || current.media?.target!==entry.media?.target || current.media?.container!==entry.media?.container)return conflict('ELEMENT_CHANGED','TARGET_CHANGED');
       if (entry.action === 'blocked') throw new Error('REJECTED');
       const el = entry.node; this.refs.clear(); // Consume snapshot before any side effect.
       dispatched = true;
@@ -131,7 +135,7 @@ export class ContentEngine {
         } else { el.dispatchEvent(new this.win.KeyboardEvent('keydown', { key, bubbles: true })); el.dispatchEvent(new this.win.KeyboardEvent('keyup', { key, bubbles: true })); }
       } else throw new Error('REJECTED');
       return { outcome: 'OK', data: { completed: true } };
-    } catch (error) { const code = error instanceof Error ? error.message : ''; return { outcome: 'ERROR', code: ['STALE_REF', 'ACCESS_DENIED', 'REJECTED', 'TIMEOUT'].includes(code) ? code as 'REJECTED' : dispatched ? 'EXECUTION_UNKNOWN' : 'UNSUPPORTED' }; }
+    } catch (error) { const code = error instanceof Error ? error.message : ''; return { outcome: 'ERROR', code: ['STALE_REF', 'ACCESS_DENIED', 'REJECTED', 'TIMEOUT', 'CONTENT_UNAVAILABLE'].includes(code) ? code as 'REJECTED' : dispatched ? 'EXECUTION_UNKNOWN' : 'UNSUPPORTED' }; }
   }
   private async media(control: MediaControl, action: 'play' | 'pause'): Promise<Reply> {
     const result = await this.mediaState.execute(control, action);
@@ -141,6 +145,8 @@ export class ContentEngine {
     return { outcome: 'OK', data: { completed: true, paused: control.target.paused } };
   }
   private async observe(access: Access, deadlineAt: number) {
+    if(!this.win.document.body)throw new Error('CONTENT_UNAVAILABLE');
+    const documentId=this.documentId;
     this.refs.clear(); const snapshotId = this.id(); this.win.clearTimeout(this.snapshotTimer);
     const doc = this.win.document;
     const modal = this.modal(); const scope = modal ?? doc;
@@ -168,6 +174,19 @@ export class ContentEngine {
       size += JSON.stringify(info).length; if (size > 10_000) { truncated = true; break; } elements.push(info);
       this.refs.set(info.ref, { node: el, fingerprint, form, modal, search, media: mediaControl, documentId: this.documentId, snapshotId, action: info.action, href: raw.href });
     }
+    // Sample only captured nodes, not global DOM quietness or recommendation
+    // counts. Hydration can replace controls while their refs are being built.
+    if(deadlineAt-this.now()<80){this.refs.clear();throw new Error('TIMEOUT');}
+    await this.settle(80);
+    if(!this.access || this.access.scopeId!==access.scopeId || this.access.epoch!==access.epoch || this.access.session!==access.session || this.access.tabId!==access.tabId || access.expiresAt<=this.now() || access.origin!==this.win.location.origin){this.refs.clear();throw new Error('ACCESS_DENIED');}
+    if(deadlineAt<=this.now()){this.refs.clear();throw new Error('TIMEOUT');}
+    const currentModal=this.modal();
+    const stable=documentId===this.documentId && this.win.location.href===this.documentUrl && currentModal===modal && [...this.refs.values()].every(entry=>{
+      if(!entry.node.isConnected || !this.visible(entry.node))return false;
+      const current=this.describe(entry.node,currentModal);
+      return current.form===entry.form && current.fingerprint===entry.fingerprint && current.action===entry.action && current.search?.input===entry.search?.input && current.media?.target===entry.media?.target && current.media?.container===entry.media?.container;
+    });
+    if(!stable){this.refs.clear();throw new Error('CONTENT_UNAVAILABLE');}
     // Validate/build before starting the single authoritative 15-second TTL.
     const built = observationSchema.parse({ media, expiresAt: 1, tabId: access.tabId, scopeId: access.scopeId, documentId: this.documentId, snapshotId, url: displayUrl(this.win.location.href), title: privateText(doc.title), elements, truncated, ...(modal ? { dialog: { role: privateText(modal.getAttribute('role') ?? 'dialog',30), name: privateText(modal.getAttribute('aria-label') || modal.querySelector('h1,h2,h3')?.textContent || 'Dialog') } } : {}) });
     this.snapshotExpires = this.now() + 15_000; this.snapshotTimer = this.win.setTimeout(() => this.refs.clear(), 15_000);

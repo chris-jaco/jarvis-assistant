@@ -2,7 +2,8 @@ import { z } from 'zod';
 // Structural metadata only. No raw errors, origins, DOM or tool arguments.
 export const observeTraceSchema = z.object({
  boundary:z.enum(['BACKEND','EXTENSION','CONTENT']).optional(),
- stage:z.enum(['OBSERVE_AUTH','CONTENT_TRANSPORT','OBSERVE_RESULT','WORKFLOW_TRANSITION']),
+ stage:z.enum(['OBSERVE_AUTH','CONTENT_TRANSPORT','OBSERVE_RESULT','WORKFLOW_TRANSITION','ELEMENT_VALIDATION']),
+ elementDetail:z.enum(['NODE_REPLACED','NODE_NOT_VISIBLE','MODAL_CHANGED','FORM_CHANGED','FUNCTIONAL_CHANGED','TARGET_CHANGED']).optional(),
  requestId:z.string().uuid().optional(),taskId:z.string().uuid().optional(),admissionId:z.string().uuid().optional(),
  chromePermission:z.boolean().optional(),persistentPolicy:z.enum(['ALLOW','ASK','UNKNOWN']).optional(),taskGrant:z.enum(['PRESENT','MISSING','INCOMPATIBLE','EXPIRED','REVOKED']).optional(),sameOrigin:z.boolean().optional(),
  injection:z.enum(['INJECTED','FAILED','NOT_ATTEMPTED']).optional(),initialization:z.enum(['OK','FAILED','NOT_ATTEMPTED']).optional(),dispatch:z.enum(['SENT','FAILED','NOT_ATTEMPTED']).optional(),reply:z.enum(['RECEIVED','TIMEOUT','ERROR','NOT_RECEIVED']).optional(),

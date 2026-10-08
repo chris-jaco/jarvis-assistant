@@ -53,3 +53,19 @@ for(const mode of ['valid','expired','no-content'] as const)test(`backend instru
  const plain=await run(false),traced=await run(true);assert.deepEqual(traced.operations,plain.operations);assert.equal(traced.state,plain.state);assert.equal(traced.result,plain.result);assert.equal(plain.rows.length,0);assert.ok(traced.rows.some(row=>row.stage==='OBSERVE_RESULT'));assert.ok(!JSON.stringify(traced.rows).includes('PRIVATE'));assert.ok(traced.rows.every(row=>observeTraceSchema.safeParse(row).success));
  if(mode==='valid')assert.ok(traced.rows.some(row=>row.snapshotValid&&row.contextState==='READY'&&row.refCount===1&&row.bindingCoherent));else assert.ok(traced.rows.some(row=>row.stage==='WORKFLOW_TRANSITION'&&row.to==='INCONCLUSIVE'&&row.failureReason==='READ_BUDGET_EXHAUSTED'));
 });
+
+test('content transport pins init and observation to the injected Chrome document',async()=>{
+ const documentId=id(),targets:any[]=[];let messages=0;
+ const api:any={scripting:{executeScript:async()=>[{frameId:0,documentId}]},tabs:{update:async()=>{},get:async()=>({url:grant.url,status:'loading'}),sendMessage:async(_tab:any,_raw:any,target:any)=>{targets.push(target);return ++messages===1?{completed:true}:{outcome:'OK',data:snapshot()};}}};
+ assert.equal((await contentRequest(api,()=>epoch,7,grant,req())).outcome,'OK');assert.deepEqual(targets,[{documentId},{documentId}]);
+});
+for(const operation of ['observe','click'] as const)test(`lost ${operation} document reply preserves READ vs action uncertainty`,async()=>{
+ let messages=0;const api:any={scripting:{executeScript:async()=>[{frameId:0,documentId:id()}]},tabs:{update:async()=>{},get:async()=>({url:grant.url}),sendMessage:async()=>{if(++messages===1)return {completed:true};throw Error('PRIVATE_ERROR');}}};
+ const request=operation==='observe'?req():parseRequest({...req(),operation:'click',args:{scopeId:grant.scopeId,tabId:grant.tabId,documentId:id(),snapshotId:id(),ref:id()}});
+ const reply:any=await contentRequest(api,()=>epoch,7,grant,request);assert.equal(reply.code,operation==='observe'?'CONTENT_UNAVAILABLE':'EXECUTION_UNKNOWN');assert.equal(messages,2);
+});
+test('navigation begun during init prevents dispatch to a previous document',async()=>{
+ let messages=0;const api:any={scripting:{executeScript:async()=>[{frameId:0,documentId:id()}]},tabs:{update:async()=>{},get:async()=>({url:grant.url,pendingUrl:grant.origin+'/next'}),sendMessage:async()=>{++messages;return {completed:true};}}};
+ const request=parseRequest({...req(),operation:'click',args:{scopeId:grant.scopeId,tabId:grant.tabId,documentId:id(),snapshotId:id(),ref:id()}});
+ const reply:any=await contentRequest(api,()=>epoch,7,grant,request);assert.equal(reply.conflict.reason,'DOCUMENT_CHANGED');assert.equal(reply.conflict.execution,'NOT_EXECUTED');assert.equal(messages,1);
+});

@@ -13,7 +13,7 @@ const invalidate = async (tab: number, documentOnly = false) => { await chrome.t
 const sites = new SiteAuthorization(chromeSiteEnvironment(chrome), origin => controller.revokeOrigin(origin));
 const controller = new ExtensionController({
   observeAuthorization:async grant=>{const tab=await chrome.tabs.get(grant.chromeId);if(!tab.url)throw new Error();const origin=new URL(tab.url).origin;return {...await sites.diagnosticStatus(origin),sameOrigin:origin===grant.origin};},
-  tab: async id => { const tab = await chrome.tabs.get(id); return { id, url: tab.url ?? '', title: tab.title, status: tab.status }; },
+  tab: async id => { const tab = await chrome.tabs.get(id); return { id, url: tab.url ?? '', title: tab.title, status: tab.status, pendingUrl: tab.pendingUrl }; },
   current: async () => { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (tab?.id === undefined) throw new Error('ACCESS_DENIED'); return { id: tab.id, url: tab.url ?? '', title: tab.title ?? '' }; },
   create: async url => { const tab = await chrome.tabs.create({ url, active: true }); if (tab.id === undefined) throw new Error('UNSUPPORTED'); return tab.id; },
   activate: async id => { await chrome.tabs.update(id, { active: true }); },

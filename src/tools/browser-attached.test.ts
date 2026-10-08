@@ -926,3 +926,31 @@ for(const stop of ['abort','revoke'] as const)test(`post-click READ wait checks 
    assert.equal(result.action.status,'COMPLETED');assert.equal(result.actionOutcome!.execution,'EXECUTED');assert.equal(result.observation.status,'FAILED');assert.equal(clicks,1);assert.equal(reads,1);
  });}finally{await provider.close();h.close();}
 });
+
+test('sparse interactive page is valid; hydration during snapshot construction is withheld, then fresh controls are usable',async()=>{
+ const f=fixture('<form method="get" action="/search"><input type="search" aria-label="Search"><button>Search</button></form><a href="/menu">Menu</a><main></main>');let hydrate=true;
+ const engine=new ContentEngine(f.dom.window as unknown as Window&typeof globalThis,Date.now,id,async()=>{
+   if(hydrate){hydrate=false;const input=f.dom.window.document.querySelector('input')!;input.replaceWith(input.cloneNode(true));for(let n=0;n<23;n++)f.dom.window.document.querySelector('main')!.insertAdjacentHTML('beforeend',`<a href="/result-${n}">Result ${n}</a>`);}
+ });engine.initialize(f.access);
+ const observe=()=>engine.run('observe',{scopeId:f.access.scopeId,tabId:f.access.tabId},Date.now()+15000,{session,epoch});
+ try{
+   assert.deepEqual(await observe(),{outcome:'ERROR',code:'CONTENT_UNAVAILABLE'});
+   const seen:any=await observe();assert.equal(seen.outcome,'OK');assert.equal(seen.data.elements.length,26);
+   const ref=seen.data.elements.find((el:any)=>el.role==='searchbox').ref;
+   const binding={scopeId:f.access.scopeId,tabId:f.access.tabId,documentId:seen.data.documentId,snapshotId:seen.data.snapshotId,ref};
+   assert.equal((await engine.run('type',{...binding,text:'music',mode:'replace'},Date.now()+15000,{session,epoch})).outcome,'OK');
+   assert.equal((await engine.run('type',{...binding,text:'music',mode:'replace'},Date.now()+15000,{session,epoch}) as any).conflict.reason,'SNAPSHOT_CONSUMED');
+   f.dom.window.document.querySelector('main')!.replaceChildren();const sparse:any=await observe();assert.equal(sparse.outcome,'OK');assert.equal(sparse.data.elements.length,3);
+ }finally{engine.destroy();f.close();}
+});
+
+test('FAILED remains terminal across status/tabs diagnostics; only new admission changes the task state',async()=>{
+ const h=harness();const base=h.transport;const provider=new AttachedChromeProvider({...base,request:async(c,req,abort)=>req.operation==='type'?{outcome:'ERROR',code:'REJECTED'}:base.request(c,req,abort)});const adapter=new BrowserAdapter(provider);
+ const invoke=(name:string,input:unknown={})=>adapter.inSession(session,()=>adapter.tools().find(t=>t.id==='browser.'+name)!.execute(input,signal()));
+ await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await adapter.inSession(session,async()=>{await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);});
+ const seen:any=await invoke('observe');await assert.rejects(invoke('type',{ref:seen.elements[0].ref,text:'music',mode:'replace'}),/REJECTED/);assert.equal(adapter.state(session)!.executionState,'FAILED');
+ await invoke('status');assert.equal(adapter.state(session)!.executionState,'FAILED');await invoke('tabs');assert.equal(adapter.state(session)!.executionState,'FAILED');
+ await adapter.inSession(session,()=>adapter.admitGoal(id(),'Buscá otra cosa'));assert.equal(adapter.state(session)!.executionState,'TASK_ACCEPTED');await invoke('status');assert.equal(adapter.state(session)!.executionState,'TASK_ACCEPTED');
+ }finally{await provider.close();h.close();}
+});

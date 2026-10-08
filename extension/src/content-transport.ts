@@ -13,26 +13,36 @@ async function contentRequestCore(api: Pick<typeof chrome, 'tabs' | 'scripting'>
     if (epoch() !== request.connectionEpoch || request.deadlineAt <= Date.now()) return { outcome: 'ERROR', code: 'ACCESS_DENIED' };
     await api.tabs.update(id, { active: true });
     stage = performance.now();phase='INJECTION';
-    await api.scripting.executeScript({ target: { tabId: id, frameIds: [0] }, world: 'ISOLATED', files: ['content.js'] });
+    const injected=await api.scripting.executeScript({ target: { tabId: id, frameIds: [0] }, world: 'ISOLATED', files: ['content.js'] });
+    const documentId=injected?.find(row=>row.frameId===0)?.documentId;
+    const target=documentId?{documentId}:{frameId:0};
     injection='INJECTED';phase='INIT';
     timings.injectionMs = elapsed(); stage = performance.now();
     if (epoch() !== request.connectionEpoch || request.deadlineAt <= Date.now()) return { outcome: 'ERROR', code: 'ACCESS_DENIED', timings };
-    const initialized = await api.tabs.sendMessage(id, { kind: 'init', access: { scopeId: grant.scopeId, tabId: grant.tabId, session: grant.session, epoch: request.connectionEpoch, origin: grant.origin, expiresAt: grant.expiresAt } }, { frameId: 0 });
+    const initialized = await api.tabs.sendMessage(id, { kind: 'init', access: { scopeId: grant.scopeId, tabId: grant.tabId, session: grant.session, epoch: request.connectionEpoch, origin: grant.origin, expiresAt: grant.expiresAt } }, target);
     if (initialized?.completed !== true) throw new Error();
+    // Recheck navigation after initialization, before any action dispatch.
+    // Messaging is pinned to the injected document when Chrome provides its ID.
+    if(epoch()!==request.connectionEpoch || request.deadlineAt<=Date.now() || grant.expiresAt<=Date.now())return {outcome:'ERROR',code:'ACCESS_DENIED',timings};
+    const current=await api.tabs.get(id);
+    if(current.pendingUrl)return request.operation==='observe'?{outcome:'ERROR',code:'CONTENT_UNAVAILABLE',timings}:{outcome:'ERROR',code:'STALE_REF',conflict:{reason:'DOCUMENT_CHANGED',execution:'NOT_EXECUTED'},timings};
+    if(current.url&&new URL(current.url).origin!==grant.origin)return {outcome:'REQUIRES_USER_INTERACTION',handoffId:crypto.randomUUID(),reason:'ORIGIN_PERMISSION',timings};
     initialization='OK';phase='MESSAGE';
     timings.initializationMs = elapsed(); stage = performance.now();
     dispatched = true;
     trace({stage:'CONTENT_TRANSPORT',injection,initialization,dispatch:'SENT',reply:'NOT_RECEIVED'});
-    const raw=await api.tabs.sendMessage(id, request, { frameId: 0 });phase='VALIDATION';
+    const raw=await api.tabs.sendMessage(id, request, target);phase='VALIDATION';
     trace({stage:'CONTENT_TRANSPORT',injection,initialization,dispatch:'SENT',reply:'RECEIVED'});
     if(request.observeTrace&&request.operation==='observe')trace({stage:'OBSERVE_RESULT',...observationFacts(raw?.data),snapshotValid:observationSchema.safeParse(raw?.data).success,bindingCoherent:raw?.data?.tabId===grant.tabId&&raw?.data?.scopeId===grant.scopeId,outcome:raw?.outcome});
     const reply = replySchema.parse(raw);
-    return { ...reply, timings: { ...reply.timings, ...timings, returnMs: Math.max(0, elapsed() - (reply.timings?.observationBuildMs ?? 0)) } };
+    for(const row of reply.observeTrace??[])trace(row);
+    const {observeTrace:_nested,...semantic}=reply;
+    return { ...semantic, timings: { ...reply.timings, ...timings, returnMs: Math.max(0, elapsed() - (reply.timings?.observationBuildMs ?? 0)) } };
   } catch (error) {
     const timed=error instanceof Error&&['TimeoutError','AbortError'].includes(error.name);
     if(phase==='INJECTION')injection='FAILED';if(phase==='INIT')initialization='FAILED';
     trace({stage:'CONTENT_TRANSPORT',injection,initialization,dispatch:dispatched?'SENT':'NOT_ATTEMPTED',reply:phase==='VALIDATION'?'RECEIVED':dispatched?timed?'TIMEOUT':'ERROR':'NOT_RECEIVED',failureReason:timed?'TIMEOUT':phase==='ACTIVATION'?'TAB_UNAVAILABLE':phase==='INJECTION'?'INJECTION_FAILED':phase==='INIT'?'INIT_REJECTED':phase==='VALIDATION'?'REPLY_INVALID':'MESSAGING_FAILED'});
-    if (dispatched) return { outcome: 'ERROR', code: 'EXECUTION_UNKNOWN', timings };
+    if (dispatched && request.operation!=='observe') return { outcome: 'ERROR', code: 'EXECUTION_UNKNOWN', timings };
     const tab = await api.tabs.get(id).catch(() => undefined);
     if (tab?.url) {
       try { if (new URL(tab.url).origin !== grant.origin) return { outcome: 'REQUIRES_USER_INTERACTION', handoffId: crypto.randomUUID(), reason: 'ORIGIN_PERMISSION', timings }; } catch { /* No proven origin change. */ }
@@ -43,7 +53,7 @@ async function contentRequestCore(api: Pick<typeof chrome, 'tabs' | 'scripting'>
 }
 
 export async function contentRequest(api: Pick<typeof chrome, 'tabs' | 'scripting'>, epoch: () => string | undefined, id: number, grant: Grant, request: Request): Promise<Reply> {
- const rows:ObserveTrace[]=[];const trace=observeTracer(request.observeTrace===true&&request.operation==='observe',row=>{if(rows.length<10)rows.push({...row,boundary:'CONTENT'});});
+ const rows:ObserveTrace[]=[];const trace=observeTracer(request.observeTrace===true,row=>{if(rows.length<10)rows.push({...row,boundary:'CONTENT'});});
  const reply=await contentRequestCore(api,epoch,id,grant,request,trace);
  return rows.length?{...reply,observeTrace:rows}:reply;
 }

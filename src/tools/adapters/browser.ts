@@ -19,7 +19,7 @@ const url = z.string().url().max(2000);
 export class BrowserAdapter implements ToolAdapter {
   private confirmations=new Set<string>();
   acknowledge(receipt:ContinuationReceipt):void {if(this.provider instanceof AttachedChromeProvider)this.provider.acknowledge(receipt);}
-  async admitGoal(admission:string,utterance?:string):Promise<void> {if(this.provider instanceof AttachedChromeProvider)await this.provider.admitGoal(admission,utterance,this.executionStates.get(this.executionScope.getStore()??'')??'RUNNING');}
+  async admitGoal(admission:string,utterance?:string):Promise<void> {if(this.provider instanceof AttachedChromeProvider && await this.provider.admitGoal(admission,utterance,this.executionStates.get(this.executionScope.getStore()??'')??'RUNNING'))this.mark('TASK_ACCEPTED');}
   cancelFromUser():void {if(this.provider instanceof AttachedChromeProvider)this.provider.cancelFromUser();}
   private presentations=new Map<string,{signature:string;revision:number}>();
   private executionScope = new AsyncLocalStorage<string>();
@@ -45,7 +45,8 @@ export class BrowserAdapter implements ToolAdapter {
     const tool = (id: string, description: string, schema: z.ZodType, execute: ToolDefinition['execute'], read = false): ToolDefinition => ({ id: `browser.${id}`, name: `browser_${id}`, description, integration: this.integration, capability: id, permission: read ? 'READ' : 'WRITE', confirm: false, schema, timeoutMs: 18_000, execute: (input, signal) => this.diagnostics.run('adapter', async () => {
       const sessionId=this.executionScope.getStore() ?? '';const confirmation=this.confirmations.has(sessionId);
       const before=this.state(sessionId,confirmation);const taskId=before?.taskId;
-      this.mark('RUNNING');
+      const diagnostic=id==='status'||id==='tabs';
+      if(!diagnostic)this.mark('RUNNING');
       const abort = this.diagnostics.capture('execution_abort', 'TIMEOUT');
       signal.addEventListener('abort', abort, { once: true });
       try {
@@ -64,8 +65,8 @@ export class BrowserAdapter implements ToolAdapter {
             return {...recovered,browserTimings:this.provider.measurements()};
           }
         }
-        if(attachedTerminal(error)&&this.provider instanceof AttachedChromeProvider)this.provider.terminalFailure();
-        if (error instanceof BrowserWorkflow) { this.mark(error.reply.outcome === 'ACCESS_PENDING' ? 'WAITING_ACCESS' : 'WAITING_MANUAL'); return { browserState: error.reply }; } this.mark(error instanceof ToolError && error.browserRecovery?.recoverable ? 'RUNNING' : 'FAILED'); this.diagnostics.event('provider_result', error instanceof ToolError ? browserCode(error.category) : 'UPSTREAM'); if (error instanceof ToolError && this.provider instanceof AttachedChromeProvider) { this.diagnostics.metadata(this.provider.measurements(), error.browserRecovery?.reason); throw new ToolError(error.category, error.browserRecovery, error.browserObservation, this.provider.measurements()); } throw error; }
+        if(!diagnostic&&attachedTerminal(error)&&this.provider instanceof AttachedChromeProvider)this.provider.terminalFailure();
+        if (error instanceof BrowserWorkflow) { this.mark(error.reply.outcome === 'ACCESS_PENDING' ? 'WAITING_ACCESS' : 'WAITING_MANUAL'); return { browserState: error.reply }; } if(!diagnostic)this.mark(error instanceof ToolError && error.browserRecovery?.recoverable ? 'RUNNING' : 'FAILED'); this.diagnostics.event('provider_result', error instanceof ToolError ? browserCode(error.category) : 'UPSTREAM'); if (error instanceof ToolError && this.provider instanceof AttachedChromeProvider) { this.diagnostics.metadata(this.provider.measurements(), error.browserRecovery?.reason); throw new ToolError(error.category, error.browserRecovery, error.browserObservation, this.provider.measurements()); } throw error; }
       finally { signal.removeEventListener('abort', abort); }
     }, signal) });
     const tools = [

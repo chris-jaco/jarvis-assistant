@@ -7,7 +7,7 @@ import { siteOrigin } from './site-authorization.js';
 import type { SiteAuthorization } from './site-authorization.js';
 export interface Surface {
   observeAuthorization?(grant:Grant):Promise<Pick<ObserveTrace,'chromePermission'|'persistentPolicy'|'sameOrigin'>>;
-  tab?(id: number): Promise<{ id: number; url?: string; title?: string; status?: string }>;
+  tab?(id: number): Promise<{ id: number; url?: string; title?: string; status?: string; pendingUrl?: string }>;
   current(): Promise<{ id: number; url: string; title: string }>;
   create(url: string): Promise<number>;
   activate(tab: number): Promise<void>;
@@ -51,7 +51,18 @@ export class ExtensionController {
       const queueMs = Math.min(30_000, Math.max(0, Math.round(performance.now() - queuedAt)));
       const rows:ObserveTrace[]=[];const trace=observeTracer(request.observeTrace===true&&request.operation==='observe',row=>rows.push(row));
       const decorate=(reply:Reply):Reply=>rows.length?{...reply,observeTrace:[...rows,...(reply.observeTrace??[])].slice(0,12)}:reply;
-      try { this.check(request); if(request.observeTrace&&request.operation==='observe')await this.observeAuthorization(request,trace); const reply = await this.execute(request,trace); if (!['endSession', 'endTask'].includes(request.operation)) this.check(request); return replySchema.parse(decorate({ ...reply, timings: { ...reply.timings, queueMs } })); }
+      try { this.check(request); if(request.observeTrace&&request.operation==='observe')await this.observeAuthorization(request,trace); const readyUntil=Math.min(request.deadlineAt,this.now()+2000);
+        let reply = await this.execute(request,trace);
+        // Only observation/readiness is repeated. execute() rechecks every scope
+        // and permission before injection; actions never enter this loop.
+        for(let attempt=0;request.operation==='observe' && attempt<2 && reply.outcome==='ERROR' && reply.code==='CONTENT_UNAVAILABLE' && this.now()<readyUntil;++attempt){
+          const failed=reply.observeTrace?.slice().reverse().find(row=>row.failureReason&&row.failureReason!=='NONE');
+          trace(failed??{stage:'CONTENT_TRANSPORT',boundary:'EXTENSION',failureReason:'DOCUMENT_INITIALIZING'});
+          await this.pause(Math.min(attempt===0?500:1000,readyUntil-this.now()));
+          this.check(request);
+          if(this.now()>=readyUntil)break;
+          reply=await this.execute(request,trace);
+        } if (!['endSession', 'endTask'].includes(request.operation)) this.check(request); return replySchema.parse(decorate({ ...reply, timings: { ...reply.timings, queueMs } })); }
       catch (error) { const code = error instanceof Error ? error.message : ''; return decorate({ outcome: 'ERROR', code: ['TIMEOUT', 'ACCESS_DENIED', 'EXPIRED', 'STALE_REF', 'REJECTED'].includes(code) ? code as 'REJECTED' : 'UNSUPPORTED' }); }
     });
     this.tail = result; this.results.set(request.requestId, { signature, result, session: request.backendSessionId }); return result;
@@ -224,25 +235,11 @@ export class ExtensionController {
     if (['back', 'forward', 'reload'].includes(request.operation)) { this.check(request); await this.surface.invalidate(grant.chromeId).catch(() => {}); await this.surface.history(grant.chromeId, request.operation as 'back'); return { outcome: 'OK', data: { completed: true } }; }
     if (this.surface.tab) {
       let tab = await this.surface.tab(grant.chromeId);
-      // Chrome marks a new document loading before its content boundary is ready.
-      // Wait inside ONE READ; do not burn the backend recovery budget polling it.
-      // Never retry the navigation/action that caused this transition.
-      const readyDeadline = Math.min(request.deadlineAt, this.now() + 2000);
-      if (request.operation === 'observe' && tab.status === 'loading') {
+      // A pending navigation still exposes the previous committed document.
+      // Loading subresources alone does NOT make the current document unusable.
+      if (tab.pendingUrl) {
         trace({stage:'CONTENT_TRANSPORT',boundary:'EXTENSION',dispatch:'NOT_ATTEMPTED',failureReason:'DOCUMENT_INITIALIZING'});
-        for (let poll=0; poll<20 && tab.status==='loading' && tab.url && siteOrigin(tab.url)===grant.origin && this.now()<readyDeadline; ++poll) {
-          await this.pause(Math.min(100, readyDeadline-this.now()));
-          this.check(request);
-          if (!this.grants.has(grant.scopeId) || grant.suspended || grant.handoff || grant.expiresAt<=this.now()) throw new Error('ACCESS_DENIED');
-          tab = await this.surface.tab(grant.chromeId);
-        }
-        this.check(request);
-        if (!this.grants.has(grant.scopeId) || grant.expiresAt<=this.now()) throw new Error('ACCESS_DENIED');
-        if (grant.persistent && !await this.sites?.allows(grant.origin)) { await this.revokeOrigin(grant.origin); throw new Error('ACCESS_DENIED'); }
-      }
-      if (tab.status === 'loading' && tab.url && siteOrigin(tab.url)===grant.origin) {
-        trace({stage:'CONTENT_TRANSPORT',boundary:'EXTENSION',dispatch:'NOT_ATTEMPTED',failureReason:'DOCUMENT_INITIALIZING'});
-        return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};
+        return request.operation==='observe' ? {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'} : {outcome:'ERROR',code:'STALE_REF',conflict:{reason:'DOCUMENT_CHANGED',execution:'NOT_EXECUTED'}};
       }
       if (!tab.url || siteOrigin(tab.url) !== grant.origin) {
         const changed = await this.transition(grant,request,tab.url ? siteOrigin(tab.url) : undefined,tab.title ?? '');
@@ -255,6 +252,14 @@ export class ExtensionController {
     const contentRequest = request.operation === 'observe' ? {...request,args:{...args,scopeId:grant.scopeId,tabId:grant.tabId}} : request;
     const result = await this.surface.content(grant.chromeId, grant, contentRequest);
     if (!this.grants.has(grant.scopeId)) return {outcome:'ERROR',code:request.operation === 'observe' ? 'ACCESS_DENIED' : 'EXECUTION_UNKNOWN'};
+    if(request.operation==='observe'){
+      this.check(request);
+      if(grant.expiresAt<=this.now()||grant.suspended)throw new Error('ACCESS_DENIED');
+      if(grant.persistent&&!await this.sites?.allows(grant.origin)){await this.revokeOrigin(grant.origin);throw new Error('ACCESS_DENIED');}
+      const current=await this.surface.tab?.(grant.chromeId);
+      if(current?.pendingUrl)return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};
+      if(current?.url&&siteOrigin(current.url)!==grant.origin)return (await this.transition(grant,request,siteOrigin(current.url),current.title)).reply??{outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};
+    }
     if (result.outcome === 'REQUIRES_USER_INTERACTION' && result.reason === 'ORIGIN_PERMISSION') {
       const tab = await this.surface.tab?.(grant.chromeId).catch(() => undefined);
       return (await this.transition(grant,request,tab?.url ? siteOrigin(tab.url) : undefined,tab?.title)).reply ?? {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};
