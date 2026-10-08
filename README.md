@@ -1,6 +1,10 @@
-# Atlas V0.4.4 — Voice-first identity and interface
+# Atlas V0.5.2 — Browser Control sobre Chrome adjunto
 
-Asistente personal por voz: TypeScript strict, Node HTTP nativo, interfaz sin framework, OpenAI Realtime y WebRTC. V0.4.4 cambia la identidad a Atlas y la experiencia visual sobre la base aceptada V0.4.3 en `v0.4-memory`. Las secciones anteriores de versiones describen la evolución de herramientas, Gmail y memoria. La arquitectura validada, las credenciales y los tags anteriores se conservan. Esta versión requiere aceptación de voz local antes de publicarse como release.
+Asistente personal por voz: TypeScript strict, Node HTTP nativo, interfaz sin framework, OpenAI Realtime y WebRTC. V0.5.2 incorpora Browser Control sobre Chrome habitual mediante extensión MV3 y Native Messaging, autorización persistente por origen, grants por tarea, Search/Media y recuperación de contexto con snapshots/ref validados. Conserva voz, herramientas, Gmail y memoria de las versiones anteriores.
+
+Implementación completada y acceptance real aprobado en Windows/Chrome sobre `05f5db5603a0b7e18c6e6c364210130e19e36ff7`: «Atlas, poné un set de Guy J en YouTube que dure más de tres horas» encontró y reprodujo un video de 4 h 26 min en un único turno, sin reintentos conversacionales. La verificación final de reproducción puede seguir siendo inconclusa; una acción ejecutada no se convierte en fallida por esa incertidumbre ni se repite para comprobarla. El tag y la publicación de la release son pasos separados.
+
+**V0.5.3 — Consequential Browser Actions no está implementada.** No se habilitan Send/Publish/Buy/Delete ni envíos de WhatsApp mediante Browser Control. El consentimiento de sitio nunca sustituye la confirmación de acciones sensibles.
 
 ## Instalar y ejecutar
 
@@ -1055,8 +1059,8 @@ es la seleccionada por Atlas; cambiarla a mano en Chrome no cambia esa selecció
 Todas usan schemas estrictos. Observación y listado son READ; las interacciones
 reversibles son WRITE sin confirmación en esta versión. **Esta clasificación no
 habilita acciones consecuenciales**: el provider aplica su política además del
-executor. V0.5.1 podrá preparar acciones con el sistema de aprobación existente;
-V0.5.0 no contiene una vía para aprobar/enviar/comprar.
+executor. V0.5.2 no habilita acciones DOM consecuenciales genéricas; su eventual
+flujo de preparación/confirmación corresponde a V0.5.3, todavía no implementada.
 
 `observe` devuelve URL sin query/fragment, título acotado y hasta 40 controles
 visibles (10.000 caracteres de elementos), con role/nombre/tipo/estado/ref y clase
@@ -1185,7 +1189,7 @@ y el watcher del perfil, pero las mejoras exactas deben medirse nuevamente en
 Windows con `BROWSER_TRACE=true` (desactivado por defecto). No se atribuye toda
 la duración de launch al watcher sin una medición posterior.
 
-## V0.5.1 — Attached Chrome (acceptance Windows pendiente)
+## V0.5.2 — Attached Chrome (validada en Windows)
 
 Atlas puede usar una pestaña de tu Chrome habitual mediante extensión MV3 y
 Native Messaging, con autorización explícita por tarea/sesión y revocable.
@@ -1195,19 +1199,20 @@ sin fallback automático. La extensión usa `activeTab`, `scripting`, `nativeMes
 preferencias propias; declara `optional_host_permissions: ["https://*/*"]` y
 solicita cada sitio HTTPS individualmente mediante un gesto en el popup. No cierra Chrome ni tus tabs al desconectar Atlas.
 
+Atlas y la extensión se identifican como **0.5.2**. El Native Messaging Host compatible conserva la instalación **0.5.1**, la identidad `com.atlas.browser_bridge` y el protocolo `atlas.browser/1`. No cambia su binario ni su ruta; una instalación funcional no requiere reinstalación. Tras actualizar, ejecutá build, recargá extensión/tabs y reiniciá Atlas.
+
 La instalación manual Windows, configuración, protocolo, límites de seguridad,
 reconexión, uninstall y pruebas A–L están en
-[docs/browser-attached.md](docs/browser-attached.md). Los tests automatizados no
-constituyen acceptance de tu Chrome real; V0.5.1 todavía no está publicada como
-release. Una autorización de tab y una reanudación “listo” nunca sustituyen las
+[docs/browser-attached.md](docs/browser-attached.md). El acceptance real Windows/Chrome está aprobado; los tests automatizados
+complementan esa evidencia y no garantizan soporte de cualquier control custom. Una autorización de tab y una reanudación “listo” nunca sustituyen las
 confirmaciones de acciones consecuenciales existentes.
 
-V0.5.2.1 (working tree, acceptance Windows pendiente): separa ejecución de
+La estabilización incluida en V0.5.2 (commits de desarrollo V0.5.2.1): separa ejecución de
 verificación, aplica silencio RUNNING en audio/transcript y añade diagnostics
 opt-in del popup. La admisión permite un único acknowledgement inicial opcional; luego RUNNING y RECOVERING_CONTEXT son silenciosos. No añade una ronda para la conversación ordinaria.
-Contrato, configuración y límites en [browser-attached.md](docs/browser-attached.md#v0521--estabilización-de-resultados-y-presentación).
+Contrato, configuración y límites en [browser-attached.md](docs/browser-attached.md#estabilización-de-resultados-y-presentación).
 
-La estabilización adicional (pendiente de acceptance Windows) conserva el playback
+La estabilización adicional validada en Windows conserva el playback
 ya admitido al crear respuestas internas. Las continuaciones llevan metadata de
 presentación; un turno explícito tiene su propia elegibilidad audible, sin habilitar
 narración RUNNING. Contexto fresco validado satisface la recuperación READ sin
@@ -1216,7 +1221,7 @@ scope, caducidad y consentimiento; una nueva admisión no hereda contexto agotad
 ni pruebas de completion. EXECUTION_UNKNOWN permanece bloqueado. BROWSER_TRACE
 sigue desactivado por defecto.
 
-### Browser task lifecycle stabilization (unreleased)
+### Browser task lifecycle stabilization
 
 A response ending, an acknowledgement ending, a tool returning and an observation
 returning do **not** end a browser task. One optional initial acknowledgement is a
@@ -1280,7 +1285,7 @@ sanitized workflow outcomes/reasons. They omit arguments, page data, titles, URL
 written values and credentials. No extension permission, site policy, Search/Media,
 Native Messaging or consequential-action confirmation changes are required.
 
-Minimum Windows acceptance after publishing this patch separately:
+Windows regression acceptance checklist:
 
 1. Start attached mode; request a multi-step search/play task. Expect at most one
    brief acknowledgement, then silence while tools run.
@@ -1293,7 +1298,7 @@ Minimum Windows acceptance after publishing this patch separately:
 5. If a premature closure is diagnosed, expect OBJECTIVE_PENDING and continuation,
    not a final answer or scope teardown. Repeat with tracing enabled only when needed.
 
-### Temporary browser runtime trace (unreleased, instrumentation only)
+### Browser runtime diagnostics (opt-in)
 
 `BROWSER_TRACE` remains false by default. When enabled locally, collect
 `[ATLAS browser task]` alongside `[ATLAS browser]`: backend events appear in the
@@ -1331,7 +1336,7 @@ For the acknowledgement-cut investigation, compare PRESENTATION with
 `muteReason=RESPONSE_CREATED` against PLAYBACK for the earlier response. Capture
 both consoles; the browser-side lifecycle is not printed in PowerShell.
 
-### OBSERVE boundary diagnostics (unreleased)
+### OBSERVE boundary diagnostics
 
 With `BROWSER_TRACE=true`, the backend prints `[ATLAS browser observe]` rows:
 `OBSERVE_AUTH`, `CONTENT_TRANSPORT`, `OBSERVE_RESULT`, `WORKFLOW_TRANSITION`.

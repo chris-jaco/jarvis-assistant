@@ -1,6 +1,14 @@
-# ATLAS V0.5.1 — Chrome personal (acceptance pendiente)
+# ATLAS V0.5.2 — Chrome personal (validada en Windows)
 
-Esta implementación está preparada para pruebas reales en Windows, no constituye un release aceptado. Los tests de Chromium usan fixtures y los del host usan procesos .NET reales; no prueban la instalación HKCU ni el permiso `activeTab` de tu Chrome en Windows.
+La implementación V0.5.2 está completada y su acceptance real en Windows/Chrome fue aprobado sobre `05f5db5603a0b7e18c6e6c364210130e19e36ff7`. El pedido «Atlas, poné un set de Guy J en YouTube que dure más de tres horas» encontró y reprodujo un video de 4 h 26 min en un único turno, sin reintentos conversacionales. También se validaron autorización persistente, cross-origin y Search/Media en acceptance previos. Los tests de fixtures no sustituyen esas pruebas reales ni garantizan todos los controles custom.
+
+Limitación conocida: la verificación final de reproducción puede quedar inconclusa aunque la acción haya tenido efecto. Atlas conserva esa incertidumbre sin inventar éxito ni repetir acciones ejecutadas. **V0.5.3 — Consequential Browser Actions no está implementada**, incluido WhatsApp Send. Este documento prepara la release; no implica que ya exista el tag o publicación.
+
+## Compatibilidad del host
+
+El paquete Atlas y la extensión usan **0.5.2**. El Native Messaging Host mantiene la versión de instalación independiente **0.5.1**, el protocolo `atlas.browser/1` y la identidad `com.atlas.browser_bridge`. Es el mismo host compatible validado con Atlas V0.5.2: no se cambia el binario, el instalador, la ruta `%LOCALAPPDATA%\Atlas\BrowserBridge\0.5.1` ni el registro. Una instalación funcional **no requiere reinstalar el host**. La versión de instalación no es una nueva versión de assembly .NET.
+
+Para actualizar Atlas: git pull, `npm ci`, `npm run build`, recargar la extensión desde la misma carpeta `dist/extension`, recargar las tabs autorizadas y reiniciar Atlas. Conservá el ID real y `ATLAS_BROWSER_HOST_PATH` actuales. Si movés/reinstalás la extensión y cambia su ID, sí necesitás volver a registrar el host con ese ID; no es una migración exigida por V0.5.2.
 
 ## Arquitectura
 
@@ -57,7 +65,7 @@ Para una pestaña existente: seleccioná la pestaña de trabajo y pedí a Atlas 
 
 En navegación del mismo origen, los refs anteriores quedan invalidados y se exige otra observación; el grant permanece. En cross-origin se verifican conjuntamente permiso Chrome y política Atlas ALLOW para el origin exacto de destino. ALLOW rota el scope, conserva la identidad de tab y su expiración, y requiere refs nuevas. ASK suspende el acceso y emite ACCESS_PENDING; seleccioná la tab, abrí el popup y autorizá el origin real. Si un redirect termina en un tercer origin se vuelve a evaluar, sin heredar permiso ni observar contenido no autorizado. La navegación ya ejecutada conserva COMPLETED aunque su auto-observe requiera permiso: no se repite para continuar. Nunca se renueva CAPTCHA/MFA con consentimiento de sitio. Reiniciar Atlas o desconectar voz termina grants de sesión y deja Chrome abierto; no hay `browser.close` en attached.
 
-`ACCESS_PENDING` autoriza una pestaña; `REQUIRES_USER_INTERACTION` pausa automatización; las confirmaciones consecuenciales existentes siguen siendo otra autoridad. Ninguna aprobación del popup ni “listo” aprueba Calendar/Gmail/Memory ni una acción sensible. V0.5.1 **no ofrece clicks DOM consecuenciales genéricos**, ni siquiera mediante un grant.
+`ACCESS_PENDING` autoriza una pestaña; `REQUIRES_USER_INTERACTION` pausa automatización; las confirmaciones consecuenciales existentes siguen siendo otra autoridad. Ninguna aprobación del popup ni “listo” aprueba Calendar/Gmail/Memory ni una acción sensible. V0.5.2 **no ofrece clicks DOM consecuenciales genéricos**, ni siquiera mediante un grant.
 
 ## Observación y controles
 
@@ -152,7 +160,7 @@ Si una llamada llega antes de conectar Chrome, espera el primer canal hasta cinc
 
 Este fix sólo cambia backend/tests/docs. Para `npm run dev`, basta `git pull --ff-only origin v0.5-browser-control` + reiniciar Atlas. No requiere npm install, rebuild/reload de la extensión ni reinstalar el host. Para ejecutar producción con `npm start`, recompilá el backend con `npm run build`.
 
-## Fase 2 — Search + Media (acceptance pendiente)
+## Search + Media (validada en Windows)
 
 La Fase 1 fue aceptada en Windows en `a79d499`. Esta ampliación conserva su orquestador, grants, TTL, refs, deduplicación y recovery. No cambia Native Messaging, permisos, autorización persistente, compositor/Send de WhatsApp ni acciones consecuenciales. Requiere build coordinado de backend/extensión, reload de extensión y de las tabs para reemplazar content scripts. No requiere reinstalar el native host.
 
@@ -166,7 +174,7 @@ Capacidades: TYPE_SEARCH, SUBMIT_SEARCH, OPEN_LINK, PLAY, PAUSE, SKIP_AD. Clasif
 
 MEDIA_USER_GESTURE se reserva al rechazo NotAllowedError real de media.play(). Otros errores multimedia no se convierten en un supuesto bloqueo por gesto. Un Play sintético ignorado deja el estado observable sin inventar éxito. Atlas sólo afirma reproducción cuando PLAYING está observado y no confunde un anuncio detectado con la canción. Sin evidencia suficiente informa la limitación; no promete un salto futuro después de terminar la tarea.
 
-Acceptance Windows tras publicar estos cambios: build, reload extensión y tabs, restart Atlas, autorizar pestaña. A: «Atlas, abrí YouTube y poné una canción de Avicii»: buscar, elegir resultado coherente, verificar reproducción; si hay anuncio, polling silencioso y un solo salto explícito cuando sea posible. B: «Pausá» / «Seguí reproduciendo»: verificar PAUSED/PLAYING. C: «Poné otra canción de Avicii»: elegir otra sin loops ni repetir acciones completadas. D: fixture/app SPA genérica con role=search y Enter/botón asociado: mismo flujo sin lógica específica de YouTube. Anuncio no skippable permanece intacto; CAPTCHA/MFA/auth conservan intervención manual. Si advertisement queda UNKNOWN registrar esa limitación, sin asumir que no hubo anuncio.
+Checklist de regresión Windows: build, reload extensión y tabs, restart Atlas, autorizar pestaña. A: «Atlas, abrí YouTube y poné una canción de Avicii»: buscar, elegir resultado coherente, verificar reproducción; si hay anuncio, polling silencioso y un solo salto explícito cuando sea posible. B: «Pausá» / «Seguí reproduciendo»: verificar PAUSED/PLAYING. C: «Poné otra canción de Avicii»: elegir otra sin loops ni repetir acciones completadas. D: fixture/app SPA genérica con role=search y Enter/botón asociado: mismo flujo sin lógica específica de YouTube. Anuncio no skippable permanece intacto; CAPTCHA/MFA/auth conservan intervención manual. Si advertisement queda UNKNOWN registrar esa limitación, sin asumir que no hubo anuncio.
 
 
 ## Autorización persistente y ejecución silenciosa
@@ -175,7 +183,7 @@ Tres controles independientes deben permitir cada operación: Chrome permite iny
 
 El popup muestra **Sitios permitidos**, cada origin ALLOW y **Revocar**. Revocar bloquea antes de hacer I/O, elimina la preferencia y el permiso Chrome e invalida grants, refs y solicitudes relacionadas. Si Chrome elimina el permiso externamente, la reconciliación elimina ALLOW y aplica la misma invalidación. Una nueva concesión de Chrome por sí sola no recrea ALLOW. Una preferencia corrupta/fallo de persistencia falla cerrado. El popup muestra un error si no puede completar la revocación persistente; el bloqueo en memoria se mantiene. Tras restart sólo se reconcilian metadatos de permisos; no se inyecta ni observa ninguna página hasta una solicitud explícita de tarea.
 
-La extensión sigue siendo autoridad de consentimiento, el backend autoridad de tarea/acciones/confirmaciones. Los estados expuestos incluyen TASK_ACCEPTED, RUNNING, RECOVERING_CONTEXT, WAITING_ACCESS, WAITING_CONFIRMATION, WAITING_MANUAL, COMPLETED, FAILED e INCONCLUSIVE. RUNNING exige silencio central y BrowserContinuation pide continuar sin acknowledgement. Los WAITING solicitan brevemente al usuario; COMPLETED da resultado final verificado; FAILED explica el bloqueo. El presentation gate descrito abajo controla audio/transcript por respuesta; la brevedad del acknowledgement inicial requiere acceptance por voz.
+La extensión sigue siendo autoridad de consentimiento, el backend autoridad de tarea/acciones/confirmaciones. Los estados expuestos incluyen TASK_ACCEPTED, RUNNING, RECOVERING_CONTEXT, WAITING_ACCESS, WAITING_CONFIRMATION, WAITING_MANUAL, COMPLETED, FAILED e INCONCLUSIVE. RUNNING exige silencio central y BrowserContinuation pide continuar sin acknowledgement. Los WAITING solicitan brevemente al usuario; COMPLETED da resultado final verificado; FAILED explica el bloqueo. El presentation gate descrito abajo controla audio/transcript por respuesta; la presentación por voz fue validada en el acceptance Windows; mantené las pruebas de regresión.
 
 Acceptance Windows de esta ampliación (todavía sin publicar):
 
@@ -189,7 +197,7 @@ Acceptance Windows de esta ampliación (todavía sin publicar):
 
 Límites: persistencia sólo HTTPS públicos dentro de la política de navegación actual, sin subdominios implícitos ni puertos alternativos. Chrome match patterns no distinguen puertos; Atlas sí valida origin exacto y rechaza puertos no admitidos. No se restaura automáticamente una tarea tras reiniciar. Remover/reinstalar la extensión puede borrar preferencias; cambia el ID unpacked si cambia su ruta. Malware del mismo usuario o una extensión comprometida siguen fuera de la protección del transporte local. Revocar no puede deshacer una acción que ya fue ejecutada: resultados inciertos mantienen EXECUTION_UNKNOWN y nunca se repiten.
 
-## V0.5.2.1 — estabilización de resultados y presentación
+## Estabilización de resultados y presentación
 
 La ejecución de una acción y su verificación son dimensiones independientes. `action.status=COMPLETED` y el auto-observe de Fase 1 se conservan. `actionOutcome` añade actionId, execution (NOT_EXECUTED / EXECUTED / UNKNOWN), verification (NOT_APPLICABLE / PENDING / INCONCLUSIVE / FAILED / VERIFIED) y outcome:
 
@@ -204,7 +212,7 @@ La verificación inicial es conservadora y genérica: playback PLAYING o PAUSED 
 
 PresentationGate controla únicamente salida: audio del HTMLAudioElement y visibilidad del transcript, ligados al response ID. RUNNING y RECOVERING_CONTEXT suprimen assistant audio/text intermedio sin cancelar responses, detener herramientas, quitar historia del SDK o silenciar micrófono. WAITING_ACCESS, WAITING_CONFIRMATION, WAITING_MANUAL, COMPLETED, FAILED e INCONCLUSIVE permiten respuestas nuevas. Una respuesta iniciada suprimida nunca se libera parcialmente al cambiar de estado. La reproducción permanece continua y silenciada mientras se descarta ese audio; no se guarda para reproducirlo luego. Los mensajes internos están identificados por ID y no se muestran como mensajes del usuario. No se usa session.mute ni se modifica semantic VAD/WebRTC/barge-in.
 
-TASK_ACCEPTED admite una sola respuesta inicial, con un único mensaje de acknowledgement opcional y breve antes del primer tool. El permiso pertenece a esa respuesta/tarea, nunca a respuestas intermedias. Si el modelo elige tool primero, se omite el acknowledgement; tools no esperan a que termine el audio. No se buscan frases ni hay whitelist textual. RUNNING/RECOVERING_CONTEXT silencian los mensajes posteriores, incluido un segundo mensaje en la respuesta inicial. No se hace response.cancel, session.mute ni respuesta adicional con tool_choice=none: una conversación ordinaria responde directamente. La brevedad semántica de ese primer mensaje se instruye al modelo, mientras el gate limita su admisión a un único mensaje; requiere acceptance WebRTC Windows. Las actualizaciones backend llevan revision y se ignoran estados antiguos. El servidor anuncia soporte de presentation states: isolated conserva su flujo y los resultados de tools no-browser siguen siendo audibles.
+TASK_ACCEPTED admite una sola respuesta inicial, con un único mensaje de acknowledgement opcional y breve antes del primer tool. El permiso pertenece a esa respuesta/tarea, nunca a respuestas intermedias. Si el modelo elige tool primero, se omite el acknowledgement; tools no esperan a que termine el audio. No se buscan frases ni hay whitelist textual. RUNNING/RECOVERING_CONTEXT silencian los mensajes posteriores, incluido un segundo mensaje en la respuesta inicial. No se hace response.cancel, session.mute ni respuesta adicional con tool_choice=none: una conversación ordinaria responde directamente. La brevedad semántica de ese primer mensaje se instruye al modelo, mientras el gate limita su admisión a un único mensaje; fue validado en el acceptance WebRTC Windows, sin garantizar cualquier entorno de audio. Las actualizaciones backend llevan revision y se ignoran estados antiguos. El servidor anuncia soporte de presentation states: isolated conserva su flujo y los resultados de tools no-browser siguen siendo audibles.
 
 Diagnostics de autorización, OFF por defecto:
 
@@ -214,9 +222,9 @@ Diagnostics de autorización, OFF por defecto:
 
 Stages: popup_opened, state_requested, worker_handler_entered, state_ready, authorization_click, permission_result, policy_saved, grant_created, notification_posted, backend_received, continuation_sent, next_task_tool. Cada línea contiene únicamente correlationId aleatorio, stage/outcome enumerados y duración local opcional. No contiene origin/URL, título, texto, valores escritos, credenciales ni datos de storage de páginas. Las duraciones no se restan entre procesos/relojes distintos. NOT_APPLICABLE indica pasos que no existen en Allow once; FAILED identifica errores sin imprimir lastError ni exceptions. notification_posted no equivale a recepción; backend_received registra recepción separadamente. Popup closed y refrescos fuera de orden quedan diagnosticados; respuestas tardías no sobrescriben una vista más reciente. No se añaden caches, prewarming ni optimizaciones de storage/permisos/probe.
 
-Acceptance Windows: comparar conversación ordinaria y primer pedido browser; comprobar un único acknowledgement inicial opcional y silencio RUNNING/RECOVERING_CONTEXT, búsquedas y media, autorización y CAPTCHA audibles en respuestas nuevas, confirmación existente y barge-in. Si una acción tuvo efecto pero READ falló, debe informar ejecutada sin verificación y jamás repetirla. Probar reproducción larga, pause, cross-origin/persistencia y lectura de conversación autorizada. Capturar diagnostics ante un popup lento antes de decidir optimizaciones. La prueba automatizada no valida jitter/playout WebRTC de Chrome Windows: esa frontera necesita acceptance real.
+Acceptance Windows: comparar conversación ordinaria y primer pedido browser; comprobar un único acknowledgement inicial opcional y silencio RUNNING/RECOVERING_CONTEXT, búsquedas y media, autorización y CAPTCHA audibles en respuestas nuevas, confirmación existente y barge-in. Si una acción tuvo efecto pero READ falló, debe informar ejecutada sin verificación y jamás repetirla. Probar reproducción larga, pause, cross-origin/persistencia y lectura de conversación autorizada. Capturar diagnostics ante un popup lento antes de decidir optimizaciones. La prueba automatizada no valida jitter/playout WebRTC de Chrome Windows: esa frontera se validó mediante el acceptance real y debe revisarse ante cambios de plataforma.
 
-### Corrección multi-step de V0.5.2.1 (working tree)
+### Continuación multi-step incluida en V0.5.2
 
 ACTION, STEP y TASK son independientes. `actionOutcome.execution` conserva NOT_EXECUTED / EXECUTED / UNKNOWN; `actionOutcome.step` informa VERIFIED / UNVERIFIED / NOT_APPLICABLE / INCONCLUSIVE. Los outcomes anteriores se conservan por compatibilidad. Un type/press/click sin predicado permanece ACTION_EXECUTED_UNVERIFIED y STEP NOT_APPLICABLE incluso con contexto fresco: puede continuar con el siguiente paso distinto; no debe repetir esa acción para verificarla.
 
@@ -225,3 +233,12 @@ Después del ACK se hace el auto-observe de Fase 1. Si falla transitoriamente y 
 BrowserContinuation reconoce un token de contexto recuperado además de access/resume ready. Si la recuperación está incluida en la tool en vuelo, el resultado ya devuelve la observación y no se envía otra respuesta de continuación. Si llega fuera de la tool, se notifica una sola vez y se pide observe para refs vigentes. HTTP perdido reconcilia estado backend mediante READ; el outcome de última acción no se atribuye automáticamente a la invocación cuyo resultado falta. Si no puede reconciliar, presenta INCONCLUSIVE y prohíbe retry.
 
 Acceptance Windows mínimo: «Poné un set de Guy J que dure más de una hora desde YouTube». Verificar acknowledgement opcional único, búsqueda → resultados → click → reproducción, sin narración intermedia ni repetición de submit. Probar pause/play y una tool no-browser; confirmación Calendar existente y barge-in. Con un fallo READ controlado de fixture, recuperar y continuar; con dos READ fallidos, decir que ejecutó la acción pero no pudo recuperar el estado. No confundir verification con confirmación.
+
+
+## Document readiness y estabilidad de snapshots
+
+El estado global Chrome `loading` no bloquea por sí solo un documento accesible. Una navegación pendiente impide utilizar el documento anterior; inyección, inicialización y comandos se vinculan al documento Chrome cuando su ID está disponible. Los READ de readiness tienen hasta dos intentos adicionales con esperas 500/1000 ms, acotados por dos segundos y el deadline de la petición. Cada intento revalida scope, grant, origin, epoch y cancelación. Nunca repite la navegación/click que originó la transición.
+
+Antes de publicar un snapshot se comprueba durante 80 ms la estabilidad de los controles capturados, conservando identidad funcional y contexto de seguridad estrictos. No se exige un número mínimo de refs, recomendaciones, historial ni silencio global del DOM. El TTL corto comienza tras la construcción; refs obsoletas no se remapean. Si no se recupera contexto dentro del presupuesto, el resultado permanece INCONCLUSIVE y la ejecución conocida se conserva. `status`/`tabs` no reabren tareas terminales; una nueva admisión explícita puede iniciar otra tarea.
+
+Los diagnostics sanitizados de readiness y ELEMENT_VALIDATION permanecen disponibles con `BROWSER_TRACE=true`, desactivado por defecto. No registran contenido, valores escritos, mensajes privados, credenciales ni URLs completas.
