@@ -1361,3 +1361,11 @@ dispatch. A still-loading document returns the existing `CONTENT_UNAVAILABLE`
 outcome with sanitized trace reason `DOCUMENT_INITIALIZING`; actual content
 injection/init/messaging failures retain their separate diagnostics. No site
 exceptions or permission changes are used. `BROWSER_TRACE` remains off by default.
+
+Context READ recovery now spaces its two retries by 500 ms and 1000 ms, within
+its existing deadline. This gives a document/content boundary time to settle
+between failed observations without repeating the navigation/click or raising
+any global timeout. Cancellation, revoked/expired access and unknown execution
+are checked again before each READ. Proven `NOT_EXECUTED` ref conflicts allow only the same frozen operation and
+parameters with an explicitly supplied ref from the fresh recovery snapshot.
+Different actions remain rejected; the conflict budget remains unchanged.

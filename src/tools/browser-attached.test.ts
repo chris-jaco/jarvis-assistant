@@ -1,3 +1,4 @@
+import type { BrowserObservation } from '../browser/provider.js';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { z } from 'zod';
@@ -568,7 +569,7 @@ test('normalized completed action survives failed post-READ and later observe; v
  const provider=new AttachedChromeProvider(transport);const adapter=new BrowserAdapter(provider);await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
  try{await adapter.inSession(session,async()=>{
   await provider.requestTabAccess({target:{kind:'current'},purpose:'Fixture',lifetime:'task'},signal());await h.controller.approve(h.controller.pending()[0]!.id);const seen=await provider.observe(signal());const input={ref:seen.elements[0]!.ref,text:'Fixture',mode:'replace'};
-  const type=adapter.tools().find(t=>t.id==='browser.type')!;const result:any=await type.execute(input,signal());assert.equal(result.action.status,'COMPLETED');assert.equal(result.actionOutcome.outcome,'ACTION_EXECUTED_UNVERIFIED');assert.equal(result.observation.status,'FAILED');
+  const type=adapter.tools().find(t=>t.id==='browser.type')!;const result:any=await type.execute(input,signal());assert.equal(result.action.status,'COMPLETED');assert.equal(result.actionOutcome!.outcome,'ACTION_EXECUTED_UNVERIFIED');assert.equal(result.observation.status,'FAILED');
   await assert.rejects(provider.observe(signal()),/UPSTREAM/);assert.equal(provider.state(session).actionOutcome!.execution,'EXECUTED');
   const verify=adapter.tools().find(t=>t.id==='browser.verify')!;for(let i=0;i<3;i++){const checked:any=await verify.execute({},signal());assert.equal(checked.actionOutcome.outcome,'ACTION_EXECUTED_UNVERIFIED');assert.equal(checked.step,'NOT_APPLICABLE');}
   const duplicate:any=await type.execute(input,signal());assert.equal(duplicate.actionOutcome.execution,'EXECUTED');assert.equal(writes,1);
@@ -853,4 +854,75 @@ test('reusing task access never resets completed-action deduplication',async()=>
   await f.provider.interact('type',input,()=>f.provider.type(input.ref,input.text,'replace',signal()),signal());const access=await f.provider.requestTabAccess({target:{kind:'current'},purpose:'Continue',lifetime:'task'},signal());assert.equal(access.outcome,'OK');
   const duplicate=await f.provider.interact('type',input,()=>f.provider.type(input.ref,input.text,'replace',signal()),signal());assert.equal(duplicate.action.status,'COMPLETED');assert.equal(writes,1);
  });}finally{await f.provider.close();f.h.close();}
+});
+
+for(const manual of [false,true])test(`proven NOT_EXECUTED conflict uses ${manual?'explicit':'automatic'} fresh READ without replay`,async()=>{
+ const h=harness();const base=h.transport;let dispatched=0,conflict=true;
+ const provider=new AttachedChromeProvider({...base,request:async(c,req,abort)=>{
+   if(req.operation==='type'){++dispatched;if(conflict){conflict=false;h.f.dom.window.document.querySelector('input')!.setAttribute('aria-label','Fresh search');return {outcome:'ERROR',code:'STALE_REF',conflict:{reason:'ELEMENT_CHANGED',execution:'NOT_EXECUTED'}};}}
+   return base.request(c,req,abort);
+ }});
+ await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try {await provider.inSession(session,async()=>{
+   await assert.rejects(provider.openTab('https://workspace.example/',signal()),BrowserWorkflow);await h.controller.approve(h.controller.pending()[0]!.id);
+   const old=await provider.observe(signal());const ref=old.elements.find(el=>el.role==='searchbox')!.ref;
+   let fresh:BrowserObservation|undefined;
+   await assert.rejects(provider.interact('type',{ref,text:'music',mode:'replace'},()=>provider.type(ref,'music','replace',signal()),signal()),(error:any)=>{assert.equal(error.browserRecovery.execution,'NOT_EXECUTED');assert.equal(error.browserObservation.status,'OK');fresh=error.browserObservation.data;return true;});
+   assert.equal(dispatched,1);if(manual)fresh=await provider.observe(signal());const next=fresh!.elements.find(el=>el.role==='searchbox')!.ref;assert.notEqual(next,ref);
+   await assert.rejects(provider.interact('type',{ref:next,text:'changed',mode:'replace'},()=>provider.type(next,'changed','replace',signal()),signal()),(error:any)=>error.category==='REJECTED'&&error.browserObservation.reason==='STEP_PENDING');assert.equal(dispatched,1);
+   const result=await provider.interact('type',{ref:next,text:'music',mode:'replace'},()=>provider.type(next,'music','replace',signal()),signal());assert.equal(result.action.status,'COMPLETED');assert.equal(dispatched,2);
+ });}finally{await provider.close();h.close();}
+});
+
+for (const recover of [true,false]) test(`click executed: bounded paced READ recovery ${recover?'reaches READY':'ends INCONCLUSIVE'} without another click`,async()=>{
+ const h=harness();const base=h.transport;let clicked=false,settled=false,clicks=0,reads=0;const pauses:number[]=[];
+ h.f.dom.window.document.body.insertAdjacentHTML('beforeend','<a href="/next">Result</a>');
+ const provider=new AttachedChromeProvider({...base,request:async(c,req,abort)=>{
+   if(req.operation==='click'){clicked=true;++clicks;return {outcome:'OK',data:{completed:true}};}
+   if(req.operation==='observe'&&clicked){++reads;if(!settled)return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};}
+   return base.request(c,req,abort);
+ }},true,undefined,undefined,undefined,undefined,async(ms,abort)=>{assert.equal(abort.aborted,false);pauses.push(ms);if(recover&&pauses.length===2)settled=true;});
+ await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try {await provider.inSession(session,async()=>{
+   await assert.rejects(provider.openTab('https://workspace.example/',signal()),BrowserWorkflow);await h.controller.approve(h.controller.pending()[0]!.id);
+   const old=await provider.observe(signal());const ref=old.elements.find(el=>el.role==='link')!.ref;
+   const result=await provider.interact('click',{ref},()=>provider.click(ref,signal()),signal());
+   assert.equal(result.action.status,'COMPLETED');assert.equal(result.actionOutcome!.outcome,'ACTION_EXECUTED_UNVERIFIED');assert.equal(clicks,1);assert.equal(reads,3);assert.deepEqual(pauses,[500,1000]);
+   assert.equal(provider.state(session).contextRecovery!.status,recover?'READY':'INCONCLUSIVE');assert.equal(result.observation.status,recover?'OK':'FAILED');
+   if(result.observation.status==='OK'){
+     const next=result.observation.data.elements.find(el=>el.role==='searchbox')!.ref;
+     await provider.interact('type',{ref:next,text:'music',mode:'replace'},()=>provider.type(next,'music','replace',signal()),signal());assert.equal(clicks,1);
+   }
+ });}finally{await provider.close();h.close();}
+});
+
+test('consumed ref conflict obtains fresh context; old ref never dispatches an action',async()=>{
+ const h=harness();const base=h.transport;let presses=0;const provider=new AttachedChromeProvider({...base,request:async(c,req,abort)=>{if(req.operation==='press')++presses;return base.request(c,req,abort);}});
+ await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try {await provider.inSession(session,async()=>{
+   await assert.rejects(provider.openTab('https://workspace.example/',signal()),BrowserWorkflow);await h.controller.approve(h.controller.pending()[0]!.id);
+   const old=await provider.observe(signal());const ref=old.elements.find(el=>el.role==='searchbox')!.ref;
+   await provider.interact('type',{ref,text:'music',mode:'replace'},()=>provider.type(ref,'music','replace',signal()),signal());
+   let fresh:BrowserObservation|undefined;
+   await assert.rejects(provider.interact('press',{ref,key:'Enter'},()=>provider.press(ref,'Enter',signal()),signal()),(error:any)=>{assert.equal(error.browserRecovery.reason,'SNAPSHOT_CONSUMED');assert.equal(error.browserRecovery.execution,'NOT_EXECUTED');fresh=error.browserObservation.data;return true;});assert.equal(presses,0);
+   const next=fresh!.elements.find(el=>el.role==='searchbox')!.ref;
+   await provider.interact('press',{ref:next,key:'Enter'},()=>provider.press(next,'Enter',signal()),signal());assert.equal(presses,1);
+ });}finally{await provider.close();h.close();}
+});
+
+for(const stop of ['abort','revoke'] as const)test(`post-click READ wait checks ${stop} before another observation`,async()=>{
+ const h=harness();const base=h.transport;let clicked=false,clicks=0,reads=0;const controller=new AbortController();
+ h.f.dom.window.document.body.insertAdjacentHTML('beforeend','<a href="/next">Result</a>');
+ const provider=new AttachedChromeProvider({...base,request:async(c,req,abort)=>{
+   if(req.operation==='click'){clicked=true;++clicks;return {outcome:'OK',data:{completed:true}};}
+   if(req.operation==='observe'&&clicked){++reads;return {outcome:'ERROR',code:'CONTENT_UNAVAILABLE'};}
+   return base.request(c,req,abort);
+ }},true,undefined,undefined,undefined,undefined,async()=>{if(stop==='abort'){controller.abort();throw new DOMException('Aborted','AbortError');}await h.controller.revoke(h.controller.authorized()[0]!.scopeId);});
+ await h.controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ try{await provider.inSession(session,async()=>{
+   await assert.rejects(provider.openTab('https://workspace.example/',signal()),BrowserWorkflow);await h.controller.approve(h.controller.pending()[0]!.id);
+   const observed=await provider.observe(signal());const ref=observed.elements.find(el=>el.role==='link')!.ref;
+   const result=await provider.interact('click',{ref},()=>provider.click(ref,controller.signal),controller.signal);
+   assert.equal(result.action.status,'COMPLETED');assert.equal(result.actionOutcome!.execution,'EXECUTED');assert.equal(result.observation.status,'FAILED');assert.equal(clicks,1);assert.equal(reads,1);
+ });}finally{await provider.close();h.close();}
 });

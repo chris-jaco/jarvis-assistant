@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { observeTracer, observationFacts } from '../../diagnostics/browser-observe.js';
 import type { BrowserExecutionState } from '../execution-state.js';
 import { BrowserTaskDiagnostics } from '../../diagnostics/browser-task.js';
@@ -18,18 +19,18 @@ import type { Operation, Reply, AuthorizedTab, BrowserConflictDetail, AttachedOb
 import type { BrowserTransport } from './transport.js';
 const contextReadReasons: readonly string[] = ['UPSTREAM','TIMEOUT','OBSERVATION_REQUIRED','SNAPSHOT_EXPIRED','DOCUMENT_CHANGED','ELEMENT_CHANGED','SNAPSHOT_CONSUMED'];
 interface ContextRecovery { status: 'READY' | 'REQUIRED' | 'RECOVERING' | 'INCONCLUSIVE'; attempts: number; ready: string | null }
-interface Session { observeRequestId?:string; intent?:TaskIntent; readAdmission?:string; inventory?:{admission:string;expires:number}; admission?:string; progress:Map<string,ActionRecord>; acknowledged:Set<string>; rejectionToken?:string; cancelled?:boolean; terminal?:boolean; contextRecovery?: ContextRecovery; accessCorrelation?:string; traceNext?:boolean; actionRecord?: ActionRecord; accessRevoked?: boolean; id: string; task: string; connection?: string; active?: string; tabs: Map<string, AuthorizedTab>; workflow?: Exclude<Reply, { outcome: 'OK' } | { outcome: 'ERROR' }>; ready?: string; observation?: { tabId: string; scopeId: string; documentId: string; snapshotId: string; refs: Set<string>; expires: number }; closed?: boolean; failures: number; uncertain?: boolean; invalidation?: BrowserConflictDetail['reason']; context: 'READY' | 'OBSERVATION_REQUIRED'; pendingStep?: string; completed?: { key: string; result: unknown; record:ActionRecord }; knownRefs: Map<string, string>; lastObservation?: AttachedObservation; timings: BrowserTimings; tail: Promise<unknown>; deadline?: number }
+interface Session { observeRequestId?:string; intent?:TaskIntent; readAdmission?:string; inventory?:{admission:string;expires:number}; admission?:string; progress:Map<string,ActionRecord>; acknowledged:Set<string>; rejectionToken?:string; cancelled?:boolean; terminal?:boolean; contextRecovery?: ContextRecovery; accessCorrelation?:string; traceNext?:boolean; actionRecord?: ActionRecord; accessRevoked?: boolean; id: string; task: string; connection?: string; active?: string; tabs: Map<string, AuthorizedTab>; workflow?: Exclude<Reply, { outcome: 'OK' } | { outcome: 'ERROR' }>; ready?: string; observation?: { tabId: string; scopeId: string; documentId: string; snapshotId: string; refs: Set<string>; expires: number }; closed?: boolean; failures: number; uncertain?: boolean; invalidation?: BrowserConflictDetail['reason']; context: 'READY' | 'OBSERVATION_REQUIRED'; pendingStep?: string; pendingRecovery?: {signature:string;scopeId:string}; completed?: { key: string; result: unknown; record:ActionRecord }; knownRefs: Map<string, string>; lastObservation?: AttachedObservation; timings: BrowserTimings; tail: Promise<unknown>; deadline?: number }
 export class BrowserWorkflow extends Error { constructor(readonly reply: Exclude<Reply, { outcome: 'OK' }>) { super(reply.outcome); } }
 export class AttachedChromeProvider implements BrowserProvider {
   readonly attached = true; private scope = new AsyncLocalStorage<Session>(); private sessions = new Map<string, Session>();
-  constructor(private readonly transport: BrowserTransport, private readonly enabled = true, private readonly configuredConnection?: string, private readonly diagnostics?: BrowserDiagnostics, private readonly accessDiagnostics?:PopupDiagnostics,private readonly taskDiagnostics=new BrowserTaskDiagnostics()) {
+  constructor(private readonly transport: BrowserTransport, private readonly enabled = true, private readonly configuredConnection?: string, private readonly diagnostics?: BrowserDiagnostics, private readonly accessDiagnostics?:PopupDiagnostics,private readonly taskDiagnostics=new BrowserTaskDiagnostics(),private readonly readPause=(ms:number,signal:AbortSignal)=>delay(ms,undefined,{signal})) {
     transport.subscribe((connection, event) => {
       const session = this.sessions.get(event.backendSessionId); if (!session || session.closed || session.connection !== connection) return;
       if(event.trace){session.accessCorrelation=event.trace.correlationId;session.traceNext=true;this.accessDiagnostics?.event(event.trace.correlationId,'backend_received');}
       session.inventory=undefined;
       if (event.event === 'accessRequired' && event.access) { session.workflow = event.access; session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; }
       if (event.event === 'accessGranted' || event.scopeId === session.tabs.get(session.active ?? '')?.scopeId) { session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; session.invalidation = 'DOCUMENT_CHANGED'; }
-      if (event.event === 'accessGranted' && event.tab) { const reused=session.tabs.get(event.tab.id)?.scopeId===event.tab.scopeId; session.accessRevoked = false; if(!reused){session.failures = 0; session.pendingStep = undefined; session.completed = undefined; session.contextRecovery = undefined;} session.tabs.set(event.tab.id, event.tab); session.active = event.tab.id; if (session.workflow?.outcome === 'ACCESS_PENDING' && (!event.accessRequestId || event.accessRequestId === session.workflow.accessRequestId)) { session.workflow = undefined; session.ready = randomUUID(); } else if (session.workflow?.outcome === 'REQUIRES_USER_INTERACTION' && session.workflow.reason === 'ORIGIN_PERMISSION') { session.workflow = undefined; session.ready = randomUUID(); } }
+      if (event.event === 'accessGranted' && event.tab) { const reused=session.tabs.get(event.tab.id)?.scopeId===event.tab.scopeId; session.accessRevoked = false; if(!reused){session.failures = 0; session.pendingStep = undefined; session.pendingRecovery = undefined; session.completed = undefined; session.contextRecovery = undefined;} session.tabs.set(event.tab.id, event.tab); session.active = event.tab.id; if (session.workflow?.outcome === 'ACCESS_PENDING' && (!event.accessRequestId || event.accessRequestId === session.workflow.accessRequestId)) { session.workflow = undefined; session.ready = randomUUID(); } else if (session.workflow?.outcome === 'REQUIRES_USER_INTERACTION' && session.workflow.reason === 'ORIGIN_PERMISSION') { session.workflow = undefined; session.ready = randomUUID(); } }
       else if (event.event === 'accessRevoked') { if (event.accessRequestId && (session.workflow?.outcome !== 'ACCESS_PENDING' || session.workflow.accessRequestId !== event.accessRequestId)) return; session.accessRevoked = true; session.ready = undefined; for (const [id, tab] of session.tabs) if (tab.scopeId === event.scopeId) { session.tabs.delete(id); if (session.active === id) session.active = undefined; } session.workflow = undefined; }
     });
   }
@@ -48,7 +49,7 @@ export class AttachedChromeProvider implements BrowserProvider {
     session.admission=admission;session.intent=classifyTaskIntent(utterance);session.readAdmission=undefined;session.inventory=undefined;session.progress.clear();session.terminal=false;session.cancelled=false;
     // New admission gets fresh operational context, never old completion proof.
     // Keep the uncertainty latch and Chrome consent/scopes intact.
-    session.contextRecovery=undefined;session.observation=undefined;session.lastObservation=undefined;session.context='OBSERVATION_REQUIRED';session.completed=undefined;session.pendingStep=undefined;session.failures=0;session.rejectionToken=undefined;session.ready=undefined;
+    session.contextRecovery=undefined;session.observation=undefined;session.lastObservation=undefined;session.context='OBSERVATION_REQUIRED';session.completed=undefined;session.pendingStep=undefined;session.pendingRecovery=undefined;session.failures=0;session.rejectionToken=undefined;session.ready=undefined;
     this.traceTask({stage:'ADMISSION',taskId:session.task,admissionId:admission,intent:session.intent.intent,source:utterance?'TRANSCRIPT':'FALLBACK',taskState:traceState});
   }
   private traceObserve(raw:unknown):void {if(!this.diagnostics?.enabled)return;const s=this.scope.getStore();if(!s||s.closed)return;observeTracer(this.diagnostics?.enabled===true)({boundary:'BACKEND',...(s.observeRequestId?{requestId:s.observeRequestId}:{}),...((raw&&typeof raw==='object')?raw:{}),taskId:s.task,...(s.admission?{admissionId:s.admission}:{})});}
@@ -199,7 +200,13 @@ export class AttachedChromeProvider implements BrowserProvider {
       const key = JSON.stringify([operation, target, parameters]);
       this.binding();
       if (session.uncertain) throw new ToolError('EXECUTION_UNKNOWN');
-      if (session.pendingStep && session.pendingStep !== key) throw new ToolError('REJECTED', undefined, { status: 'FAILED', reason: 'STEP_PENDING' });
+      const signature=JSON.stringify([operation,parameters]);
+      if (session.pendingStep && session.pendingStep !== key) {
+        // Same frozen operation/parameters, explicitly supplied CURRENT ref only.
+        // Never map an old ref or allow another action to reset this step budget.
+        const fresh=session.pendingRecovery?.signature===signature && typeof ref==='string' && session.observation?.scopeId===session.pendingRecovery.scopeId && session.observation.refs.has(ref);
+        if (!fresh) throw new ToolError('REJECTED', undefined, { status: 'FAILED', reason: 'STEP_PENDING' });
+      }
       if (session.completed?.key === key) {
         session.actionRecord=session.completed.record;
         // Consecutive duplicate of a completed action: return completion, never
@@ -216,10 +223,14 @@ export class AttachedChromeProvider implements BrowserProvider {
       catch (error) {
         if (error instanceof ToolError && (error.category === 'EXECUTION_UNKNOWN'||session.uncertain)) record.unknown();
         if (error instanceof ToolError && error.browserRecovery) {
+          session.pendingRecovery=undefined;
           const observation = error.browserRecovery.recoverable ? await this.refresh(signal, deadlineAt) : { status: 'FAILED' as const, reason: error.browserRecovery.reason };
+          // Permit only the same step/scope with a ref from the current fresh READ.
+          // Unknown execution and exhausted budgets can never gain this permit.
+          if (error.category !== 'EXECUTION_UNKNOWN' && error.browserRecovery.execution === 'NOT_EXECUTED' && error.browserRecovery.recoverable && !session.uncertain && observation.status==='OK') session.pendingRecovery={signature,scopeId:observation.data.scopeId};
           throw new ToolError(error.category, error.browserRecovery, observation, this.measurements());
         }
-        if (!(error instanceof ToolError && error.category === 'EXECUTION_UNKNOWN')) session.pendingStep = undefined;
+        if (!(error instanceof ToolError && error.category === 'EXECUTION_UNKNOWN')) session.pendingStep = undefined; session.pendingRecovery = undefined;
         throw error;
       }
       // Commit completion before READ. Nothing after this point can change it
@@ -227,7 +238,7 @@ export class AttachedChromeProvider implements BrowserProvider {
       record.executed();session.terminal=false;
       if (operation!=='switch') {session.progress.set(record.actionId,record);while(session.progress.size>100)session.progress.delete(session.progress.keys().next().value!);}
       session.contextRecovery = {status:'READY',attempts:0,ready:null};
-      session.completed = { key, result,record }; session.pendingStep = undefined; session.failures = 0;
+      session.completed = { key, result,record }; session.pendingStep = undefined; session.pendingRecovery = undefined; session.failures = 0;
       session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; session.invalidation = 'SNAPSHOT_CONSUMED';
       const observation = await this.recoverReads(signal, deadlineAt, await this.refresh(signal, deadlineAt));
       return { action: { status: 'COMPLETED' as const }, result, observation, actionOutcome:record.result(), requiresFreshObservation: observation.status !== 'OK' };
@@ -256,6 +267,11 @@ export class AttachedChromeProvider implements BrowserProvider {
     session.contextRecovery.status = 'RECOVERING';
     let observation: ObservationResult = initial;
     while (session.contextRecovery.attempts < 2 && !signal.aborted && Date.now() < deadlineAt && this.canRecoverContext()) {
+      // Let the new document/content boundary settle between failed READs.
+      // Only READs are retained here. No action callback is available to retry.
+      const pauseMs = Math.min(session.contextRecovery.attempts === 0 ? 500 : 1000, Math.max(0,deadlineAt-Date.now()));
+      try { await this.readPause(pauseMs,signal); } catch { return {status:'FAILED',reason:'TIMEOUT'}; }
+      if (signal.aborted || Date.now()>=deadlineAt || !this.canRecoverContext()) return observation;
       ++session.contextRecovery.attempts;
       observation = await this.refresh(signal, deadlineAt);
       if (observation.status === 'OK') return observation;
@@ -314,7 +330,7 @@ export class AttachedChromeProvider implements BrowserProvider {
     catch(error){this.traceTask({stage:'END_TASK',phase:'TRANSPORT',taskId:session.task,admissionId:session.admission,call:this.diagnostics?.callId(),requestedReason:request.reason,outcome:'ERROR',transportMs:Math.min(30000,performance.now()-transportStarted)});throw error;}
     this.traceTask({stage:'END_TASK',phase:'TRANSPORT',taskId:session.task,admissionId:session.admission,call:this.diagnostics?.callId(),requestedReason:request.reason,outcome:'ACCEPTED',transportMs:Math.min(30000,performance.now()-transportStarted)});
     session.admission=undefined;session.intent=undefined;session.readAdmission=undefined;session.inventory=undefined;session.accessRevoked=false;session.task=randomUUID();session.progress.clear();session.acknowledged.clear();session.rejectionToken=undefined;session.cancelled=false;session.terminal=false;
-    session.pendingStep=undefined;session.completed=undefined;session.failures=0;session.observation=undefined;session.workflow=undefined;session.ready=undefined;session.contextRecovery=undefined;
+    session.pendingStep=undefined;session.pendingRecovery=undefined;session.completed=undefined;session.failures=0;session.observation=undefined;session.workflow=undefined;session.ready=undefined;session.contextRecovery=undefined;
     // No fallible post-close READ may undo accepted task termination.
     session.tabs.clear();session.active=undefined;
     return {outcome:'END_TASK_ACCEPTED',reason:request.reason};
