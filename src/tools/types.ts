@@ -5,6 +5,7 @@ export type Transport = 'hosted' | 'mcp' | 'api' | 'function' | 'local';
 export interface ToolDefinition {
   id: string; name: string; description: string; integration: string; capability: string;
   permission: Permission; confirm?: boolean; confirmWhen?(prepared: unknown): boolean; schema: z.ZodType; timeoutMs?: number;
+  confirmationLifecycle?: { pending(input: unknown, id: string, expiresAt: number): void; decided(input: unknown, id: string, approved: boolean): void; invalidated(input: unknown, reason: 'rejected' | 'expired'): void };
   prepare?(input: unknown, signal: AbortSignal): Promise<unknown>;
   summarize?(input: unknown): string;
   execute(input: unknown, signal: AbortSignal): Promise<unknown>;

@@ -1379,3 +1379,16 @@ any global timeout. Cancellation, revoked/expired access and unknown execution
 are checked again before each READ. Proven `NOT_EXECUTED` ref conflicts allow only the same frozen operation and
 parameters with an explicitly supplied ref from the fresh recovery snapshot.
 Different actions remain rejected; the conflict budget remains unchanged.
+
+## V0.5.3.1 — Consequential Action Foundation (sin envíos)
+
+La rama `v0.5.3-consequential-actions` incorpora contratos estrictos SEND_MESSAGE,
+ledger de un solo uso y journal privado mínimo, usando el Confirmation Engine
+existente. Sólo hay un executor simulado en tests: ninguna herramienta de envío
+se registra en el runtime productivo ni se desbloquean clicks Send/Enter.
+Permisos, grants, Search/Media, audio y elegibilidad de voz de V0.5.2 se conservan.
+Un restart no restaura aprobaciones; una reserva incierta queda UNKNOWN y bloquea
+reenvíos automáticos. El journal no guarda destinatarios ni mensajes en claro.
+Contratos, límites y decisiones pendientes en
+[docs/browser-consequential-foundation.md](docs/browser-consequential-foundation.md).
+V0.5.3.2 y las acciones consecuenciales reales requieren aprobación posterior.

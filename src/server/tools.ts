@@ -218,7 +218,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
           send(200, { confirmationId: p.confirmationId, intent: boundIntent });
         }
       } else if (path === '/api/tools/decision') {
-        const p = decision.parse(input); trace({ event: 'server POST /decision', reason: p.approved ? 'approved' : 'rejected', pendingId: p.confirmationId }); send(200, await session.executor.decide(p.confirmationId, p.approved));
+        const p = decision.parse(input); trace({ event: 'server POST /decision', reason: p.approved ? 'approved' : 'rejected', pendingId: p.confirmationId }); const decide = () => session.executor.decide(p.confirmationId, p.approved); send(200, browser ? await browser.inSession(session.browserSessionId, decide) : await decide());
       } else if (path === '/api/tools/cancel') {
         const p = cancellation.parse(input); const current = session.executor.pendingState();
         if (p.confirmationId && current?.confirmationId !== p.confirmationId) send(200, { cancelled: false });

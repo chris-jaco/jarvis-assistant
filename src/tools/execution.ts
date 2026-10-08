@@ -83,6 +83,7 @@ export class ToolExecutor {
         this.invalidate('rejected');
         const pending = { id: randomUUID(), tool, input, expiresAt: this.now() + this.confirmationMs, pendingAt: this.now(), row };
         this.trace({ event: 'executor.prepare', reason: 'prepared', pendingId: pending.id });
+        tool.confirmationLifecycle?.pending(input, pending.id, pending.expiresAt);
         this.pending = pending; row.status = 'pending';
         return { status: 'pending', confirmationId: pending.id, summary: tool.summarize?.(input) ?? `¿Confirmas ${tool.name}?`, expiresAt: pending.expiresAt };
       }
@@ -101,8 +102,9 @@ export class ToolExecutor {
     if (!pending || pending.id !== id || this.closed) return safeError(new ToolError('EXPIRED'));
     pending.row.confirmationWaitMs = this.now() - pending.pendingAt;
     this.pending = undefined; // Consume before awaiting: concurrent/replayed decisions cannot execute twice.
-    if (pending.expiresAt <= this.now()) { pending.row.confirmation = 'expired'; return this.finishError(pending.row, new ToolError('EXPIRED')); }
-    if (!approved) { pending.row.confirmation = 'rejected'; return this.finishError(pending.row, new ToolError('REJECTED')); }
+    if (pending.expiresAt <= this.now()) { try { pending.tool.confirmationLifecycle?.invalidated(pending.input, 'expired'); } catch { /* Expiry never restores approval. */ } pending.row.confirmation = 'expired'; return this.finishError(pending.row, new ToolError('EXPIRED')); }
+    if (!approved) { try { pending.tool.confirmationLifecycle?.decided(pending.input, id, false); } catch { /* Rejection never grants approval. */ } pending.row.confirmation = 'rejected'; return this.finishError(pending.row, new ToolError('REJECTED')); }
+    try { pending.tool.confirmationLifecycle?.decided(pending.input, id, true); } catch (error) { return this.finishError(pending.row, error); }
     pending.row.confirmation = 'granted';
     return this.run(pending.tool, pending.input, pending.row);
   }
@@ -124,7 +126,14 @@ export class ToolExecutor {
   invalidate(reason: 'rejected' | 'expired' = 'rejected'): void {
     this.trace({ event: 'executor.invalidate', reason, pendingId: this.pending?.id });
     ++this.revision;
-    if (this.pending) { this.pending.row.confirmationWaitMs = this.now() - this.pending.pendingAt; this.pending.row.confirmation = reason; this.finishError(this.pending.row, new ToolError(reason === 'expired' ? 'EXPIRED' : 'REJECTED')); this.pending = undefined; }
+    const pending = this.pending;
+    this.pending = undefined; // Remove authority before trusted notifications.
+    if (pending) {
+      try { pending.tool.confirmationLifecycle?.invalidated(pending.input, reason); } catch { /* Invalidated approval cannot be restored by a callback failure. */ }
+      pending.row.confirmationWaitMs = this.now() - pending.pendingAt;
+      pending.row.confirmation = reason;
+      this.finishError(pending.row, new ToolError(reason === 'expired' ? 'EXPIRED' : 'REJECTED'));
+    }
   }
   close(): void { this.trace({ event: 'executor.close', reason: 'session_closed', pendingId: this.pending?.id }); this.closed = true; this.invalidate(); for (const controller of this.controllers) controller.abort(); }
 }
