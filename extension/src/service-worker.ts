@@ -1,3 +1,4 @@
+import { resolveActiveTab, activeTabErrors } from './active-tab.js';
 import { PopupDiagnostics } from '../../src/diagnostics/popup.js';
 const accessDiagnostics=new PopupDiagnostics(undefined,true);
 void chrome.storage.local.get('atlasPopupDiagnostics').then(value=>{accessDiagnostics.enabled=value.atlasPopupDiagnostics===true;}).catch(()=>{accessDiagnostics.enabled=false;});
@@ -14,7 +15,7 @@ const sites = new SiteAuthorization(chromeSiteEnvironment(chrome), origin => con
 const controller = new ExtensionController({
   observeAuthorization:async grant=>{const tab=await chrome.tabs.get(grant.chromeId);if(!tab.url)throw new Error();const origin=new URL(tab.url).origin;return {...await sites.diagnosticStatus(origin),sameOrigin:origin===grant.origin};},
   tab: async id => { const tab = await chrome.tabs.get(id); return { id, url: tab.url ?? '', title: tab.title, status: tab.status, pendingUrl: tab.pendingUrl }; },
-  current: async () => { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (tab?.id === undefined) throw new Error('ACCESS_DENIED'); return { id: tab.id, url: tab.url ?? '', title: tab.title ?? '' }; },
+  current: () => resolveActiveTab(() => chrome.tabs.query({ active: true })),
   create: async url => { const tab = await chrome.tabs.create({ url, active: true }); if (tab.id === undefined) throw new Error('UNSUPPORTED'); return tab.id; },
   activate: async id => { await chrome.tabs.update(id, { active: true }); },
   navigate: async (id, url) => { await chrome.tabs.update(id, { url, active: true }); },
@@ -63,8 +64,8 @@ chrome.runtime.onMessage.addListener((raw, sender, send) => {
     if (message.action === 'revoke') await controller.revoke(message.id as string);
     if (message.action === 'renew') await controller.renew(message.id as string);
     if (message.action === 'deny') controller.deny(message.id as string);
-    await badge(); const [current] = await chrome.tabs.query({ active: true, currentWindow: true }); const currentOrigin = current?.url && /^https?:/.test(current.url) ? new URL(current.url).origin : 'Página no soportada'; const response={ currentOrigin, connected: !!port && !!controller.epoch, pending: await controller.preparePending(), authorized: controller.authorized(), sites: await sites.list() };if(correlationId)accessDiagnostics.event(correlationId,'state_ready','OK',performance.now()-started);send(response);
-  } catch {if(typeof raw?.correlationId==='string')accessDiagnostics.event(raw.correlationId,'state_ready','FAILED',performance.now()-workerStarted); send({ error: 'No se pudo completar el cambio de acceso. Revisá la pestaña, el permiso de Chrome y los sitios permitidos; no se asumió aprobación.' }); } })(); return true;
+    await badge(); const current = await resolveActiveTab(() => chrome.tabs.query({ active: true })); const currentOrigin = current?.url && /^https?:/.test(current.url) ? new URL(current.url).origin : 'Página no soportada'; const response={ currentOrigin, connected: !!port && !!controller.epoch, pending: await controller.preparePending(), authorized: controller.authorized(), sites: await sites.list() };if(correlationId)accessDiagnostics.event(correlationId,'state_ready','OK',performance.now()-started);send(response);
+  } catch (error) {if(typeof raw?.correlationId==='string')accessDiagnostics.event(raw.correlationId,'state_ready','FAILED',performance.now()-workerStarted); send({ error: error instanceof Error && activeTabErrors.includes(error.message as typeof activeTabErrors[number]) ? error.message : 'No se pudo completar el cambio de acceso. Revisá la pestaña, el permiso de Chrome y los sitios permitidos; no se asumió aprobación.' }); } })(); return true;
 });
 chrome.tabs.onRemoved.addListener(id => { for (const grant of controller.grants.values()) if (grant.chromeId === id) void controller.revoke(grant.scopeId).then(badge); });
 chrome.tabs.onUpdated.addListener((id, change) => { if (change.status === 'loading') void controller.documentChanged(id); });

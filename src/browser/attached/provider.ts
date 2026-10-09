@@ -100,6 +100,7 @@ export class AttachedChromeProvider implements BrowserProvider {
   private unwrap<T>(reply: Reply): T {
     if (reply.outcome === 'OK') return reply.data as T;
     if (reply.outcome === 'ERROR' && ['EXECUTION_UNKNOWN','DISCONNECTED'].includes(reply.code)) throw new ToolError('EXECUTION_UNKNOWN');
+    if (reply.outcome === 'ERROR' && ['ACTIVE_TAB_UNAVAILABLE','ACTIVE_TAB_AMBIGUOUS'].includes(reply.code)) throw new ToolError(reply.code === 'ACTIVE_TAB_AMBIGUOUS' ? 'AMBIGUOUS' : 'REJECTED', undefined, {status:'FAILED',reason:reply.code as 'ACTIVE_TAB_UNAVAILABLE'|'ACTIVE_TAB_AMBIGUOUS'});
     if (reply.outcome === 'ERROR' && reply.code === 'CONTENT_UNAVAILABLE') throw new ToolError('UPSTREAM');
     if (reply.outcome === 'ERROR' && reply.code === 'STALE_REF' && reply.conflict) this.conflict(reply.conflict.reason);
     if (reply.outcome === 'ERROR') throw new ToolError(reply.code === 'STALE_REF' ? 'CONFLICT' : reply.code === 'EXPIRED' ? 'EXPIRED' : reply.code === 'INVALID_INPUT' ? 'INVALID_INPUT' : reply.code === 'TIMEOUT' ? 'TIMEOUT' : 'REJECTED');

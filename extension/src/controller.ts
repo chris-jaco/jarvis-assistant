@@ -1,3 +1,4 @@
+import { activeTabErrors } from './active-tab.js';
 import { observeTracer, type ObserveTrace } from '../../src/diagnostics/browser-observe.js';
 import type { PopupDiagnostics } from '../../src/diagnostics/popup.js';
 import { parseRequest, replySchema, helloSchema, cancelSchema } from '../../src/browser/attached/protocol.js';
@@ -63,7 +64,7 @@ export class ExtensionController {
           if(this.now()>=readyUntil)break;
           reply=await this.execute(request,trace);
         } if (!['endSession', 'endTask'].includes(request.operation)) this.check(request); return replySchema.parse(decorate({ ...reply, timings: { ...reply.timings, queueMs } })); }
-      catch (error) { const code = error instanceof Error ? error.message : ''; return decorate({ outcome: 'ERROR', code: ['TIMEOUT', 'ACCESS_DENIED', 'EXPIRED', 'STALE_REF', 'REJECTED'].includes(code) ? code as 'REJECTED' : 'UNSUPPORTED' }); }
+      catch (error) { const code = error instanceof Error ? error.message : ''; return decorate({ outcome: 'ERROR', code: [...activeTabErrors, 'TIMEOUT', 'ACCESS_DENIED', 'EXPIRED', 'STALE_REF', 'REJECTED'].includes(code) ? code as 'REJECTED' : 'UNSUPPORTED' }); }
     });
     this.tail = result; this.results.set(request.requestId, { signature, result, session: request.backendSessionId }); return result;
   }
@@ -118,7 +119,7 @@ export class ExtensionController {
     await this.approve(pending.id, pending.origin);
   }
   async preparePending(): Promise<ReturnType<ExtensionController['pending']>> {
-    this.cleanup(); const selected = await this.surface.current().catch(() => undefined);
+    this.cleanup(); const selected = await this.surface.current();
     return [...this.tickets.values()].map(ticket => {
       const tabSelected = !!selected?.url && (ticket.chromeId === undefined || ticket.chromeId === selected.id);
       if (tabSelected) { ticket.chromeId = selected!.id; ticket.origin = siteOrigin(selected!.url); }
@@ -194,7 +195,7 @@ export class ExtensionController {
         return this.ticket(request,chromeId,siteOrigin(target.url!));
       }
       if (target.kind === 'current') {
-        const selected = await this.surface.current().catch(() => undefined);
+        const selected = await this.surface.current();
         if (selected?.url) {
           const compatible = [...this.grants.values()].find(grant => grant.chromeId === selected.id && grant.session === request.backendSessionId && grant.task === request.taskId && grant.lifetime === 'task' && request.args.lifetime === 'task' && !grant.suspended && !grant.handoff && grant.expiresAt > this.now() && grant.origin === siteOrigin(selected.url!));
           if (compatible && (!compatible.persistent || await this.sites?.allows(compatible.origin))) {

@@ -242,3 +242,30 @@ El estado global Chrome `loading` no bloquea por sí solo un documento accesible
 Antes de publicar un snapshot se comprueba durante 80 ms la estabilidad de los controles capturados, conservando identidad funcional y contexto de seguridad estrictos. No se exige un número mínimo de refs, recomendaciones, historial ni silencio global del DOM. El TTL corto comienza tras la construcción; refs obsoletas no se remapean. Si no se recupera contexto dentro del presupuesto, el resultado permanece INCONCLUSIVE y la ejecución conocida se conserva. `status`/`tabs` no reabren tareas terminales; una nueva admisión explícita puede iniciar otra tarea.
 
 Los diagnostics sanitizados de readiness y ELEMENT_VALIDATION permanecen disponibles con `BROWSER_TRACE=true`, desactivado por defecto. No registran contenido, valores escritos, mensajes privados, credenciales ni URLs completas.
+
+
+### Active tab selection from the Service Worker (V0.5.3.3a)
+
+The worker uses `chrome.tabs.query({active:true})` rather than `currentWindow`,
+which is not a reliable user-window identity in a worker/DevTools context. It
+requires exactly one active candidate with a valid tab/window ID and readable URL.
+No candidate or a failed query returns `ACTIVE_TAB_UNAVAILABLE`; multiple
+candidates return `ACTIVE_TAB_AMBIGUOUS`, regardless of site policy or ordering.
+These errors propagate to the tool as a structured FAILED reason (category
+REJECTED or AMBIGUOUS respectively); they do not mean the user pressed Deny.
+The popup uses the same resolver for state, ticket preparation and approval.
+No grant/ticket is created by an ambiguous current-tab request. Site permissions,
+session/task binding, epoch, expiry and approval checks still apply after selection.
+
+This conservative first version intentionally does not choose a focused or
+last-focused window: with several Chrome windows, keep only the intended window
+open for current-tab authorization, saving any work first. No code closes windows.
+A future explicit popup window/tab selection would require a separate design.
+A window/focus change during approval is revalidated by the existing ticket
+tab/origin checks; it cannot silently redirect an already-bound ticket.
+
+Windows acceptance: pull, build and reload the extension (no native host reinstall).
+With one Chrome window, manually select an allowed test page, request observation
+by voice, and verify the operational tab appears. With two Chrome windows, repeat
+a current-tab request: expect ACTIVE_TAB_AMBIGUOUS and no new grant. Close the
+extra window manually only when safe, then repeat. Do not share URLs/titles or DOM.
