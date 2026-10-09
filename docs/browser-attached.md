@@ -269,3 +269,48 @@ With one Chrome window, manually select an allowed test page, request observatio
 by voice, and verify the operational tab appears. With two Chrome windows, repeat
 a current-tab request: expect ACTIVE_TAB_AMBIGUOUS and no new grant. Close the
 extra window manually only when safe, then repeat. Do not share URLs/titles or DOM.
+
+### Explicit operational access lifecycle (V0.5.3.3b)
+
+`browser.accessStatus` is a local READ of the backend's known task binding. It
+never enumerates private tabs, grants permission, injects content or opens tabs.
+READY is only a prerequisite: Chrome/extension still enforce permission, policy,
+epoch, task/session, expiry and scope on every dispatched command.
+
+For an existing page the model is instructed to use:
+`accessStatus → requestAccess(target:current,lifetime:task) if needed → observe`.
+An observe without a usable binding returns `{browserAccess, observed:false}`,
+not a snapshot and not a claim that the user rejected access. REQUIRED, EXPIRED
+and technical REVOKED require an explicit requestAccess tool transition. PENDING
+returns the existing ACCESS_PENDING state and creates no duplicate ticket;
+MANUAL returns the existing handoff. Selection failures still carry
+ACTIVE_TAB_UNAVAILABLE/ACTIVE_TAB_AMBIGUOUS. INVALIDATED indicates unavailable
+session context. Direct provider calls still fail closed with typed reasons.
+
+Only an explicit Cancel in the packaged popup labels the access event
+USER_REJECTED. It blocks further requestAccess/observe in that admission;
+backend guard and adapter both enforce this. Internal invalidation/revocation
+never claims voluntary rejection. A trusted new user-turn admission clears this
+rejection latch, without granting access or restoring any snapshot. No approval,
+Confirmation Engine, ledger or consequential execution rules change.
+
+Accepted endTask still revokes task grants and snapshots, leaves persistent ALLOW
+intact and rotates task ID. The next task must obtain a new operational grant.
+Rejected endTask preserves the task and its grant. session-lifetime grants retain
+the existing separate policy; this patch does not broaden or prolong them.
+
+Deterministic: no implicit permission or observation without binding, no duplicate
+pending access request, no access retry after explicit rejection in the same
+admission, and existing revocation/closure semantics. Model-dependent: selecting
+accessStatus/requestAccess before observe and deciding when the user objective is
+complete; instructions and descriptions are not a universal planner.
+
+Windows acceptance: pull, build, restart Atlas and reload the extension (no native
+host reinstall). Keep one Chrome window, manually select a test page and ask to
+observe it. Expect explicit requestAccess before successful observe; ALLOW may
+satisfy that explicit request under existing policy. Confirm END_TASK_ACCEPTED,
+its operational grant disappears, then ask again: new access and fresh snapshot,
+not a new browser.open. On an ASK page, cancel access in the popup: no observation,
+no repeated access requests for that admission. A new explicit user request can
+start another admission. With multiple active candidates, expect ambiguity and
+no grant. Collect only sanitized diagnostics, never full page observations.

@@ -63,7 +63,7 @@ chrome.runtime.onMessage.addListener((raw, sender, send) => {
     if (message.action === 'revokeSite') await sites.revoke((message as {origin:string}).origin);
     if (message.action === 'revoke') await controller.revoke(message.id as string);
     if (message.action === 'renew') await controller.renew(message.id as string);
-    if (message.action === 'deny') controller.deny(message.id as string);
+    if (message.action === 'deny') controller.deny(message.id as string, true);
     await badge(); const current = await resolveActiveTab(() => chrome.tabs.query({ active: true })); const currentOrigin = current?.url && /^https?:/.test(current.url) ? new URL(current.url).origin : 'Página no soportada'; const response={ currentOrigin, connected: !!port && !!controller.epoch, pending: await controller.preparePending(), authorized: controller.authorized(), sites: await sites.list() };if(correlationId)accessDiagnostics.event(correlationId,'state_ready','OK',performance.now()-started);send(response);
   } catch (error) {if(typeof raw?.correlationId==='string')accessDiagnostics.event(raw.correlationId,'state_ready','FAILED',performance.now()-workerStarted); send({ error: error instanceof Error && activeTabErrors.includes(error.message as typeof activeTabErrors[number]) ? error.message : 'No se pudo completar el cambio de acceso. Revisá la pestaña, el permiso de Chrome y los sitios permitidos; no se asumió aprobación.' }); } })(); return true;
 });

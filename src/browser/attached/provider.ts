@@ -23,7 +23,7 @@ import type { Operation, Reply, AuthorizedTab, BrowserConflictDetail, AttachedOb
 import type { BrowserTransport } from './transport.js';
 const contextReadReasons: readonly string[] = ['UPSTREAM','TIMEOUT','OBSERVATION_REQUIRED','SNAPSHOT_EXPIRED','DOCUMENT_CHANGED','ELEMENT_CHANGED','SNAPSHOT_CONSUMED'];
 interface ContextRecovery { status: 'READY' | 'REQUIRED' | 'RECOVERING' | 'INCONCLUSIVE'; attempts: number; ready: string | null }
-interface Session { requestedIdentifiers?:string[]; drafts?:ConsequentialFoundation; observeRequestId?:string; intent?:TaskIntent; readAdmission?:string; inventory?:{admission:string;expires:number}; admission?:string; progress:Map<string,ActionRecord>; acknowledged:Set<string>; rejectionToken?:string; cancelled?:boolean; terminal?:boolean; contextRecovery?: ContextRecovery; accessCorrelation?:string; traceNext?:boolean; actionRecord?: ActionRecord; accessRevoked?: boolean; id: string; task: string; connection?: string; active?: string; tabs: Map<string, AuthorizedTab>; workflow?: Exclude<Reply, { outcome: 'OK' } | { outcome: 'ERROR' }>; ready?: string; observation?: { tabId: string; scopeId: string; documentId: string; snapshotId: string; refs: Set<string>; expires: number }; closed?: boolean; failures: number; uncertain?: boolean; invalidation?: BrowserConflictDetail['reason']; context: 'READY' | 'OBSERVATION_REQUIRED'; pendingStep?: string; pendingRecovery?: {signature:string;scopeId:string}; completed?: { key: string; result: unknown; record:ActionRecord }; knownRefs: Map<string, string>; lastObservation?: AttachedObservation; timings: BrowserTimings; tail: Promise<unknown>; deadline?: number }
+interface Session { userAccessRejected?:boolean; requestedIdentifiers?:string[]; drafts?:ConsequentialFoundation; observeRequestId?:string; intent?:TaskIntent; readAdmission?:string; inventory?:{admission:string;expires:number}; admission?:string; progress:Map<string,ActionRecord>; acknowledged:Set<string>; rejectionToken?:string; cancelled?:boolean; terminal?:boolean; contextRecovery?: ContextRecovery; accessCorrelation?:string; traceNext?:boolean; actionRecord?: ActionRecord; accessRevoked?: boolean; id: string; task: string; connection?: string; active?: string; tabs: Map<string, AuthorizedTab>; workflow?: Exclude<Reply, { outcome: 'OK' } | { outcome: 'ERROR' }>; ready?: string; observation?: { tabId: string; scopeId: string; documentId: string; snapshotId: string; refs: Set<string>; expires: number }; closed?: boolean; failures: number; uncertain?: boolean; invalidation?: BrowserConflictDetail['reason']; context: 'READY' | 'OBSERVATION_REQUIRED'; pendingStep?: string; pendingRecovery?: {signature:string;scopeId:string}; completed?: { key: string; result: unknown; record:ActionRecord }; knownRefs: Map<string, string>; lastObservation?: AttachedObservation; timings: BrowserTimings; tail: Promise<unknown>; deadline?: number }
 export class BrowserWorkflow extends Error { constructor(readonly reply: Exclude<Reply, { outcome: 'OK' }>) { super(reply.outcome); } }
 export class AttachedChromeProvider implements BrowserProvider {
   readonly attached = true; private scope = new AsyncLocalStorage<Session>(); private sessions = new Map<string, Session>();
@@ -35,12 +35,12 @@ export class AttachedChromeProvider implements BrowserProvider {
       if (event.event === 'accessRequired' && event.access) { session.workflow = event.access; session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; }
       if (event.event === 'accessGranted' || event.scopeId === session.tabs.get(session.active ?? '')?.scopeId) { session.observation = undefined; session.context = 'OBSERVATION_REQUIRED'; session.invalidation = 'DOCUMENT_CHANGED'; }
       if (event.event === 'accessGranted' && event.tab) { const reused=session.tabs.get(event.tab.id)?.scopeId===event.tab.scopeId; session.accessRevoked = false; if(!reused){session.failures = 0; session.pendingStep = undefined; session.pendingRecovery = undefined; session.completed = undefined; session.contextRecovery = undefined;} session.tabs.set(event.tab.id, event.tab); session.active = event.tab.id; if (session.workflow?.outcome === 'ACCESS_PENDING' && (!event.accessRequestId || event.accessRequestId === session.workflow.accessRequestId)) { session.workflow = undefined; session.ready = randomUUID(); } else if (session.workflow?.outcome === 'REQUIRES_USER_INTERACTION' && session.workflow.reason === 'ORIGIN_PERMISSION') { session.workflow = undefined; session.ready = randomUUID(); } }
-      else if (event.event === 'accessRevoked') { if (event.accessRequestId && (session.workflow?.outcome !== 'ACCESS_PENDING' || session.workflow.accessRequestId !== event.accessRequestId)) return; session.accessRevoked = true; session.ready = undefined; for (const [id, tab] of session.tabs) if (tab.scopeId === event.scopeId) { session.tabs.delete(id); if (session.active === id) session.active = undefined; } session.workflow = undefined; }
+      else if (event.event === 'accessRevoked') { if (event.accessRequestId && (session.workflow?.outcome !== 'ACCESS_PENDING' || session.workflow.accessRequestId !== event.accessRequestId)) return; session.userAccessRejected=event.rejectionReason==='USER_REJECTED';session.accessRevoked = true; session.ready = undefined; for (const [id, tab] of session.tabs) if (tab.scopeId === event.scopeId) { session.tabs.delete(id); if (session.active === id) session.active = undefined; } session.workflow = undefined; }
     });
   }
   inSession<T>(id: string, work: () => Promise<T>): Promise<T> {
     let session = this.sessions.get(id); if (!session) { if (this.sessions.size >= 10) throw new ToolError('LIMIT'); session = { id, task: randomUUID(), progress:new Map(),acknowledged:new Set(),tabs: new Map(), failures: 0, context: 'OBSERVATION_REQUIRED', knownRefs: new Map(), timings: {}, tail: Promise.resolve() }; this.sessions.set(id, session); }
-    if (session.closed) throw new ToolError('REJECTED'); return this.scope.run(session, work);
+    if (session.closed) throw new ToolError('REJECTED',undefined,{status:'FAILED',reason:'TASK_SESSION_INVALIDATED'}); return this.scope.run(session, work);
   }
   state(id: string) { const session = this.sessions.get(id); return session && !session.closed ? { taskId:session.task,continuation:this.receipt(session), workflow: session.workflow ?? null, ready: session.ready ?? null, accessRevoked: session.accessRevoked ?? false, actionOutcome:session.actionRecord?.result() ?? null, accessCorrelation:session.accessCorrelation ?? null, contextRecovery:session.contextRecovery ?? null } : { workflow: null, ready: null }; }
   private receipt(session:Session):ContinuationReceipt {return {taskId:session.task,tokens:[session.ready,session.contextRecovery?.status==='READY'?session.contextRecovery.ready:undefined,session.rejectionToken].filter((token):token is string=>!!token&&!session.acknowledged.has(token))};}
@@ -50,7 +50,7 @@ export class AttachedChromeProvider implements BrowserProvider {
     if(session.admission===admission||session.workflow)return false;
     // A trusted new user turn starts a new progress ledger, not a new Chrome
     // permission. Never import an earlier objective's action as completion proof.
-    session.drafts?.invalidateDrafts();session.requestedIdentifiers=[...new Set(utterance?.match(/[^\s<>@]+@[^\s<>@]+\.[a-zA-Z]{2,}|\+[1-9][0-9 ()-]{5,24}/g)??[])].slice(0,10);session.admission=admission;session.intent=classifyTaskIntent(utterance);session.readAdmission=undefined;session.inventory=undefined;session.progress.clear();session.terminal=false;session.cancelled=false;
+    session.drafts?.invalidateDrafts();session.requestedIdentifiers=[...new Set(utterance?.match(/[^\s<>@]+@[^\s<>@]+\.[a-zA-Z]{2,}|\+[1-9][0-9 ()-]{5,24}/g)??[])].slice(0,10);session.userAccessRejected=false;session.admission=admission;session.intent=classifyTaskIntent(utterance);session.readAdmission=undefined;session.inventory=undefined;session.progress.clear();session.terminal=false;session.cancelled=false;
     // New admission gets fresh operational context, never old completion proof.
     // Keep the uncertainty latch and Chrome consent/scopes intact.
     session.contextRecovery=undefined;session.observation=undefined;session.lastObservation=undefined;session.context='OBSERVATION_REQUIRED';session.completed=undefined;session.pendingStep=undefined;session.pendingRecovery=undefined;session.failures=0;session.rejectionToken=undefined;session.ready=undefined;
@@ -61,7 +61,7 @@ export class AttachedChromeProvider implements BrowserProvider {
   private traceTask(raw:unknown):void {this.taskDiagnostics.enabled=this.diagnostics?.enabled===true;this.taskDiagnostics.event(raw);}
   cancelFromUser():void {this.session().cancelled=true;}
   terminalFailure():void {this.session().terminal=true;}
-  private session(): Session { const session = this.scope.getStore(); if (!session || session.closed) throw new ToolError('REJECTED'); return session; }
+  private session(): Session { const session = this.scope.getStore(); if (!session || session.closed) throw new ToolError('REJECTED',undefined,{status:'FAILED',reason:'TASK_SESSION_INVALIDATED'}); return session; }
   private async connection(session: Session, signal: AbortSignal): Promise<string> {
     if (!this.enabled || this.transport.configuration?.().configured === false) throw new ToolError('UNCONFIGURED');
     const connections = this.transport.waitForConnections ? await this.transport.waitForConnections(signal) : this.transport.connections();
@@ -106,10 +106,21 @@ export class AttachedChromeProvider implements BrowserProvider {
     if (reply.outcome === 'ERROR') throw new ToolError(reply.code === 'STALE_REF' ? 'CONFLICT' : reply.code === 'EXPIRED' ? 'EXPIRED' : reply.code === 'INVALID_INPUT' ? 'INVALID_INPUT' : reply.code === 'TIMEOUT' ? 'TIMEOUT' : 'REJECTED');
     throw new BrowserWorkflow(reply);
   }
-  private binding(): { scopeId: string; tabId: string } { const session = this.session(); const tab = session.tabs.get(session.active ?? ''); if (!tab || tab.expiresAt <= Date.now()) throw new ToolError('REJECTED'); return { scopeId: tab.scopeId, tabId: tab.id }; }
+  operationalAccess() {
+    const session=this.scope.getStore();
+    const status=!session||session.closed?'INVALIDATED':session.userAccessRejected?'USER_REJECTED':session.workflow?.outcome==='ACCESS_PENDING'?'PENDING':session.workflow?.outcome==='REQUIRES_USER_INTERACTION'?'MANUAL':session.accessRevoked?'REVOKED':!session.tabs.get(session.active??'')?'REQUIRED':session.tabs.get(session.active??'')!.expiresAt<=Date.now()?'EXPIRED':'READY';
+    return {status,nextTool:['REQUIRED','EXPIRED','REVOKED'].includes(status)?'browser.requestAccess':status==='READY'?'browser.observe':null,requiresExplicitAccess:status!=='READY'};
+  }
+  private binding(): { scopeId: string; tabId: string } {
+    const session = this.session(); const tab = session.tabs.get(session.active ?? '');
+    if(session.userAccessRejected)throw new ToolError('REJECTED',undefined,{status:'FAILED',reason:'USER_ACCESS_REJECTED'});
+    if (!tab) throw new ToolError('REJECTED',undefined,{status:'FAILED',reason:'OPERATIONAL_ACCESS_REQUIRED'});
+    if(tab.expiresAt<=Date.now())throw new ToolError('EXPIRED',undefined,{status:'FAILED',reason:'EXPIRED'});
+    return { scopeId: tab.scopeId, tabId: tab.id };
+  }
   async status(): Promise<BrowserStatus> { const connections = this.enabled ? this.transport.connections() : []; return { available: this.enabled, connected: connections.length > 0, visible: true, connections, ...(!this.enabled ? { reason: 'disabled' as const } : connections.length === 0 ? { reason: 'unavailable' as const } : {}) }; }
   async ensureBrowser(_signal: AbortSignal): Promise<BrowserStatus> { return this.status(); }
-  async requestTabAccess(input: { target: { kind: 'current' } | { kind: 'new'; url: string }; purpose: string; lifetime: 'task' | 'session' }, signal: AbortSignal): Promise<Reply> { this.session().accessRevoked = false; const reply = await this.call('requestTabAccess', input, signal); if (reply.outcome === 'ERROR') this.unwrap(reply); return reply; }
+  async requestTabAccess(input: { target: { kind: 'current' } | { kind: 'new'; url: string }; purpose: string; lifetime: 'task' | 'session' }, signal: AbortSignal): Promise<Reply> { if(this.session().userAccessRejected)throw new ToolError('REJECTED',undefined,{status:'FAILED',reason:'USER_ACCESS_REJECTED'});this.session().accessRevoked = false; const reply = await this.call('requestTabAccess', input, signal); if (reply.outcome === 'ERROR') this.unwrap(reply); return reply; }
   async listAuthorizedTabs(signal: AbortSignal): Promise<BrowserTab[]> { return this.listTabs(signal); }
   async listTabs(signal: AbortSignal): Promise<BrowserTab[]> {
     const tabs = this.unwrap<AuthorizedTab[]>(await this.call('listAuthorizedTabs', {}, signal)); const session = this.session(); session.tabs = new Map(tabs.map(tab => [tab.id, tab])); if (!session.tabs.has(session.active ?? '')) session.active = tabs[0]?.id;

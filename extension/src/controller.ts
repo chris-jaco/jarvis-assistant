@@ -126,9 +126,9 @@ export class ExtensionController {
       return { id: ticket.id, purpose: privateText(String(ticket.request.args.purpose),160), lifetime: String(ticket.request.args.lifetime), origin: ticket.origin, tabSelected };
     });
   }
-  deny(ticketId: string): void {
+  deny(ticketId: string, explicitUserRejection = false): void {
     const ticket = this.tickets.get(ticketId); if (!ticket) return; this.tickets.delete(ticketId);
-    if (this.epoch) this.emit({protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:this.epoch,backendSessionId:ticket.request.backendSessionId,event:'accessRevoked',accessRequestId:ticketId});
+    if (this.epoch) this.emit({protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:this.epoch,backendSessionId:ticket.request.backendSessionId,event:'accessRevoked',accessRequestId:ticketId,...(explicitUserRejection?{rejectionReason:'USER_REJECTED'}:{})});
   }
   async revokeOrigin(origin: string): Promise<void> {
     for (const [id,ticket] of this.tickets) {
