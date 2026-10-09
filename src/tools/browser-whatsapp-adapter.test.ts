@@ -38,3 +38,32 @@ test('content observation marks changed evidence invalidated and still blocks co
 
 test('header text changing during READ invalidates evidence without reading name/message values',()=>{const f=fixture();try{const watch=f.adapter.watch(f.win.document);f.win.document.querySelector('header')!.firstChild!.nodeValue='CHANGED_PRIVATE_NAME';assert.equal(watch.changed(),true);watch.stop();assert.equal(f.read().identity,'NOT_VERIFIED');}finally{f.close();}});
 test('observation limits do not assert uniqueness beyond the bounded scan',()=>{const f=fixture(html+'<aside>'+Array.from({length:70},()=>'<div role="dialog"></div>').join('')+'</aside>');try{const evidence=f.read();assert.equal(evidence.truncated,true);assert.equal(evidence.activePanelCandidate,false);assert.deepEqual(evidence.handles,{});assert.equal(evidence.identity,'NOT_VERIFIED');}finally{f.close();}});
+
+test('closed contact info: visible generic drawer/dialog never asserts a contact candidate',()=>{
+ const f=fixture(html+'<aside data-testid="drawer-side"></aside><div role="dialog"></div>');try{const e=f.read();assert.equal(e.contactCandidates,0);assert.equal(e.contactPanel,'NOT_VERIFIED');assert.equal(e.reason,'STRUCTURE_ONLY');assert.equal(e.identity,'NOT_VERIFIED');}finally{f.close();}
+});
+test('open contact info: nested drawers and specific nodes form one structural candidate',()=>{
+ const f=fixture(html+'<aside data-testid="drawer-side"></aside><aside data-testid="drawer-contact"><div data-testid="drawer-inner"><section data-testid="contact-info"><div data-testid="contact-info-header"></div><div role="dialog"><span data-testid="contact-info-detail"></span></div><div data-testid="contact-info-footer"></div></section></div></aside>');try{const e=f.read();assert.equal(e.contactCandidates,1);assert.equal(e.contactPanel,'CANDIDATE');assert.equal(e.reason,'CONTACT_BINDING_UNPROVEN');assert.equal(e.contactAssociation,'NOT_VERIFIED');assert.equal(e.identity,'NOT_VERIFIED');assert.equal(e.phoneEvidence,'NOT_VERIFIED');}finally{f.close();}
+});
+test('disjoint contact-info panels remain ambiguous, never merged through body',()=>{
+ const f=fixture(html+'<aside data-testid="drawer-one"><div data-testid="contact-info"></div></aside><aside data-testid="drawer-two"><div data-testid="contact-info"></div></aside>');try{const e=f.read();assert.equal(e.contactCandidates,2);assert.equal(e.contactPanel,'NOT_VERIFIED');assert.equal(e.reason,'AMBIGUOUS_STRUCTURE');}finally{f.close();}
+});
+test('specific evidence beyond first three generic candidates is not silently discarded',()=>{
+ const f=fixture(html+'<aside data-testid="drawer-one"></aside><aside data-testid="drawer-two"></aside><aside data-testid="drawer-three"></aside><aside data-testid="drawer-four"><section data-testid="contact-info"></section></aside>');try{const e=f.read();assert.equal(e.contactPanel,'CANDIDATE');assert.equal(e.truncated,false);}finally{f.close();}
+});
+test('hidden, covered and conversation-contained matches are excluded before grouping',()=>{
+ const f=fixture(html+'<aside hidden data-testid="contact-info-hidden"></aside><aside data-testid="contact-info-covered"></aside><aside data-testid="drawer-contact"><section data-testid="contact-info"></section></aside>');try{
+  f.win.document.querySelector('main')!.insertAdjacentHTML('beforeend','<div data-testid="contact-info-inside"></div>');
+  const e=f.adapter.read(f.win.document,node=>node.checkVisibility()&&!node.matches('[data-testid="contact-info-covered"]'),f.binding);
+  assert.equal(e.contactCandidates,1);assert.equal(e.contactPanel,'CANDIDATE');assert.equal(e.contactAssociation,'NOT_VERIFIED');
+ }finally{f.close();}
+});
+test('candidate grouping never reads private values and never establishes association',()=>{
+ const f=fixture(html+'<aside data-testid="drawer-contact"><div data-testid="contact-info">PRIVATE_CONTACT<span>PRIVATE_NUMBER</span></div></aside>');try{Object.defineProperty(f.win.HTMLElement.prototype,'textContent',{get(){throw new Error('Private read');},configurable:true});const e=f.read();assert.equal(e.contactPanel,'CANDIDATE');assert.equal(e.identity,'NOT_VERIFIED');assert.equal(e.contactAssociation,'NOT_VERIFIED');assert.ok(!JSON.stringify(e).includes('PRIVATE_'));}finally{f.close();}
+});
+test('contact panel replacement during an observation invalidates evidence without upgrading identity',async()=>{
+ const f=fixture(html+'<aside data-testid="drawer-contact"><section data-testid="contact-info"></section></aside>');let changed=false;
+ const engine=new ContentEngine(f.win as unknown as Window & typeof globalThis,Date.now,randomUUID,async()=>{if(!changed){changed=true;const node=f.win.document.querySelector('[data-testid="contact-info"]')!;node.replaceWith(node.cloneNode(true));}});
+ const access={scopeId:f.binding.scopeId,tabId:f.binding.tabId,session:randomUUID(),epoch:f.binding.epoch,origin:'https://web.whatsapp.com',expiresAt:Date.now()+60000};engine.initialize(access);
+ try{const result=await engine.run('observe',{scopeId:access.scopeId,tabId:access.tabId},Date.now()+10000,{session:access.session,epoch:access.epoch});assert.equal(result.outcome,'OK');if(result.outcome!=='OK'||!('elements'in result.data))throw new Error();const e=result.data.conversationEvidence!;assert.equal(e.state,'INVALIDATED');assert.equal(e.reason,'CONTEXT_CHANGED');assert.deepEqual(e.handles,{});assert.equal(e.identity,'NOT_VERIFIED');assert.equal(e.contactAssociation,'NOT_VERIFIED');}finally{engine.destroy();f.close();}
+});
