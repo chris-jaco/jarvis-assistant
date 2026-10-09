@@ -1,3 +1,4 @@
+import { assessConversationEvidence } from '../consequential/conversation-evidence.js';
 import { ConsequentialFoundation } from '../consequential/foundation.js';
 import { draftContextSchema } from '../consequential/semantic.js';
 import type { DraftContext } from '../consequential/semantic.js';
@@ -151,6 +152,7 @@ export class AttachedChromeProvider implements BrowserProvider {
   }
   private draftContext(data:AttachedObservation):DraftContext {
     const session=this.session(),tab=session.tabs.get(session.active??'');
+    if(data.conversationEvidence)throw new ToolError('REJECTED');
     // Successful extension observe attests all three existing permission layers.
     // Bind that evidence to this exact backend admission and operational scope.
     if(session.uncertain||session.cancelled||session.workflow||session.accessRevoked||!session.admission||!session.connection||!this.transport.connections().includes(session.connection)||!tab||tab.id!==data.tabId||tab.scopeId!==data.scopeId||!data.conversationContext||new URL(data.url).origin!==data.conversationContext.origin)throw new ToolError('REJECTED');
@@ -160,6 +162,7 @@ export class AttachedChromeProvider implements BrowserProvider {
     const session=this.session();
     const epoch=this.transport.epoch;const data=await this.observeWithResume(signal);
     if(epoch!==this.transport.epoch)throw new ToolError('REJECTED');
+    if(data.conversationEvidence)return {...assessConversationEvidence(data.conversationEvidence),draftOnly:true,candidateCount:0};
     if(!data.conversationContext)return {status:'INSUFFICIENT_EVIDENCE',candidateCount:0,draftOnly:true};
     const context=this.draftContext(data);signal.throwIfAborted();
     session.drafts??=ConsequentialFoundation.drafts(session.id);

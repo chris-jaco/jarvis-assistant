@@ -1421,3 +1421,14 @@ antes de habilitar ese acceptance, sin relajar el criterio ni agregar selectores
 al BrowserProvider. Criterio, limitaciones y pruebas manuales en
 [docs/browser-safe-draft.md](docs/browser-safe-draft.md).
 V0.5.3.3 no está implementada y ningún envío browser real está habilitado.
+
+## V0.5.3.3 — WhatsApp semantic adapter (READ-only, evidencia parcial)
+
+La extensión incorpora un extractor aislado para las pistas estructurales observadas
+sobre WhatsApp Web. Devuelve `conversationEvidence` tipada, vinculada al snapshot,
+sin nombres, teléfonos ni mensajes. Un panel/contacto coexistente no prueba identidad:
+el backend mantiene `INSUFFICIENT_EVIDENCE` y no prepara un borrador desde esa evidencia.
+No se encontró aún una prueba de chat individual ni de asociación panel–conversación;
+no hay lectura automática de teléfonos, escritura, Send/Enter o nueva confirmación.
+Arquitectura, límites y acceptance Windows:
+[docs/browser-whatsapp-adapter.md](docs/browser-whatsapp-adapter.md).
