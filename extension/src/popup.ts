@@ -38,7 +38,10 @@ async function command(action: string, fields: Record<string,unknown> = {}, corr
     }
     for (const tab of reply.authorized) {
       const row=document.createElement('div');const text=document.createElement('p');text.textContent=`${tab.title || 'Pestaña autorizada'} · ${tab.url} · ${tab.state}`;row.append(text);
-      if(tab.state==='ACTIVE'&&new URL(tab.url).origin==='https://web.whatsapp.com')button(row,'Confirmo que esta conversación es el destinatario',()=>command('selectConversation',{id:tab.scopeId}));
+      if(tab.state==='ACTIVE'&&tab.manualSelectionPending&&new URL(tab.url).origin==='https://web.whatsapp.com'){
+        button(row,'Confirmo que esta conversación es el destinatario',()=>command('selectConversation',{id:tab.scopeId}));
+        button(row,'Cancelar selección',()=>command('cancelManualSelection',{id:tab.scopeId}));
+      }
       button(row,'Revocar pestaña',()=>command('revoke',{id:tab.scopeId}));authorized.append(row);
     }
     for (const site of reply.sites) {

@@ -1432,3 +1432,23 @@ No se encontró aún una prueba de chat individual ni de asociación panel–con
 no hay lectura automática de teléfonos, escritura, Send/Enter o nueva confirmación.
 Arquitectura, límites y acceptance Windows:
 [docs/browser-whatsapp-adapter.md](docs/browser-whatsapp-adapter.md).
+
+### V0.5.3.6A — selección manual y borrador privado
+
+Con un grant operativo `ACTIVE`, Atlas puede llamar una vez a
+`browser.requestManualSelection`. La tarea queda en `WAITING_MANUAL` y el popup
+muestra confirmar/cancelar sólo para la pestaña y solicitud vigentes. La selección
+se vincula al `manualRequestId` exacto, task, admission, scope, tab, epoch y
+documento. El cambio de pestaña sólo invalida dentro de la ventana Chrome del
+grant; navegación, revocación, expiración o reconexión también la invalidan. Las
+resoluciones no seleccionadas dejan una tombstone por request en el content
+script, por lo que una respuesta asíncrona tardía no puede publicar evidencia. La resolución es
+idempotente (`SELECTED`, `CANCELLED`, `EXPIRED` o `INVALIDATED`) y genera como
+máximo una continuación interna.
+
+`SELECTED` significa exclusivamente `USER_SELECTED`: no prueba identidad. Permite
+crear un borrador privado `FROZEN`, que permanece revisable en RAM hasta su TTL aun
+después de cerrar la preparación y revocar el grant operativo. No concede autoridad
+sobre WhatsApp. `browser.sendMessage` no está registrado, `sendSelectedMessage`
+falla cerrado en backend/extensión, y type/Enter/click sobre compositor/Send siguen
+bloqueados. No se cambiaron permisos MV3.

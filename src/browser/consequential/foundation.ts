@@ -41,7 +41,7 @@ export class ConsequentialFoundation {
  private draftAccess(raw:DraftContext):DraftContext {
   const context=draftContextSchema.parse(raw);
   if(context.backendSessionId!==this.sessionId||context.origin!==context.semantic.origin||Math.min(context.snapshotExpiresAt,context.grantExpiresAt,context.manualSelection?.expiresAt??Infinity)<=this.now())throw new ToolError('EXPIRED');
-  if(context.manualSelection&&(context.manualSelection.scopeId!==context.scopeId||context.manualSelection.tabId!==context.tabId||context.manualSelection.documentId!==context.documentId||context.manualSelection.epoch!==context.connectionEpoch))throw new ToolError('REJECTED');
+  if(context.manualSelection&&(context.manualSelection.admissionId!==context.admissionId||context.manualSelection.taskId!==context.taskId||context.manualSelection.scopeId!==context.scopeId||context.manualSelection.tabId!==context.tabId||context.manualSelection.documentId!==context.documentId||context.manualSelection.epoch!==context.connectionEpoch))throw new ToolError('REJECTED');
   return context;
  }
  private draftDigest(context:DraftContext,conversation:Conversation):string {
@@ -90,6 +90,11 @@ export class ConsequentialFoundation {
    }
   }catch{this.invalidate(id,'ACCESS_REVOKED');}
   return this.draftView(entry);
+ }
+ reviewStoredDraft(id:string) {
+  const entry=this.entry(id);if(!entry.draft)throw new ToolError('REJECTED');
+  if(entry.intent.expiresAt<=this.now()&&!terminal.has(entry.state)){if(entry.draft.selectionId)this.manualFailure(entry,'EXPIRED','EXPIRED');else this.failure(entry,'EXPIRED','EXPIRED');}
+  return freeze({...this.draftView(entry),contextStatus:'NOT_REVALIDATED' as const});
  }
  reconcileDrafts(context:DraftContext) {for(const entry of this.entries.values())if(entry.draft&&!terminal.has(entry.state))this.reviewDraft(entry.intent.intentId,context);}
  invalidateDrafts() {for(const entry of this.entries.values())if(entry.draft&&!terminal.has(entry.state))this.invalidate(entry.intent.intentId,'PRECONDITION_CHANGED');}

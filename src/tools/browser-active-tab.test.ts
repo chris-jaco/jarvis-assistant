@@ -11,7 +11,7 @@ test('active tab resolution: zero candidates fails specifically',async()=>{
  await assert.rejects(resolveActiveTab(async()=>[]),/ACTIVE_TAB_UNAVAILABLE/);
 });
 test('active tab resolution: one candidate preserves its explicit identity',async()=>{
- assert.deepEqual(await resolveActiveTab(async()=>[tab]),{id:7,url:tab.url,title:tab.title});
+ assert.deepEqual(await resolveActiveTab(async()=>[tab]),{id:7,windowId:11,url:tab.url,title:tab.title});
 });
 for(const tabs of [[tab,{...tab,id:8,windowId:12}],[{...tab,id:8,windowId:12},tab],[tab,{...tab,id:8}]])test('multiple candidates never select by order, origin, permission or window',async()=>{
  await assert.rejects(resolveActiveTab(async()=>tabs),/ACTIVE_TAB_AMBIGUOUS/);
@@ -59,8 +59,8 @@ test('popup-selected tab cannot approve a ticket bound to another window tab',as
  await controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
  const reply=await controller.receive({protocol:'atlas.browser',version:1,kind:'request',requestId:randomUUID(),backendSessionId:randomUUID(),taskId:randomUUID(),connectionEpoch:epoch,deadlineAt:Date.now()+17000,operation:'requestTabAccess',args:{target:{kind:'current'},purpose:'Read only',lifetime:'task'}});
  assert.equal(reply.outcome,'ACCESS_PENDING');
- await controller.preparePending({id:7,url:tab.url!,title:tab.title!});
- await assert.rejects(controller.approve(controller.pending()[0]!.id,undefined,false,undefined,{id:8,url:'https://other.example/',title:''}),/ACCESS_DENIED/);
+ await controller.preparePending({id:7,windowId:11,url:tab.url!,title:tab.title!});
+ await assert.rejects(controller.approve(controller.pending()[0]!.id,undefined,false,undefined,{id:8,windowId:12,url:'https://other.example/',title:''}),/ACCESS_DENIED/);
  assert.equal(controller.authorized().length,0);assert.equal(effects,0);
 });
 test('popup approval re-resolves active candidates and cannot grant after ambiguity appears',async()=>{

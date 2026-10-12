@@ -98,6 +98,7 @@ export class BrowserAdapter implements ToolAdapter {
     if (this.provider instanceof AttachedChromeProvider) {
       const attached = this.provider;
       return [...tools.filter(tool => tool.id !== 'browser.close'),
+        tool('requestManualSelection', 'Solicita que la persona confirme desde el popup la conversación visible de WhatsApp. Requiere grant operativo ACTIVE y deja la tarea en WAITING_MANUAL. La selección resultante es USER_SELECTED, nunca identidad verificada, y no autoriza escribir ni enviar.', empty, async (_,signal)=>({browserState:await attached.requestManualSelection(signal)}), true),
         tool('prepareDraft', 'Prepara un borrador privado. Identidad verificada requiere nombre e identificador exacto; WhatsApp admite selección explícita de la conversación desde el popup y conserva assurance USER_SELECTED. Nunca escribe ni envía.', draftRequestSchema, (input, signal) => attached.prepareDraft(input,signal),true),
         tool('reviewDraft', 'READ: revalida un borrador privado contra contexto fresco; cambios materiales invalidan. Nunca confirma, escribe ni envía.', z.object({intentId:ref}).strict(), (input,signal)=>attached.reviewDraft((input as {intentId:string}).intentId,signal),true),
         tool('accessStatus', 'READ local del binding operativo de esta tarea: READY permite observe; REQUIRED/EXPIRED/REVOKED requiere requestAccess explícito. ALLOW del sitio no es grant. PENDING espera popup; USER_REJECTED detiene la admisión sin retry; no abre ni autoriza pestañas.', empty,async()=>attached.operationalAccess(),true),

@@ -9,29 +9,31 @@ import { siteOrigin } from './site-authorization.js';
 import type { SiteAuthorization } from './site-authorization.js';
 export interface Surface {
   observeAuthorization?(grant:Grant):Promise<Pick<ObserveTrace,'chromePermission'|'persistentPolicy'|'sameOrigin'>>;
-  tab?(id: number): Promise<{ id: number; url?: string; title?: string; status?: string; pendingUrl?: string }>;
-  current(): Promise<{ id: number; url: string; title: string }>;
-  create(url: string): Promise<number>;
+  tab?(id: number): Promise<{ id: number; windowId?:number; url?: string; title?: string; status?: string; pendingUrl?: string }>;
+  current(): Promise<{ id: number; windowId?:number; url: string; title: string }>;
+  create(url: string): Promise<number|{id:number;windowId:number}>;
   activate(tab: number): Promise<void>;
   navigate(tab: number, url: string): Promise<void>;
   history(tab: number, action: 'back' | 'forward' | 'reload'): Promise<void>;
   content(tab: number, grant: Grant, request: Request): Promise<Reply>;
-  selectConversation?(tab:number,grant:Grant,epoch:string):Promise<boolean>;
+  selectConversation?(tab:number,grant:Grant,epoch:string,manualRequestId:string,taskId:string,admissionId:string,documentId:string):Promise<boolean>;
+  clearManualSelection?(tab:number,manualRequestId:string):Promise<void>;
   invalidate(tab: number, documentOnly?: boolean): Promise<void>;
 }
-export interface Grant { scopeId: string; tabId: string; chromeId: number; origin: string; session: string; task: string; expiresAt: number; lifetime: 'task' | 'session'; title: string; url: string; handoff?: { id: string; reason: Extract<Reply, { outcome: 'REQUIRES_USER_INTERACTION' }>['reason'] }; suspended?: boolean; persistent?: boolean }
+interface ManualSelectionRequest {id:string;admissionId:string;documentId:string;expiresAt:number}
+export interface Grant { scopeId: string; tabId: string; chromeId: number; windowId?:number; origin: string; session: string; task: string; expiresAt: number; lifetime: 'task' | 'session'; title: string; url: string; handoff?: { id: string; reason: Extract<Reply, { outcome: 'REQUIRES_USER_INTERACTION' }>['reason'] }; manualRequest?:ManualSelectionRequest; manualSelected?:boolean; suspended?: boolean; persistent?: boolean }
 interface Ticket { id: string; request: Request; expiresAt: number; chromeId?: number; origin?: string; priorScope?: string; tabId?: string }
 export class ExtensionController {
   epoch?: string; readonly grants = new Map<string, Grant>(); readonly tickets = new Map<string, Ticket>();
   private results = new Map<string, { signature: string; result: Promise<Reply>; session: string }>();
   private cancelled = new Set<string>(); private ended = new Set<string>(); private endedTasks = new Set<string>(); private tail: Promise<unknown> = Promise.resolve();
   private retiredScopes=new Map<string,'REVOKED'|'EXPIRED'>();
-  private approving = false; private activeTasks = new Set<string>();
+  private approving = false; private activeTasks = new Set<string>();private manualSelecting=new Set<string>();private resolvedManual=new Set<string>();
   constructor(private readonly surface: Surface, private readonly emit: (event: unknown) => void, private readonly now = Date.now, private readonly id = () => crypto.randomUUID(), private readonly sites?: Pick<SiteAuthorization, 'allows' | 'allowAlways'>, private readonly diagnostics?:PopupDiagnostics, private readonly pause = (ms:number):Promise<void> => new Promise(resolve => setTimeout(resolve,ms))) {}
   async reset(raw?: unknown): Promise<void> {
     this.epoch = raw === undefined ? undefined : helloSchema.parse(raw).connectionEpoch;
     this.retiredScopes.clear();
-    const old = [...this.grants.values()]; this.grants.clear(); this.tickets.clear(); this.results.clear(); this.cancelled.clear(); this.ended.clear(); this.endedTasks.clear(); this.activeTasks.clear();
+    const old = [...this.grants.values()]; this.grants.clear(); this.tickets.clear(); this.results.clear(); this.cancelled.clear(); this.ended.clear(); this.endedTasks.clear(); this.activeTasks.clear();this.manualSelecting.clear();this.resolvedManual.clear();
     await Promise.all(old.map(grant => this.surface.invalidate(grant.chromeId).catch(() => {})));
   }
   cancel(raw: unknown): void {
@@ -77,22 +79,32 @@ export class ExtensionController {
     if(grant&&taskGrant==='PRESENT'&&this.surface.observeAuthorization)try{facts=await this.surface.observeAuthorization(grant);}catch{failureReason='AUTH_DIAGNOSTIC_UNAVAILABLE';}
     trace({stage:'OBSERVE_AUTH',boundary:'EXTENSION',taskGrant,...facts,failureReason});
   }
-  private dto(grant: Grant): AuthorizedTab { return { id: grant.tabId, scopeId: grant.scopeId, title: grant.title, url: grant.url, active: false, expiresAt: grant.expiresAt, state: grant.suspended ? 'SUSPENDED_ORIGIN' : grant.handoff ? 'MANUAL_INTERVENTION' : 'ACTIVE' }; }
-  private cleanup(): void { for (const grant of [...this.grants.values()]) if (grant.expiresAt <= this.now()) void this.revoke(grant.scopeId); for (const [id, ticket] of this.tickets) if (ticket.expiresAt <= this.now() || this.ended.has(ticket.request.backendSessionId)) this.tickets.delete(id); }
+  private dto(grant: Grant): AuthorizedTab { return { id: grant.tabId, scopeId: grant.scopeId, title: grant.title, url: grant.url, active: false, expiresAt: grant.expiresAt, state: grant.suspended ? 'SUSPENDED_ORIGIN' : grant.handoff ? 'MANUAL_INTERVENTION' : 'ACTIVE',...(grant.manualRequest?{manualSelectionPending:true}:{}) }; }
+  private resolveManual(grant:Grant,status:'SELECTED'|'CANCELLED'|'EXPIRED'|'INVALIDATED'):void {
+    const pending=grant.manualRequest;if(!pending||this.resolvedManual.has(pending.id))return;
+    grant.manualRequest=undefined;grant.manualSelected=status==='SELECTED';this.manualSelecting.delete(grant.scopeId);this.resolvedManual.add(pending.id);if(this.resolvedManual.size>200)this.resolvedManual.delete(this.resolvedManual.values().next().value!);
+    if(status!=='SELECTED')void this.surface.clearManualSelection?.(grant.chromeId,pending.id).catch(()=>{});
+    if(this.epoch)this.emit({protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:this.epoch,backendSessionId:grant.session,event:'manualSelectionResolved',scopeId:grant.scopeId,manualRequestId:pending.id,manualStatus:status,taskId:grant.task,admissionId:pending.admissionId});
+  }
+  private cleanup(): void { for (const grant of [...this.grants.values()]) {if(grant.manualRequest&&grant.manualRequest.expiresAt<=this.now())this.resolveManual(grant,'EXPIRED');if (grant.expiresAt <= this.now()) void this.revoke(grant.scopeId);} for (const [id, ticket] of this.tickets) if (ticket.expiresAt <= this.now() || this.ended.has(ticket.request.backendSessionId)) this.tickets.delete(id); }
   expire(): void { this.cleanup(); }
   pending(): { id: string; purpose: string; lifetime: string; origin?: string; tabSelected?: boolean }[] { this.cleanup(); return [...this.tickets.values()].map(ticket => ({ id: ticket.id, purpose: privateText(String(ticket.request.args.purpose), 160), lifetime: String(ticket.request.args.lifetime), ...(ticket.origin ? { origin: ticket.origin } : {}) })); }
   authorized(): AuthorizedTab[] { this.cleanup(); return [...this.grants.values()].map(grant => this.dto(grant)); }
   async selectConversation(scopeId:string,popupTab?:ResolvedActiveTab):Promise<boolean> {
-    this.cleanup();const grant=this.grants.get(scopeId),epoch=this.epoch;
-    if(!grant||!epoch||grant.suspended||grant.handoff||grant.expiresAt<=this.now()||this.ended.has(grant.session)||this.endedTasks.has(grant.session+':'+grant.task)||!this.activeTasks.has(grant.session+':'+grant.task)||!this.surface.selectConversation)throw new Error('ACCESS_DENIED');
+    this.cleanup();const grant=this.grants.get(scopeId),epoch=this.epoch,pending=grant?.manualRequest;
+    if(!grant||!pending||!epoch||this.manualSelecting.has(scopeId)||grant.suspended||grant.handoff||grant.expiresAt<=this.now()||pending.expiresAt<=this.now()||this.ended.has(grant.session)||this.endedTasks.has(grant.session+':'+grant.task)||!this.activeTasks.has(grant.session+':'+grant.task)||!this.surface.selectConversation)throw new Error('ACCESS_DENIED');
+    this.manualSelecting.add(scopeId);
+    try {
     const selected=popupTab??await this.surface.current();
-    if(selected.id!==grant.chromeId||siteOrigin(selected.url)!==grant.origin)throw new Error('ACCESS_DENIED');
+    if(selected.id!==grant.chromeId||grant.windowId===undefined||selected.windowId!==grant.windowId||siteOrigin(selected.url)!==grant.origin)throw new Error('ACCESS_DENIED');
     if(grant.persistent&&!await this.sites?.allows(grant.origin))throw new Error('ACCESS_DENIED');
-    const accepted=await this.surface.selectConversation(grant.chromeId,grant,epoch);
+    const accepted=await this.surface.selectConversation(grant.chromeId,grant,epoch,pending.id,grant.task,pending.admissionId,pending.documentId);
     const latest=this.grants.get(scopeId);
-    if(this.epoch!==epoch||latest!==grant||grant.expiresAt<=this.now()||grant.suspended||grant.handoff||this.endedTasks.has(grant.session+':'+grant.task)||!accepted)return false;
-    return true;
+    if(this.epoch!==epoch||latest!==grant||grant.manualRequest!==pending||pending.expiresAt<=this.now()||grant.expiresAt<=this.now()||grant.suspended||grant.handoff||this.endedTasks.has(grant.session+':'+grant.task)||!accepted){await this.surface.clearManualSelection?.(grant.chromeId,pending.id).catch(()=>{});return false;}
+    this.resolveManual(grant,'SELECTED');return true;
+    } finally {this.manualSelecting.delete(scopeId);}
   }
+  cancelManualSelection(scopeId:string):void {const grant=this.grants.get(scopeId);if(!grant?.manualRequest)throw new Error('EXPIRED');this.resolveManual(grant,'CANCELLED');}
   async approve(ticketId: string, expectedOrigin?: string, always = false, correlationId?:string,popupTab?:ResolvedActiveTab): Promise<void> {
     if (this.approving) throw new Error('REJECTED');
     this.approving = true;
@@ -111,7 +123,7 @@ export class ExtensionController {
     const priorExpiry = ticket.priorScope ? this.grants.get(ticket.priorScope)?.expiresAt : undefined;
     if (ticket.priorScope) await this.revoke(ticket.priorScope, ticketId);
     const grantStarted=performance.now();
-    const grant: Grant = { scopeId: this.id(), tabId: ticket.tabId ?? this.id(), chromeId: selected.id, origin: new URL(selected.url).origin, session: ticket.request.backendSessionId, task: ticket.request.taskId, lifetime: ticket.request.args.lifetime as 'task' | 'session', expiresAt: priorExpiry ?? this.now() + (ticket.request.args.lifetime === 'session' ? 30 : 15) * 60_000, title: privateText(selected.title), url: displayUrl(selected.url), persistent: always };
+    const grant: Grant = { scopeId: this.id(), tabId: ticket.tabId ?? this.id(), chromeId: selected.id, windowId:selected.windowId, origin: new URL(selected.url).origin, session: ticket.request.backendSessionId, task: ticket.request.taskId, lifetime: ticket.request.args.lifetime as 'task' | 'session', expiresAt: priorExpiry ?? this.now() + (ticket.request.args.lifetime === 'session' ? 30 : 15) * 60_000, title: privateText(selected.title), url: displayUrl(selected.url), persistent: always };
     if (!this.tickets.has(ticketId) || this.epoch !== epoch || ticket.expiresAt <= this.now() || this.ended.has(grant.session) || this.endedTasks.has(grant.session + ':' + grant.task) || always && !await this.sites?.allows(grant.origin)) throw new Error('ACCESS_DENIED');
     // Chrome activeTab comes from the real toolbar/popup gesture, not this method.
     const probe = { ...ticket.request, operation: 'observe' as const, args: { scopeId: grant.scopeId, tabId: grant.tabId }, deadlineAt: this.now() + 8000 };
@@ -125,11 +137,11 @@ export class ExtensionController {
   }
   async renew(scopeId: string,popupTab?:ResolvedActiveTab): Promise<void> {
     const grant = this.grants.get(scopeId); if (!grant) throw new Error('EXPIRED');
-    const selected = popupTab??await this.surface.current(); if (selected.id !== grant.chromeId) throw new Error('ACCESS_DENIED');
+    const selected = popupTab??await this.surface.current(); if (selected.id !== grant.chromeId||!Number.isInteger(selected.windowId)) throw new Error('ACCESS_DENIED');
     const pending = [...this.tickets.values()].find(ticket => ticket.priorScope === scopeId);
     if (!pending) throw new Error('ACCESS_DENIED');
     pending.origin = siteOrigin(selected.url);
-    await this.approve(pending.id, pending.origin,false,undefined,selected);
+    await this.approve(pending.id, pending.origin,false,undefined,selected as ResolvedActiveTab);
   }
   async preparePending(popupTab?:ResolvedActiveTab): Promise<ReturnType<ExtensionController['pending']>> {
     this.cleanup(); const selected = popupTab??await this.surface.current();
@@ -158,13 +170,13 @@ export class ExtensionController {
     this.tickets.set(id,{id,request,expiresAt,chromeId,origin,priorScope,tabId:priorScope ? this.grants.get(priorScope)?.tabId : undefined});
     return { outcome: 'ACCESS_PENDING', accessRequestId: id, expiresAt, ...(origin ? { origin } : {}) };
   }
-  private async persistentGrant(request: Request, selected: {id:number;url:string;title:string}, previous?: Grant): Promise<Grant | undefined> {
+  private async persistentGrant(request: Request, selected: {id:number;windowId?:number;url:string;title:string}, previous?: Grant): Promise<Grant | undefined> {
     const origin = siteOrigin(selected.url);
     if (!await this.sites?.allows(origin)) return;
     this.check(request);
     if (this.grants.size >= 20 && !previous || [...this.grants.values()].some(grant => grant.chromeId === selected.id && grant !== previous)) throw new Error('REJECTED');
     if (previous) await this.revoke(previous.scopeId);
-    const grant: Grant = { scopeId: this.id(), tabId: previous?.tabId ?? this.id(), chromeId: selected.id, origin, session: request.backendSessionId, task: request.taskId,
+    const grant: Grant = { scopeId: this.id(), tabId: previous?.tabId ?? this.id(), chromeId: selected.id, windowId:selected.windowId??previous?.windowId, origin, session: request.backendSessionId, task: request.taskId,
       expiresAt: previous?.expiresAt ?? this.now() + (request.args.lifetime === 'session' ? 30 : 15)*60_000, lifetime: previous?.lifetime ?? (request.args.lifetime === 'session' ? 'session' : 'task'), title: privateText(selected.title), url: displayUrl(selected.url), persistent: true };
     if (!await this.sites?.allows(origin)) throw new Error('ACCESS_DENIED');
     this.check(request); this.grants.set(grant.scopeId,grant);
@@ -174,7 +186,7 @@ export class ExtensionController {
   private async transition(grant: Grant, request: Request, origin?: string, title = ''): Promise<{ grant?: Grant; reply?: Reply }> {
     await this.surface.invalidate(grant.chromeId).catch(() => {});
     if (origin) {
-      const replacement = await this.persistentGrant(request,{id:grant.chromeId,url:origin,title},grant);
+      const replacement = await this.persistentGrant(request,{id:grant.chromeId,windowId:grant.windowId,url:origin,title},grant);
       if (replacement) return {grant:replacement};
     }
     grant.suspended = true;
@@ -182,14 +194,15 @@ export class ExtensionController {
     return {reply:this.ticket(accessRequest,grant.chromeId,origin,grant.scopeId)};
   }
   async revoke(scopeId: string, preserveTicketId?: string): Promise<void> {
-    const grant = this.grants.get(scopeId); if (!grant) return; this.retiredScopes.set(scopeId,grant.expiresAt<=this.now()?'EXPIRED':'REVOKED');if(this.retiredScopes.size>100)this.retiredScopes.delete(this.retiredScopes.keys().next().value!); this.grants.delete(scopeId);
+    const grant = this.grants.get(scopeId); if (!grant) return;if(grant.manualRequest)this.resolveManual(grant,'INVALIDATED');grant.manualSelected=false; this.retiredScopes.set(scopeId,grant.expiresAt<=this.now()?'EXPIRED':'REVOKED');if(this.retiredScopes.size>100)this.retiredScopes.delete(this.retiredScopes.keys().next().value!); this.grants.delete(scopeId);
     for (const [id,ticket] of this.tickets) if (ticket.priorScope === scopeId && id !== preserveTicketId) this.deny(id);
     await this.surface.invalidate(grant.chromeId).catch(() => {});
     if (this.epoch) this.emit({ protocol: 'atlas.browser', version: 1, kind: 'event', connectionEpoch: this.epoch, backendSessionId: grant.session, event: 'accessRevoked', scopeId });
   }
   async documentChanged(chromeId: number): Promise<void> {
-    for (const grant of this.grants.values()) if (grant.chromeId === chromeId) { await this.surface.invalidate(chromeId, true).catch(() => {}); if (this.epoch) this.emit({ protocol: 'atlas.browser', version: 1, kind: 'event', connectionEpoch: this.epoch, backendSessionId: grant.session, event: 'documentChanged', scopeId: grant.scopeId }); }
+    for (const grant of this.grants.values()) if (grant.chromeId === chromeId) {if(grant.manualRequest)this.resolveManual(grant,'INVALIDATED');grant.manualSelected=false; await this.surface.invalidate(chromeId, true).catch(() => {}); if (this.epoch) this.emit({ protocol: 'atlas.browser', version: 1, kind: 'event', connectionEpoch: this.epoch, backendSessionId: grant.session, event: 'documentChanged', scopeId: grant.scopeId }); }
   }
+  async activeTabChanged(chromeId:number,windowId:number):Promise<void>{for(const grant of this.grants.values())if((grant.windowId===undefined||grant.windowId===windowId)&&grant.chromeId!==chromeId&&(grant.manualRequest||grant.manualSelected)){if(grant.manualRequest)this.resolveManual(grant,'INVALIDATED');grant.manualSelected=false;await this.surface.invalidate(grant.chromeId,true).catch(()=>{});}}
   async end(session: string): Promise<void> { this.ended.add(session); for (const key of this.activeTasks) if (key.startsWith(session + ':')) this.activeTasks.delete(key); for (const grant of [...this.grants.values()]) if (grant.session === session) await this.revoke(grant.scopeId); for (const [id, ticket] of this.tickets) if (ticket.request.backendSessionId === session) this.tickets.delete(id); }
   private async execute(request: Request, trace:(raw:unknown)=>void): Promise<Reply> {
     this.cleanup(); const args = request.args;
@@ -205,8 +218,8 @@ export class ExtensionController {
       if (this.tickets.size >= 20) throw new Error('REJECTED');
       const target = args.target as { kind: string; url?: string }; if (target.kind === 'new') navigationUrl(target.url!);
       if (target.kind === 'new' && await this.sites?.allows(siteOrigin(target.url!))) {
-        this.check(request); const chromeId = await this.surface.create(navigationUrl(target.url!));
-        const grant = await this.persistentGrant(request,{id:chromeId,url:target.url!,title:''});
+        this.check(request); const created = await this.surface.create(navigationUrl(target.url!));const chromeId=typeof created==='number'?created:created.id;
+        const grant = await this.persistentGrant(request,{id:chromeId,...(typeof created==='number'?{}:{windowId:created.windowId}),url:target.url!,title:''});
         if (grant) return {outcome:'OK',data:this.dto(grant)};
         return this.ticket(request,chromeId,siteOrigin(target.url!));
       }
@@ -237,7 +250,7 @@ export class ExtensionController {
       const ticket = this.tickets.get(String(args.accessRequestId));
       if (!ticket || ticket.request.backendSessionId !== request.backendSessionId || ticket.request.taskId !== request.taskId) throw new Error('ACCESS_DENIED');
       const target = ticket.request.args.target as { kind: string; url?: string }; if (target.kind !== 'new') throw new Error('REJECTED');
-      if (ticket.chromeId === undefined) { this.check(request); ticket.chromeId = await this.surface.create(navigationUrl(target.url!)); }
+      if (ticket.chromeId === undefined) { this.check(request); const created=await this.surface.create(navigationUrl(target.url!));ticket.chromeId=typeof created==='number'?created:created.id; }
       return { outcome: 'ACCESS_PENDING', accessRequestId: ticket.id, expiresAt: ticket.expiresAt };
     }
     let grant = this.grants.get(String(args.scopeId));
@@ -246,6 +259,15 @@ export class ExtensionController {
     if (grant.expiresAt <= this.now()) throw new Error('EXPIRED');
     if (grant.suspended) { const pending = [...this.tickets.values()].find(ticket => ticket.priorScope === grant!.scopeId); return pending ? {outcome:'ACCESS_PENDING',accessRequestId:pending.id,expiresAt:pending.expiresAt,...(pending.origin ? {origin:pending.origin} : {})} : (await this.transition(grant,request)).reply!; }
     if (grant.persistent && !await this.sites?.allows(grant.origin)) { await this.revokeOrigin(grant.origin); throw new Error('ACCESS_DENIED'); }
+    if(request.operation==='requestManualSelection'){
+      const admissionId=String(args.admissionId),documentId=String(args.documentId);
+      if(grant.handoff||grant.suspended)throw new Error('ACCESS_DENIED');
+      const existing=grant.manualRequest;
+      if(existing){if(existing.admissionId!==admissionId||existing.documentId!==documentId)this.resolveManual(grant,'INVALIDATED');else return {outcome:'REQUIRES_USER_INTERACTION',handoffId:existing.id,reason:'CONVERSATION_SELECTION'};}
+      const pending:ManualSelectionRequest={id:this.id(),admissionId,documentId,expiresAt:Math.min(grant.expiresAt,this.now()+5*60_000)};
+      grant.manualSelected=false;grant.manualRequest=pending;
+      return {outcome:'REQUIRES_USER_INTERACTION',handoffId:pending.id,reason:'CONVERSATION_SELECTION'};
+    }
     if (grant.handoff && !(request.operation === 'observe' && args.resumeHandoffId === grant.handoff.id)) return { outcome: 'REQUIRES_USER_INTERACTION', handoffId: grant.handoff.id, reason: grant.handoff.reason };
     if (request.operation === 'activate') { this.check(request); await this.surface.activate(grant.chromeId); return { outcome: 'OK', data: this.dto(grant) }; }
     if (request.operation === 'navigate') { const url = navigationUrl(String(args.url)); this.check(request); await this.surface.navigate(grant.chromeId, url); await this.surface.invalidate(grant.chromeId).catch(() => {}); if (siteOrigin(url) !== grant.origin) { const transition = await this.transition(grant,request,siteOrigin(url)); if (transition.reply) { this.emit({protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:this.epoch,backendSessionId:grant.session,event:'accessRequired',access:transition.reply}); } } return { outcome: 'OK', data: { completed: true } }; }

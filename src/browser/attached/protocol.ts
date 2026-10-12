@@ -7,7 +7,7 @@ import { z } from 'zod';
 export const MAX_PAYLOAD = 65_536;
 export const uuid = z.string().uuid();
 const empty = z.object({}).strict();
-export const reasons = z.enum(['CAPTCHA', 'AUTHENTICATION', 'MFA', 'CHALLENGE', 'ORIGIN_PERMISSION', 'UNSUPPORTED_CONTROL', 'MEDIA_USER_GESTURE']);
+export const reasons = z.enum(['CAPTCHA', 'AUTHENTICATION', 'MFA', 'CHALLENGE', 'ORIGIN_PERMISSION', 'UNSUPPORTED_CONTROL', 'MEDIA_USER_GESTURE', 'CONVERSATION_SELECTION']);
 export const conflictSchema = z.object({ reason: z.enum(['SNAPSHOT_CONSUMED', 'SNAPSHOT_EXPIRED', 'DOCUMENT_CHANGED', 'ELEMENT_CHANGED']), execution: z.literal('NOT_EXECUTED') }).strict();
 export const timingSchema = z.object({ queueMs: z.number().min(0).max(30_000).optional(), injectionMs: z.number().min(0).max(30_000).optional(), initializationMs: z.number().min(0).max(30_000).optional(), observationBuildMs: z.number().min(0).max(30_000).optional(), returnMs: z.number().min(0).max(30_000).optional(), transportMs: z.number().min(0).max(30_000).optional() }).strict();
 export type BrowserTimings = z.infer<typeof timingSchema>;
@@ -19,6 +19,7 @@ const url = z.string().url().max(2000);
 export const accessArgs = z.object({ target: z.discriminatedUnion('kind', [z.object({ kind: z.literal('current') }).strict(), z.object({ kind: z.literal('new'), url }).strict()]), purpose: z.string().min(1).max(160), lifetime: z.enum(['task', 'session']).default('task') }).strict();
 export const argumentSchemas = {
   status: empty, listAuthorizedTabs: empty, requestTabAccess: accessArgs,
+  requestManualSelection: binding.extend({documentId:uuid,admissionId:uuid}).strict(),
   revokeTabAccess: z.object({ scopeId: uuid }).strict(), openTab: z.object({ accessRequestId: uuid }).strict(),
   navigate: binding.extend({ url }).strict(), observe: binding.extend({ resumeHandoffId: uuid.optional() }).strict(),
   click: refBinding, type: refBinding.extend({ text: z.string().min(1).max(500), mode: z.enum(['replace', 'append']) }).strict(),
@@ -32,7 +33,7 @@ export type Operation = keyof typeof argumentSchemas;
 const envelope = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('request'), requestId: uuid, backendSessionId: uuid, taskId: uuid, connectionEpoch: uuid, deadlineAt: z.number().int().positive(), observeTrace:z.boolean().optional() });
 export const requestSchema = z.discriminatedUnion('operation', Object.entries(argumentSchemas).map(([operation, args]) => envelope.extend({ operation: z.literal(operation), args }).strict()) as unknown as [z.ZodObject, z.ZodObject, ...z.ZodObject[]]);
 export interface Request { protocol: 'atlas.browser'; version: 1; kind: 'request'; requestId: string; backendSessionId: string; taskId: string; connectionEpoch: string; deadlineAt: number; observeTrace?:boolean; operation: Operation; args: Record<string, unknown> }
-export const tabSchema = z.object({ id: uuid, scopeId: uuid, title: z.string().max(120), url: z.string().max(300), active: z.boolean(), expiresAt: z.number().int(), state: z.enum(['ACTIVE', 'MANUAL_INTERVENTION', 'SUSPENDED_ORIGIN', 'SUSPENDED_CONNECTION']) }).strict();
+export const tabSchema = z.object({ id: uuid, scopeId: uuid, title: z.string().max(120), url: z.string().max(300), active: z.boolean(), expiresAt: z.number().int(), state: z.enum(['ACTIVE', 'MANUAL_INTERVENTION', 'SUSPENDED_ORIGIN', 'SUSPENDED_CONNECTION']), manualSelectionPending:z.boolean().optional() }).strict();
 export type AuthorizedTab = z.infer<typeof tabSchema>;
 export const functionalKindSchema = z.enum(['SEARCH_INPUT','SEARCH_SUBMIT','RESULT_LINK','NAVIGATION_LINK','MEDIA_ELEMENT','MEDIA_PLAY','MEDIA_PAUSE','AD_SKIP','BLOCKED']);
 export const capabilitySchema = z.enum(['TYPE_SEARCH','SUBMIT_SEARCH','OPEN_LINK','PLAY','PAUSE','SKIP_AD']);
@@ -56,5 +57,6 @@ export type Reply = z.infer<typeof replySchema>;
 export const helloSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('hello'), connectionEpoch: uuid }).strict();
 export const cancelSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('cancel'), requestId: uuid, backendSessionId: uuid, connectionEpoch: uuid }).strict();
 export const responseSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('response'), requestId: uuid, backendSessionId: uuid, connectionEpoch: uuid, reply: replySchema }).strict();
-export const eventSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('event'), connectionEpoch: uuid, backendSessionId: uuid, trace:popupTraceSchema.optional(), rejectionReason:z.literal('USER_REJECTED').optional(), event: z.enum(['accessGranted', 'accessRevoked', 'documentChanged', 'accessRequired']), access: z.object({outcome:z.literal('ACCESS_PENDING'),accessRequestId:uuid,expiresAt:z.number().int().positive(),origin:z.string().url().max(300).optional()}).strict().optional(), accessRequestId: uuid.optional(), tab: tabSchema.optional(), scopeId: uuid.optional() }).strict();
+export const manualSelectionStatusSchema=z.enum(['SELECTED','CANCELLED','EXPIRED','INVALIDATED']);
+export const eventSchema = z.object({ protocol: z.literal('atlas.browser'), version: z.literal(1), kind: z.literal('event'), connectionEpoch: uuid, backendSessionId: uuid, trace:popupTraceSchema.optional(), rejectionReason:z.literal('USER_REJECTED').optional(), event: z.enum(['accessGranted', 'accessRevoked', 'documentChanged', 'accessRequired','manualSelectionResolved']), access: z.object({outcome:z.literal('ACCESS_PENDING'),accessRequestId:uuid,expiresAt:z.number().int().positive(),origin:z.string().url().max(300).optional()}).strict().optional(), accessRequestId: uuid.optional(), tab: tabSchema.optional(), scopeId: uuid.optional(), manualRequestId:uuid.optional(),manualStatus:manualSelectionStatusSchema.optional(),taskId:uuid.optional(),admissionId:uuid.optional() }).strict().superRefine((event,ctx)=>{if(event.event==='manualSelectionResolved'&&(!event.manualRequestId||!event.manualStatus||!event.scopeId||!event.taskId||!event.admissionId))ctx.addIssue({code:'custom',message:'Incomplete manual selection event'});});
 export function parseRequest(raw: unknown): Request { return requestSchema.parse(raw) as unknown as Request; }

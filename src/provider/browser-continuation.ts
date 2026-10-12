@@ -6,7 +6,7 @@ import { actionOutcomeSchema, outcomeInstruction } from '../browser/action-outco
 import { browserExecutionStateSchema } from '../browser/execution-state.js';
 import { z } from 'zod';
 import { uuid, replySchema } from '../browser/attached/protocol.js';
-const stateSchema = z.object({ taskId:uuid.optional(), continuation:continuationReceiptSchema.optional(), workflow: replySchema.nullable(), ready: uuid.nullable(), executionState: browserExecutionStateSchema.optional(), accessRevoked:z.boolean().optional(), actionOutcome:actionOutcomeSchema.nullable().optional(),accessCorrelation:uuid.nullable().optional(),revision:z.number().int().positive().optional(),taskActive:z.boolean().optional(), contextRecovery:z.object({status:z.enum(['READY','REQUIRED','RECOVERING','INCONCLUSIVE']),attempts:z.number().int().min(0).max(2),ready:uuid.nullable()}).strict().nullable().optional() }).strict();
+const stateSchema = z.object({ taskId:uuid.optional(), continuation:continuationReceiptSchema.optional(), workflow: replySchema.nullable(), ready: uuid.nullable(), executionState: browserExecutionStateSchema.optional(), accessRevoked:z.boolean().optional(), actionOutcome:actionOutcomeSchema.nullable().optional(),accessCorrelation:uuid.nullable().optional(),revision:z.number().int().positive().optional(),taskActive:z.boolean().optional(), contextRecovery:z.object({status:z.enum(['READY','REQUIRED','RECOVERING','INCONCLUSIVE']),attempts:z.number().int().min(0).max(2),ready:uuid.nullable()}).strict().nullable().optional(),manualSelection:z.object({status:z.enum(['PENDING','SELECTED','CANCELLED','EXPIRED','INVALIDATED']),requestId:uuid}).strict().nullable().optional() }).strict();
 export class BrowserContinuation {
   private revision=0;
   private taskId?:string;
@@ -36,7 +36,13 @@ export class BrowserContinuation {
     tokens.forEach(token=>this.transition(token,'DELIVERED'));
     if(this.latest?.accessCorrelation)this.diagnostics?.event(this.latest.accessCorrelation,'continuation_sent');
     try {
-    this.notify('Estado del backend de browser: RUNNING. Acceso/contexto listos o cierre prematuro rechazado. Continuá la tarea original en silencio, sin acknowledgement ni narración: usá refs frescas o browser.observe READ si no recibiste el snapshot. No abras otra pestaña innecesaria ni repitas la acción anterior ejecutada; continuá con el siguiente paso distinto. '+(this.latest?.actionOutcome?outcomeInstruction(this.latest.actionOutcome):''));
+    const manual=this.latest?.manualSelection?.status;
+    const manualInstruction=manual==='SELECTED'
+      ? ' La persona confirmó manualmente la conversación visible. Es evidencia USER_SELECTED, no identidad verificada. Continuá únicamente con el borrador privado; no escribas ni envíes en la página.'
+      : manual&&manual!=='PENDING'
+        ? ` La selección manual terminó como ${manual}. No la reintentes ni prepares un borrador con esa selección; cerrá la tarea de forma segura.`
+        : '';
+    this.notify('Estado del backend de browser: RUNNING. Acceso/contexto listos o cierre prematuro rechazado. Continuá la tarea original en silencio, sin acknowledgement ni narración: usá refs frescas o browser.observe READ si no recibiste el snapshot. No abras otra pestaña innecesaria ni repitas la acción anterior ejecutada; continuá con el siguiente paso distinto.'+manualInstruction+' '+(this.latest?.actionOutcome?outcomeInstruction(this.latest.actionOutcome):''));
     }catch{tokens.forEach(token=>{this.transition(token,'PENDING');this.taskDiagnostics.event({stage:'CONTINUATION_BLOCKED',taskId:this.taskId,tokenId:token,blockedBy:'NOTIFY_FAILED',...this.scheduling()});});return;}
     tokens.forEach(token=>this.transition(token,'CONSUMED'));if(this.taskId)this.acknowledge?.({taskId:this.taskId,tokens});
   }

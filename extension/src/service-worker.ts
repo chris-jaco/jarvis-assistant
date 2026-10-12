@@ -14,22 +14,28 @@ const invalidate = async (tab: number, documentOnly = false) => { await chrome.t
 const sites = new SiteAuthorization(chromeSiteEnvironment(chrome), origin => controller.revokeOrigin(origin));
 const controller = new ExtensionController({
   observeAuthorization:async grant=>{const tab=await chrome.tabs.get(grant.chromeId);if(!tab.url)throw new Error();const origin=new URL(tab.url).origin;return {...await sites.diagnosticStatus(origin),sameOrigin:origin===grant.origin};},
-  tab: async id => { const tab = await chrome.tabs.get(id); return { id, url: tab.url ?? '', title: tab.title, status: tab.status, pendingUrl: tab.pendingUrl }; },
+  tab: async id => { const tab = await chrome.tabs.get(id); return { id, windowId:tab.windowId, url: tab.url ?? '', title: tab.title, status: tab.status, pendingUrl: tab.pendingUrl }; },
   current: () => resolveActiveTab(() => chrome.tabs.query({ active: true })),
-  create: async url => { const tab = await chrome.tabs.create({ url, active: true }); if (tab.id === undefined) throw new Error('UNSUPPORTED'); return tab.id; },
+  create: async url => { const tab = await chrome.tabs.create({ url, active: true }); if (tab.id === undefined) throw new Error('UNSUPPORTED'); return {id:tab.id,windowId:tab.windowId}; },
   activate: async id => { await chrome.tabs.update(id, { active: true }); },
   navigate: async (id, url) => { await chrome.tabs.update(id, { url, active: true }); },
   history: async (id, action) => { if (action === 'reload') await chrome.tabs.reload(id); else if (action === 'back') await chrome.tabs.goBack(id); else await chrome.tabs.goForward(id); },
   invalidate,
   content: (id, grant, request) => contentRequest(chrome, () => controller.epoch, id, grant, request),
-  selectConversation:async (id,grant,epoch)=>{
+  clearManualSelection:async(id,manualRequestId)=>{await chrome.tabs.sendMessage(id,{kind:'clearManualSelection',manualRequestId},{frameId:0});},
+  selectConversation:async (id,grant,epoch,manualRequestId,taskId,admissionId,expectedDocumentId)=>{
     const injected=await chrome.scripting.executeScript({target:{tabId:id,frameIds:[0]},world:'ISOLATED',files:['content.js']});
     const documentId=injected.find(row=>row.frameId===0)?.documentId;
     const target=documentId?{documentId}:{frameId:0};
     const access={scopeId:grant.scopeId,tabId:grant.tabId,session:grant.session,epoch,origin:grant.origin,expiresAt:grant.expiresAt};
     const initialized=await chrome.tabs.sendMessage(id,{kind:'init',access},target);
     if(initialized?.completed!==true)return false;
-    const selected=await chrome.tabs.sendMessage(id,{kind:'selectConversation',access},target);
+    // Re-check the mutable controller authority immediately before publishing
+    // evidence. A cancel/expiry/reconnect may have won while injection awaited.
+    if(controller.epoch!==epoch||controller.grants.get(grant.scopeId)!==grant||grant.manualRequest?.id!==manualRequestId||grant.manualRequest.admissionId!==admissionId||grant.task!==taskId){
+      await chrome.tabs.sendMessage(id,{kind:'clearManualSelection',manualRequestId},target).catch(()=>{});return false;
+    }
+    const selected=await chrome.tabs.sendMessage(id,{kind:'selectConversation',access,manualRequestId,taskId,admissionId,expectedDocumentId},target);
     const tab=await chrome.tabs.get(id);
     return selected?.selected===true&&!tab.pendingUrl&&!!tab.url&&new URL(tab.url).origin===grant.origin;
   }
@@ -64,7 +70,7 @@ const popupRequest = z.discriminatedUnion('action', [
   z.object({ correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action: z.literal('approve'), id: z.string().uuid(), origin: z.string().url().max(300), always: z.boolean() }).strict(),
   z.object({ correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action: z.literal('revokeSite'), origin: z.string().url().max(300) }).strict(),
   z.object({correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action:z.literal('selectConversation'),id:z.string().uuid()}).strict(),
-  ...['revoke','renew','deny'].map(action => z.object({ correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action: z.literal(action), id: z.string().uuid() }).strict())
+  ...['revoke','renew','deny','cancelManualSelection'].map(action => z.object({ correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action: z.literal(action), id: z.string().uuid() }).strict())
 ] as unknown as [z.ZodObject, z.ZodObject, ...z.ZodObject[]]);
 chrome.runtime.onMessage.addListener((raw, sender, send) => {
   // Only our packaged popup can authorize. Content scripts/pages cannot.
@@ -75,6 +81,7 @@ chrome.runtime.onMessage.addListener((raw, sender, send) => {
     if (message.action === 'approve') await controller.approve(message.id as string, (message as {origin:string}).origin, (message as {always:boolean}).always,correlationId,current);
     const selectionApplied=message.action==='selectConversation' ? await controller.selectConversation(message.id as string,current) : false;
     if(message.action==='selectConversation'&&!selectionApplied)throw new Error('REJECTED');
+    if(message.action==='cancelManualSelection')controller.cancelManualSelection(message.id as string);
     if (message.action === 'revokeSite') await sites.revoke((message as {origin:string}).origin);
     if (message.action === 'revoke') await controller.revoke(message.id as string);
     if (message.action === 'renew') await controller.renew(message.id as string,current);
@@ -83,6 +90,7 @@ chrome.runtime.onMessage.addListener((raw, sender, send) => {
   } catch (error) {if(typeof raw?.correlationId==='string')accessDiagnostics.event(raw.correlationId,'state_ready','FAILED',performance.now()-workerStarted); send({ error: error instanceof Error && activeTabErrors.includes(error.message as typeof activeTabErrors[number]) ? error.message : 'No se pudo completar el cambio de acceso. Revisá la pestaña, el permiso de Chrome y los sitios permitidos; no se asumió aprobación.' }); } })(); return true;
 });
 chrome.tabs.onRemoved.addListener(id => { for (const grant of controller.grants.values()) if (grant.chromeId === id) void controller.revoke(grant.scopeId).then(badge); });
+chrome.tabs.onActivated.addListener(info=>{void controller.activeTabChanged(info.tabId,info.windowId).then(badge);});
 chrome.tabs.onUpdated.addListener((id, change) => { if (change.status === 'loading') void controller.documentChanged(id); });
 setInterval(() => { controller.expire(); void badge(); }, 10_000);
 connect();

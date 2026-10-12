@@ -4,6 +4,9 @@ import { z } from 'zod';
 // user selected. It is not a claim that the site's displayed identity is true.
 export const manualSelectionSchema = z.object({
   selectionId: z.string().uuid(),
+  manualRequestId: z.string().uuid(),
+  admissionId: z.string().uuid(),
+  taskId: z.string().uuid(),
   scopeId: z.string().uuid(),
   tabId: z.string().uuid(),
   documentId: z.string().uuid(),

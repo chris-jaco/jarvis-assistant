@@ -18,6 +18,7 @@ export class ContentEngine {
   private conversations = new ConversationObserver(() => this.id());
   private access?: Access; private documentId: string; private documentUrl: string; private refs = new Map<string, Entry>(); private snapshotExpires = 0;
   private selection?:SelectedConversation;
+  private terminalManualRequests=new Set<string>();
   private accessTimer?: number; private snapshotTimer?: number;
   constructor(private readonly win: Window & typeof globalThis, private readonly now = Date.now, private readonly id: () => string = () => crypto.randomUUID(), private readonly settle = (ms:number):Promise<void> => new Promise(resolve=>win.setTimeout(resolve,ms))) {
     this.mediaState = new MediaState(win);
@@ -48,13 +49,19 @@ export class ContentEngine {
     return evidence;
   }
   // Called exclusively by the extension popup path, after an actual user click.
-  selectConversation(access:Access):boolean {
+  clearManualSelection(manualRequestId:string):void {
+    this.terminalManualRequests.add(manualRequestId);
+    if(this.terminalManualRequests.size>200)this.terminalManualRequests.delete(this.terminalManualRequests.values().next().value!);
+    if(this.selection?.evidence.manualRequestId===manualRequestId)this.clearSelection();
+  }
+  selectConversation(access:Access,manualRequestId:string,taskId:string,admissionId:string,expectedDocumentId:string):boolean {
     const current=this.access;
-    if(!current||current.session!==access.session||current.epoch!==access.epoch||current.scopeId!==access.scopeId||current.tabId!==access.tabId||current.origin!==access.origin||current.expiresAt<=this.now()||this.win.location.origin!==current.origin||this.challenge())return false;
+    if(this.terminalManualRequests.has(manualRequestId)||!current||this.documentId!==expectedDocumentId||current.session!==access.session||current.epoch!==access.epoch||current.scopeId!==access.scopeId||current.tabId!==access.tabId||current.origin!==access.origin||current.expiresAt<=this.now()||this.win.location.origin!==current.origin||this.challenge())return false;
     const nodes=this.semanticAdapters.select(current.origin)?.select(this.win.document,el=>this.visible(el));
     if(!nodes)return false;
     this.clearSelection();
-    const evidence:ManualSelection={selectionId:this.id(),scopeId:current.scopeId,tabId:current.tabId,documentId:this.documentId,epoch:current.epoch,expiresAt:Math.min(current.expiresAt,this.now()+5*60_000),assurance:'USER_SELECTED'};
+    if(this.terminalManualRequests.has(manualRequestId))return false;
+    const evidence:ManualSelection={selectionId:this.id(),manualRequestId,admissionId,taskId,scopeId:current.scopeId,tabId:current.tabId,documentId:this.documentId,epoch:current.epoch,expiresAt:Math.min(current.expiresAt,this.now()+5*60_000),assurance:'USER_SELECTED'};
     const selected:SelectedConversation={evidence,...nodes,observer:new this.win.MutationObserver(()=>{selected.changed=true;}),changed:false};
     selected.observer.observe(nodes.header,{attributes:true,childList:true,subtree:true,characterData:true});
     selected.observer.observe(nodes.composer,{childList:true,subtree:true,characterData:true});
