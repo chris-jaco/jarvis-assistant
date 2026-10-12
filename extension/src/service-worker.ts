@@ -1,4 +1,4 @@
-import { resolveActiveTab, activeTabErrors } from './active-tab.js';
+import { resolveActiveTab, resolvePopupActiveTab, activeTabErrors } from './active-tab.js';
 import { PopupDiagnostics } from '../../src/diagnostics/popup.js';
 const accessDiagnostics=new PopupDiagnostics(undefined,true);
 void chrome.storage.local.get('atlasPopupDiagnostics').then(value=>{accessDiagnostics.enabled=value.atlasPopupDiagnostics===true;}).catch(()=>{accessDiagnostics.enabled=false;});
@@ -60,25 +60,26 @@ function connect(): void {
   } catch { reconnect = setTimeout(connect, delay); delay = Math.min(delay * 2, 5000); }
 }
 const popupRequest = z.discriminatedUnion('action', [
-  z.object({ correlationId:z.string().uuid().optional(),action: z.literal('state') }).strict(),
-  z.object({ correlationId:z.string().uuid().optional(),action: z.literal('approve'), id: z.string().uuid(), origin: z.string().url().max(300), always: z.boolean() }).strict(),
-  z.object({ correlationId:z.string().uuid().optional(),action: z.literal('revokeSite'), origin: z.string().url().max(300) }).strict(),
-  z.object({correlationId:z.string().uuid().optional(),action:z.literal('selectConversation'),id:z.string().uuid()}).strict(),
-  ...['revoke','renew','deny'].map(action => z.object({ correlationId:z.string().uuid().optional(),action: z.literal(action), id: z.string().uuid() }).strict())
+  z.object({ correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action: z.literal('state') }).strict(),
+  z.object({ correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action: z.literal('approve'), id: z.string().uuid(), origin: z.string().url().max(300), always: z.boolean() }).strict(),
+  z.object({ correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action: z.literal('revokeSite'), origin: z.string().url().max(300) }).strict(),
+  z.object({correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action:z.literal('selectConversation'),id:z.string().uuid()}).strict(),
+  ...['revoke','renew','deny'].map(action => z.object({ correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action: z.literal(action), id: z.string().uuid() }).strict())
 ] as unknown as [z.ZodObject, z.ZodObject, ...z.ZodObject[]]);
 chrome.runtime.onMessage.addListener((raw, sender, send) => {
   // Only our packaged popup can authorize. Content scripts/pages cannot.
   if (!popupSender(sender, chrome.runtime.id, chrome.runtime.getURL('popup.html'))) return false;
   void (async () => {const workerStarted=performance.now(); try {
     const message = popupRequest.parse(raw);const correlationId=(message as {correlationId?:string}).correlationId;const started=performance.now();if(correlationId)accessDiagnostics.event(correlationId,'worker_handler_entered','START');
-    if (message.action === 'approve') await controller.approve(message.id as string, (message as {origin:string}).origin, (message as {always:boolean}).always,correlationId);
-    const selectionApplied=message.action==='selectConversation' ? await controller.selectConversation(message.id as string) : false;
+    const current=await resolvePopupActiveTab((message as {windowId:number}).windowId,windowId=>chrome.tabs.query({active:true,windowId}));
+    if (message.action === 'approve') await controller.approve(message.id as string, (message as {origin:string}).origin, (message as {always:boolean}).always,correlationId,current);
+    const selectionApplied=message.action==='selectConversation' ? await controller.selectConversation(message.id as string,current) : false;
     if(message.action==='selectConversation'&&!selectionApplied)throw new Error('REJECTED');
     if (message.action === 'revokeSite') await sites.revoke((message as {origin:string}).origin);
     if (message.action === 'revoke') await controller.revoke(message.id as string);
-    if (message.action === 'renew') await controller.renew(message.id as string);
+    if (message.action === 'renew') await controller.renew(message.id as string,current);
     if (message.action === 'deny') controller.deny(message.id as string, true);
-    await badge(); const current = await resolveActiveTab(() => chrome.tabs.query({ active: true })); const currentOrigin = current?.url && /^https?:/.test(current.url) ? new URL(current.url).origin : 'Página no soportada'; const response={ currentOrigin, connected: !!port && !!controller.epoch, selectionApplied, pending: await controller.preparePending(), authorized: controller.authorized(), sites: await sites.list() };if(correlationId)accessDiagnostics.event(correlationId,'state_ready','OK',performance.now()-started);send(response);
+    await badge(); const currentOrigin = current.url && /^https?:/.test(current.url) ? new URL(current.url).origin : 'Página no soportada'; const response={ currentOrigin, connected: !!port && !!controller.epoch, selectionApplied, pending: await controller.preparePending(current), authorized: controller.authorized(), sites: await sites.list() };if(correlationId)accessDiagnostics.event(correlationId,'state_ready','OK',performance.now()-started);send(response);
   } catch (error) {if(typeof raw?.correlationId==='string')accessDiagnostics.event(raw.correlationId,'state_ready','FAILED',performance.now()-workerStarted); send({ error: error instanceof Error && activeTabErrors.includes(error.message as typeof activeTabErrors[number]) ? error.message : 'No se pudo completar el cambio de acceso. Revisá la pestaña, el permiso de Chrome y los sitios permitidos; no se asumió aprobación.' }); } })(); return true;
 });
 chrome.tabs.onRemoved.addListener(id => { for (const grant of controller.grants.values()) if (grant.chromeId === id) void controller.revoke(grant.scopeId).then(badge); });

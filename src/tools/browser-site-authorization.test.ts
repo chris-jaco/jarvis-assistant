@@ -95,11 +95,13 @@ test('site consent never approves consequential actions; RUNNING silent and all 
 });
 test('packaged popup lists/revokes sites and requests granular permission directly from user gesture',async()=>{
   const html=await readFile('extension/popup.html','utf8'),script=await readFile('dist/extension/popup.js','utf8');const dom=new JSDOM(html,{runScripts:'outside-only'});const calls:any[]=[];let removed=()=>{};
-  const state={connected:true,pending:[{id:id(),origin:A,tabSelected:true,purpose:'Fixture',lifetime:'task'}],authorized:[],sites:[{origin:B,allowed:true}]};
-  (dom.window as any).chrome={runtime:{sendMessage:async(x:any)=>{calls.push(x);return state;}},permissions:{request:(x:any)=>{calls.push({request:x});return Promise.resolve(true);},onRemoved:{addListener:(fn:()=>void)=>{removed=fn;}},onAdded:{addListener:()=>{}}}};
-  try {(dom.window as any).hostPattern=hostPattern;(dom.window as any).PopupDiagnostics=PopupDiagnostics;Object.defineProperty(dom.window.crypto,'randomUUID',{value:id});dom.window.eval(script.replace(/^import .*;$/gm,''));await new Promise(resolve=>setTimeout(resolve,0));assert.match(dom.window.document.querySelector('#sites')!.textContent!,/second.example.*ALLOW/);
+  const state:any={connected:true,pending:[{id:id(),origin:A,tabSelected:true,purpose:'Fixture',lifetime:'task'}],authorized:[],sites:[{origin:B,allowed:true}]};
+  (dom.window as any).chrome={windows:{getCurrent:async()=>({id:11})},runtime:{sendMessage:async(x:any)=>{calls.push(x);return state;}},permissions:{request:(x:any)=>{calls.push({request:x});return Promise.resolve(true);},onRemoved:{addListener:(fn:()=>void)=>{removed=fn;}},onAdded:{addListener:()=>{}}}};
+  try {(dom.window as any).hostPattern=hostPattern;(dom.window as any).PopupDiagnostics=PopupDiagnostics;Object.defineProperty(dom.window.crypto,'randomUUID',{value:id});dom.window.eval(script.replace(/^import .*;$/gm,''));await new Promise(resolve=>setTimeout(resolve,0));assert.match(dom.window.document.querySelector('#sites')!.textContent!,/second.example.*ALLOW/);assert.equal([...dom.window.document.querySelectorAll('button')].some(button=>button.textContent?.includes('Confirmo que esta conversación')),false);
     const buttons=[...dom.window.document.querySelectorAll('button')];buttons.find(b=>b.textContent==='Permitir siempre este sitio')!.click();assert.equal(JSON.stringify(calls.at(-1)),JSON.stringify({request:{origins:[A+'/*']}}));await new Promise(resolve=>setTimeout(resolve,0));assert.ok(calls.some(c=>c.action==='approve'&&c.always&&c.origin===A));
     [...dom.window.document.querySelectorAll('button')].find(b=>b.textContent==='Revocar')!.click();await new Promise(resolve=>setTimeout(resolve,0));assert.ok(calls.some(c=>c.action==='revokeSite'&&c.origin===B));const n=calls.length;removed();await new Promise(resolve=>setTimeout(resolve,0));assert.ok(calls.length>n);
+    state.authorized=[{id:id(),scopeId:id(),title:'Fixture',url:'https://web.whatsapp.com/',active:false,expiresAt:Date.now()+60_000,state:'ACTIVE'}];removed();await new Promise(resolve=>setTimeout(resolve,0));assert.ok([...dom.window.document.querySelectorAll('button')].some(button=>button.textContent?.includes('Confirmo que esta conversación')));
+    assert.ok(calls.filter(call=>call?.action).every(call=>call.windowId===11));
   }finally{dom.window.close();}
 });
 

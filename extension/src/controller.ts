@@ -1,4 +1,5 @@
 import { activeTabErrors } from './active-tab.js';
+import type { ResolvedActiveTab } from './active-tab.js';
 import { observeTracer, type ObserveTrace } from '../../src/diagnostics/browser-observe.js';
 import type { PopupDiagnostics } from '../../src/diagnostics/popup.js';
 import { parseRequest, replySchema, helloSchema, cancelSchema } from '../../src/browser/attached/protocol.js';
@@ -81,10 +82,10 @@ export class ExtensionController {
   expire(): void { this.cleanup(); }
   pending(): { id: string; purpose: string; lifetime: string; origin?: string; tabSelected?: boolean }[] { this.cleanup(); return [...this.tickets.values()].map(ticket => ({ id: ticket.id, purpose: privateText(String(ticket.request.args.purpose), 160), lifetime: String(ticket.request.args.lifetime), ...(ticket.origin ? { origin: ticket.origin } : {}) })); }
   authorized(): AuthorizedTab[] { this.cleanup(); return [...this.grants.values()].map(grant => this.dto(grant)); }
-  async selectConversation(scopeId:string):Promise<boolean> {
+  async selectConversation(scopeId:string,popupTab?:ResolvedActiveTab):Promise<boolean> {
     this.cleanup();const grant=this.grants.get(scopeId),epoch=this.epoch;
     if(!grant||!epoch||grant.suspended||grant.handoff||grant.expiresAt<=this.now()||this.ended.has(grant.session)||this.endedTasks.has(grant.session+':'+grant.task)||!this.activeTasks.has(grant.session+':'+grant.task)||!this.surface.selectConversation)throw new Error('ACCESS_DENIED');
-    const selected=await this.surface.current();
+    const selected=popupTab??await this.surface.current();
     if(selected.id!==grant.chromeId||siteOrigin(selected.url)!==grant.origin)throw new Error('ACCESS_DENIED');
     if(grant.persistent&&!await this.sites?.allows(grant.origin))throw new Error('ACCESS_DENIED');
     const accepted=await this.surface.selectConversation(grant.chromeId,grant,epoch);
@@ -92,14 +93,14 @@ export class ExtensionController {
     if(this.epoch!==epoch||latest!==grant||grant.expiresAt<=this.now()||grant.suspended||grant.handoff||this.endedTasks.has(grant.session+':'+grant.task)||!accepted)return false;
     return true;
   }
-  async approve(ticketId: string, expectedOrigin?: string, always = false, correlationId?:string): Promise<void> {
+  async approve(ticketId: string, expectedOrigin?: string, always = false, correlationId?:string,popupTab?:ResolvedActiveTab): Promise<void> {
     if (this.approving) throw new Error('REJECTED');
     this.approving = true;
-    try { await this.approveOnce(ticketId, expectedOrigin, always,correlationId); } finally { this.approving = false; }
+    try { await this.approveOnce(ticketId, expectedOrigin, always,correlationId,popupTab); } finally { this.approving = false; }
   }
-  private async approveOnce(ticketId: string, expectedOrigin?: string, always = false, correlationId?:string): Promise<void> {
+  private async approveOnce(ticketId: string, expectedOrigin?: string, always = false, correlationId?:string,popupTab?:ResolvedActiveTab): Promise<void> {
     this.cleanup(); const ticket = this.tickets.get(ticketId); if (!ticket || !this.epoch || this.ended.has(ticket.request.backendSessionId) || this.endedTasks.has(ticket.request.backendSessionId + ':' + ticket.request.taskId)) throw new Error('EXPIRED');
-    const epoch = this.epoch; const selected = await this.surface.current();
+    const epoch = this.epoch; const selected = popupTab??await this.surface.current();
     const target = ticket.request.args.target as { kind: string; url?: string };
     if (ticket.chromeId !== undefined && ticket.chromeId !== selected.id || expectedOrigin && siteOrigin(selected.url) !== expectedOrigin || ticket.origin && siteOrigin(selected.url) !== ticket.origin || target.kind === 'new' && ticket.chromeId === undefined) throw new Error('ACCESS_DENIED');
     navigationUrl(selected.url);
@@ -122,16 +123,16 @@ export class ExtensionController {
     this.emit({ protocol: 'atlas.browser', version: 1, kind: 'event', connectionEpoch: epoch, backendSessionId: grant.session, event: 'accessGranted', accessRequestId: ticketId, tab: this.dto(grant),...(correlationId&&this.diagnostics?.enabled?{trace:{correlationId,stage:'notification_posted',outcome:'OK'}}:{}) });
     if(correlationId)this.diagnostics?.event(correlationId,'notification_posted');
   }
-  async renew(scopeId: string): Promise<void> {
+  async renew(scopeId: string,popupTab?:ResolvedActiveTab): Promise<void> {
     const grant = this.grants.get(scopeId); if (!grant) throw new Error('EXPIRED');
-    const selected = await this.surface.current(); if (selected.id !== grant.chromeId) throw new Error('ACCESS_DENIED');
+    const selected = popupTab??await this.surface.current(); if (selected.id !== grant.chromeId) throw new Error('ACCESS_DENIED');
     const pending = [...this.tickets.values()].find(ticket => ticket.priorScope === scopeId);
     if (!pending) throw new Error('ACCESS_DENIED');
     pending.origin = siteOrigin(selected.url);
-    await this.approve(pending.id, pending.origin);
+    await this.approve(pending.id, pending.origin,false,undefined,selected);
   }
-  async preparePending(): Promise<ReturnType<ExtensionController['pending']>> {
-    this.cleanup(); const selected = await this.surface.current();
+  async preparePending(popupTab?:ResolvedActiveTab): Promise<ReturnType<ExtensionController['pending']>> {
+    this.cleanup(); const selected = popupTab??await this.surface.current();
     return [...this.tickets.values()].map(ticket => {
       const tabSelected = !!selected?.url && (ticket.chromeId === undefined || ticket.chromeId === selected.id);
       if (tabSelected) { ticket.chromeId = selected!.id; ticket.origin = siteOrigin(selected!.url); }

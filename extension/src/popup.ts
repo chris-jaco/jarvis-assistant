@@ -12,7 +12,11 @@ const sites = document.getElementById('sites')!;
 async function command(action: string, fields: Record<string,unknown> = {}, correlationId=crypto.randomUUID()) {
   const sequence=++requestSequence;const started=performance.now();accessDiagnostics.event(correlationId,'state_requested','START');
   try {
-    const reply = await chrome.runtime.sendMessage({ action, ...fields,correlationId });
+    // Unlike a service worker, the popup has a real originating Chrome window.
+    // Only this packaged extension page can provide this context.
+    const popupWindow=await chrome.windows.getCurrent();
+    if(!Number.isInteger(popupWindow.id)||popupWindow.id!<0)throw new Error('ACTIVE_TAB_UNAVAILABLE');
+    const reply = await chrome.runtime.sendMessage({ action, ...fields,correlationId,windowId:popupWindow.id });
     accessDiagnostics.event(correlationId,'state_ready',closed?'CLOSED':sequence!==requestSequence?'OUT_OF_ORDER':reply.error?'FAILED':'OK',performance.now()-started);if(closed||sequence!==requestSequence)return;
     if (reply.error) { state.textContent = reply.error; return; }
     state.textContent = reply.selectionApplied ? 'Conversación seleccionada para esta tarea. Atlas sólo puede preparar un borrador privado; no escribirá ni enviará en WhatsApp.' : reply.connected ? 'Conectado a Atlas' : 'Atlas no está conectado. Iniciá Atlas en modo attached.';
