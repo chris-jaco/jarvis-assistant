@@ -12,7 +12,7 @@ const traceSchema=z.object({
   tokenReason:z.enum(['ACCESS_READY','CONTEXT_READY','CLOSE_REJECTED','UNSPECIFIED']).optional(),
   blockedBy:z.enum(['TOOL_OR_RESPONSE_IN_FLIGHT','CONFIRMATION','NOT_RUNNING','NOTIFY_FAILED']).optional(),
   guardMs:z.number().finite().min(0).max(30000).optional(),transportMs:z.number().finite().min(0).max(30000).optional(),
-  guard:z.object({intent:z.enum(['READ_ONLY','ACTION_REQUIRED']),readObtained:z.boolean(),progress:z.boolean(),pending:z.boolean(),unknown:z.boolean(),fresh:z.boolean(),verificationRequired:z.boolean(),verified:z.boolean(),verificationExhausted:z.boolean(),cancelled:z.boolean(),terminal:z.boolean(),recoveryExhausted:z.boolean()}).strict().optional(),
+  guard:z.object({intent:z.enum(['READ_ONLY','ACTION_REQUIRED']),readObtained:z.boolean(),progress:z.boolean(),pending:z.boolean(),unknown:z.boolean(),fresh:z.boolean(),verificationRequired:z.boolean(),verified:z.boolean(),verificationExhausted:z.boolean(),cancelled:z.boolean(),terminal:z.boolean(),recoveryExhausted:z.boolean(),consequentialUnverified:z.boolean(),consequentialUnknown:z.boolean()}).strict().optional(),
   stateBefore:browserExecutionStateSchema.optional(),stateAfter:browserExecutionStateSchema.optional(),
   relation:z.enum(['REQUEST','NEXT_RESPONSE_CANDIDATE']).optional(),
   status:z.enum(['completed','cancelled','failed','incomplete','in_progress','UNKNOWN']).optional(),producedMessage:z.boolean().optional(),producedFunctionCall:z.boolean().optional(),

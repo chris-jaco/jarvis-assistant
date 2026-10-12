@@ -1,4 +1,5 @@
 import { conversationEvidenceSchema } from '../consequential/conversation-evidence.js';
+import { manualSelectionSchema } from '../consequential/manual-selection.js';
 import { semanticContextSchema } from '../consequential/semantic.js';
 import { observeTraceSchema } from '../../diagnostics/browser-observe.js';
 import { popupTraceSchema } from '../../diagnostics/popup.js';
@@ -24,6 +25,7 @@ export const argumentSchemas = {
   press: refBinding.extend({ key: z.enum(['Enter', 'Escape', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space']) }).strict(),
   scroll: binding.extend({ direction: z.enum(['up', 'down']) }).strict(), back: binding, forward: binding, reload: binding,
   media: refBinding.extend({ action: z.enum(['play', 'pause']) }).strict(), activate: binding,
+  sendSelectedMessage: binding.extend({documentId:uuid,selectionId:uuid,text:z.string().min(1).max(2000)}).strict(),
   endSession: empty, endTask: empty
 } as const;
 export type Operation = keyof typeof argumentSchemas;
@@ -36,15 +38,16 @@ export const functionalKindSchema = z.enum(['SEARCH_INPUT','SEARCH_SUBMIT','RESU
 export const capabilitySchema = z.enum(['TYPE_SEARCH','SUBMIT_SEARCH','OPEN_LINK','PLAY','PAUSE','SKIP_AD']);
 export const mediaSchema = z.object({ presence: z.enum(['NONE','AVAILABLE']), playback: z.enum(['UNKNOWN','LOADING','PLAYING','PAUSED','ENDED','BUFFERING','ERROR']), advertisement: z.enum(['UNKNOWN','DETECTED']), skipAvailable: z.boolean() }).strict();
 export const elementSchema = z.object({ functionalKind: functionalKindSchema.optional(), capabilities: z.array(capabilitySchema).max(3).optional(), ref: uuid, role: z.string().max(30), name: z.string().max(120), type: z.string().max(20), disabled: z.boolean(), action: z.enum(['navigation', 'search', 'media', 'consent', 'blocked']), state: z.object({ paused: z.boolean().optional(), checked: z.boolean().optional(), expanded: z.boolean().optional() }).strict().optional() }).strict();
-export const observationSchema = z.object({ conversationEvidence:conversationEvidenceSchema.optional(), conversationContext: semanticContextSchema.optional(), media: mediaSchema.optional(), tabId: uuid, scopeId: uuid, documentId: uuid, snapshotId: uuid, expiresAt: z.number().int().positive(), url: z.string().max(300), title: z.string().max(120), elements: z.array(elementSchema).max(40), truncated: z.boolean(), dialog: z.object({ role: z.string().max(30), name: z.string().max(120) }).strict().optional() }).strict().refine(value => JSON.stringify(value).length <= 12_000);
+export const observationSchema = z.object({ manualSelection:manualSelectionSchema.optional(), conversationEvidence:conversationEvidenceSchema.optional(), conversationContext: semanticContextSchema.optional(), media: mediaSchema.optional(), tabId: uuid, scopeId: uuid, documentId: uuid, snapshotId: uuid, expiresAt: z.number().int().positive(), url: z.string().max(300), title: z.string().max(120), elements: z.array(elementSchema).max(40), truncated: z.boolean(), dialog: z.object({ role: z.string().max(30), name: z.string().max(120) }).strict().optional() }).strict().refine(value => JSON.stringify(value).length <= 12_000);
 export type AttachedObservation = z.infer<typeof observationSchema>;
 export const observationResultSchema = z.discriminatedUnion('status', [z.object({ status: z.literal('OK'), data: observationSchema }).strict(), z.object({ status: z.literal('FAILED'), reason: z.enum([...errors.options, ...reasons.options, ...conflictSchema.shape.reason.options, 'OBSERVATION_REQUIRED', 'STEP_PENDING', 'UPSTREAM']) }).strict()]);
 export type ObservationResult = z.infer<typeof observationResultSchema>;
 export interface InteractionResult { actionOutcome?: import('../action-outcome.js').ActionOutcome; action: { status: 'COMPLETED' }; result: unknown; observation: ObservationResult; requiresFreshObservation: boolean }
 const status = z.object({ available: z.boolean(), connected: z.boolean(), visible: z.literal(true), connections: z.array(uuid).max(10) }).strict();
 const ack = z.object({ completed: z.literal(true), paused: z.boolean().optional() }).strict();
+const sendReply=z.object({sendState:z.enum(['NOT_SENT','DISPATCHED_UNVERIFIED']),draftVisible:z.boolean()}).strict();
 export const replySchema = z.discriminatedUnion('outcome', [
-  z.object({ outcome: z.literal('OK'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), data: z.union([status, tabSchema, z.array(tabSchema).max(20), observationSchema, ack]) }).strict(),
+  z.object({ outcome: z.literal('OK'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), data: z.union([status, tabSchema, z.array(tabSchema).max(20), observationSchema, ack,sendReply]) }).strict(),
   z.object({ outcome: z.literal('ACCESS_PENDING'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), accessRequestId: uuid, expiresAt: z.number().int().positive(), origin: z.string().url().max(300).optional() }).strict(),
   z.object({ outcome: z.literal('REQUIRES_USER_INTERACTION'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), handoffId: uuid, reason: reasons }).strict(),
   z.object({ outcome: z.literal('ERROR'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), code: errors, conflict: conflictSchema.optional() }).strict().refine(reply => !reply.conflict || reply.code === 'STALE_REF')

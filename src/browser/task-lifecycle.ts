@@ -8,14 +8,16 @@ export interface TaskFacts {
   progress:boolean; pending:boolean; unknown:boolean; fresh:boolean;
   verificationRequired:boolean; verified:boolean; verificationExhausted:boolean;
   cancelled:boolean; terminal:boolean; recoveryExhausted:boolean;
+  consequentialUnverified?:boolean;
+  consequentialUnknown?:boolean;
 }
 // Structural evidence only. This does not infer satisfaction of a user's semantic objective.
 export function canEndTask(request:EndTaskRequest, facts:TaskFacts):boolean {
   switch(request.reason){
-    case 'COMPLETED': return (facts.intent==='READ_ONLY' ? facts.readObtained===true : facts.progress) && !facts.pending && !facts.unknown && facts.fresh && (!facts.verificationRequired || facts.verified);
+    case 'COMPLETED': return !facts.consequentialUnverified && (facts.intent==='READ_ONLY' ? facts.readObtained===true : facts.progress) && !facts.pending && !facts.unknown && facts.fresh && (!facts.verificationRequired || facts.verified);
     case 'CANCELLED': return facts.cancelled;
     case 'TERMINAL': return facts.terminal;
-    case 'INCONCLUSIVE': return !facts.unknown && !facts.pending && (facts.recoveryExhausted || facts.verificationExhausted);
+    case 'INCONCLUSIVE': return !facts.pending && ((!facts.unknown && (facts.consequentialUnverified || facts.recoveryExhausted || facts.verificationExhausted)) || (facts.unknown && facts.consequentialUnknown===true));
     default:return false;
   }
 }

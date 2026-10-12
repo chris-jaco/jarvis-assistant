@@ -15,6 +15,7 @@ export interface Surface {
   navigate(tab: number, url: string): Promise<void>;
   history(tab: number, action: 'back' | 'forward' | 'reload'): Promise<void>;
   content(tab: number, grant: Grant, request: Request): Promise<Reply>;
+  selectConversation?(tab:number,grant:Grant,epoch:string):Promise<boolean>;
   invalidate(tab: number, documentOnly?: boolean): Promise<void>;
 }
 export interface Grant { scopeId: string; tabId: string; chromeId: number; origin: string; session: string; task: string; expiresAt: number; lifetime: 'task' | 'session'; title: string; url: string; handoff?: { id: string; reason: Extract<Reply, { outcome: 'REQUIRES_USER_INTERACTION' }>['reason'] }; suspended?: boolean; persistent?: boolean }
@@ -80,6 +81,17 @@ export class ExtensionController {
   expire(): void { this.cleanup(); }
   pending(): { id: string; purpose: string; lifetime: string; origin?: string; tabSelected?: boolean }[] { this.cleanup(); return [...this.tickets.values()].map(ticket => ({ id: ticket.id, purpose: privateText(String(ticket.request.args.purpose), 160), lifetime: String(ticket.request.args.lifetime), ...(ticket.origin ? { origin: ticket.origin } : {}) })); }
   authorized(): AuthorizedTab[] { this.cleanup(); return [...this.grants.values()].map(grant => this.dto(grant)); }
+  async selectConversation(scopeId:string):Promise<boolean> {
+    this.cleanup();const grant=this.grants.get(scopeId),epoch=this.epoch;
+    if(!grant||!epoch||grant.suspended||grant.handoff||grant.expiresAt<=this.now()||this.ended.has(grant.session)||this.endedTasks.has(grant.session+':'+grant.task)||!this.activeTasks.has(grant.session+':'+grant.task)||!this.surface.selectConversation)throw new Error('ACCESS_DENIED');
+    const selected=await this.surface.current();
+    if(selected.id!==grant.chromeId||siteOrigin(selected.url)!==grant.origin)throw new Error('ACCESS_DENIED');
+    if(grant.persistent&&!await this.sites?.allows(grant.origin))throw new Error('ACCESS_DENIED');
+    const accepted=await this.surface.selectConversation(grant.chromeId,grant,epoch);
+    const latest=this.grants.get(scopeId);
+    if(this.epoch!==epoch||latest!==grant||grant.expiresAt<=this.now()||grant.suspended||grant.handoff||this.endedTasks.has(grant.session+':'+grant.task)||!accepted)return false;
+    return true;
+  }
   async approve(ticketId: string, expectedOrigin?: string, always = false, correlationId?:string): Promise<void> {
     if (this.approving) throw new Error('REJECTED');
     this.approving = true;
@@ -180,6 +192,9 @@ export class ExtensionController {
   async end(session: string): Promise<void> { this.ended.add(session); for (const key of this.activeTasks) if (key.startsWith(session + ':')) this.activeTasks.delete(key); for (const grant of [...this.grants.values()]) if (grant.session === session) await this.revoke(grant.scopeId); for (const [id, ticket] of this.tickets) if (ticket.request.backendSessionId === session) this.tickets.delete(id); }
   private async execute(request: Request, trace:(raw:unknown)=>void): Promise<Reply> {
     this.cleanup(); const args = request.args;
+    // Independent extension boundary: this build has no trusted send-capability
+    // authorization. A direct Native Messaging request must fail closed.
+    if (request.operation === 'sendSelectedMessage') return { outcome: 'ERROR', code: 'REJECTED' };
     if (request.operation === 'status') return { outcome: 'OK', data: { available: true, connected: true, visible: true, connections: [] } };
     if (request.operation === 'endTask') { this.activeTasks.delete(request.backendSessionId + ':' + request.taskId); this.endedTasks.add(request.backendSessionId + ':' + request.taskId); for (const grant of [...this.grants.values()]) if (grant.session === request.backendSessionId && grant.task === request.taskId && grant.lifetime === 'task') await this.revoke(grant.scopeId); for (const [id, ticket] of this.tickets) if (ticket.request.backendSessionId === request.backendSessionId && ticket.request.taskId === request.taskId) this.tickets.delete(id); return { outcome: 'OK', data: { completed: true } }; }
     if (request.operation === 'endSession') { await this.end(request.backendSessionId); return { outcome: 'OK', data: { completed: true } }; }

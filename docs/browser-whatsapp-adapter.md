@@ -1,5 +1,7 @@
 # V0.5.3.3 — WhatsApp semantic adapter, READ-only / partial evidence
 
+This page describes the earlier READ-only checkpoint. The current development branch permits manual recipient selection and private drafts only; writing and Send are blocked as documented in [browser-whatsapp-manual-send.md](browser-whatsapp-manual-send.md). It still lacks real Windows acceptance.
+
 Based on `9e16c7a46b808928ab108149e5127f11b2adec02`. This is a development checkpoint, not a release. Existing package/extension/host versions and permissions remain unchanged. Build and reload the extension to receive the optional new observation metadata; no Native Host reinstall is needed.
 
 ## Real evidence and intentional limits

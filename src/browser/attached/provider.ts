@@ -1,5 +1,6 @@
 import { assessConversationEvidence } from '../consequential/conversation-evidence.js';
 import { ConsequentialFoundation } from '../consequential/foundation.js';
+import { PrivateExecutionJournal } from '../consequential/journal.js';
 import { draftContextSchema } from '../consequential/semantic.js';
 import type { DraftContext } from '../consequential/semantic.js';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -23,11 +24,11 @@ import type { Operation, Reply, AuthorizedTab, BrowserConflictDetail, AttachedOb
 import type { BrowserTransport } from './transport.js';
 const contextReadReasons: readonly string[] = ['UPSTREAM','TIMEOUT','OBSERVATION_REQUIRED','SNAPSHOT_EXPIRED','DOCUMENT_CHANGED','ELEMENT_CHANGED','SNAPSHOT_CONSUMED'];
 interface ContextRecovery { status: 'READY' | 'REQUIRED' | 'RECOVERING' | 'INCONCLUSIVE'; attempts: number; ready: string | null }
-interface Session { userAccessRejected?:boolean; requestedIdentifiers?:string[]; drafts?:ConsequentialFoundation; observeRequestId?:string; intent?:TaskIntent; readAdmission?:string; inventory?:{admission:string;expires:number}; admission?:string; progress:Map<string,ActionRecord>; acknowledged:Set<string>; rejectionToken?:string; cancelled?:boolean; terminal?:boolean; contextRecovery?: ContextRecovery; accessCorrelation?:string; traceNext?:boolean; actionRecord?: ActionRecord; accessRevoked?: boolean; id: string; task: string; connection?: string; active?: string; tabs: Map<string, AuthorizedTab>; workflow?: Exclude<Reply, { outcome: 'OK' } | { outcome: 'ERROR' }>; ready?: string; observation?: { tabId: string; scopeId: string; documentId: string; snapshotId: string; refs: Set<string>; expires: number }; closed?: boolean; failures: number; uncertain?: boolean; invalidation?: BrowserConflictDetail['reason']; context: 'READY' | 'OBSERVATION_REQUIRED'; pendingStep?: string; pendingRecovery?: {signature:string;scopeId:string}; completed?: { key: string; result: unknown; record:ActionRecord }; knownRefs: Map<string, string>; lastObservation?: AttachedObservation; timings: BrowserTimings; tail: Promise<unknown>; deadline?: number }
+interface Session { consequentialUnverified?:boolean; consequentialUnknown?:boolean; userAccessRejected?:boolean; requestedIdentifiers?:string[]; drafts?:ConsequentialFoundation; observeRequestId?:string; intent?:TaskIntent; readAdmission?:string; inventory?:{admission:string;expires:number}; admission?:string; progress:Map<string,ActionRecord>; acknowledged:Set<string>; rejectionToken?:string; cancelled?:boolean; terminal?:boolean; contextRecovery?: ContextRecovery; accessCorrelation?:string; traceNext?:boolean; actionRecord?: ActionRecord; accessRevoked?: boolean; id: string; task: string; connection?: string; active?: string; tabs: Map<string, AuthorizedTab>; workflow?: Exclude<Reply, { outcome: 'OK' } | { outcome: 'ERROR' }>; ready?: string; observation?: { tabId: string; scopeId: string; documentId: string; snapshotId: string; refs: Set<string>; expires: number }; closed?: boolean; failures: number; uncertain?: boolean; invalidation?: BrowserConflictDetail['reason']; context: 'READY' | 'OBSERVATION_REQUIRED'; pendingStep?: string; pendingRecovery?: {signature:string;scopeId:string}; completed?: { key: string; result: unknown; record:ActionRecord }; knownRefs: Map<string, string>; lastObservation?: AttachedObservation; timings: BrowserTimings; tail: Promise<unknown>; deadline?: number }
 export class BrowserWorkflow extends Error { constructor(readonly reply: Exclude<Reply, { outcome: 'OK' }>) { super(reply.outcome); } }
 export class AttachedChromeProvider implements BrowserProvider {
   readonly attached = true; private scope = new AsyncLocalStorage<Session>(); private sessions = new Map<string, Session>();
-  constructor(private readonly transport: BrowserTransport, private readonly enabled = true, private readonly configuredConnection?: string, private readonly diagnostics?: BrowserDiagnostics, private readonly accessDiagnostics?:PopupDiagnostics,private readonly taskDiagnostics=new BrowserTaskDiagnostics(),private readonly readPause=(ms:number,signal:AbortSignal)=>delay(ms,undefined,{signal})) {
+  constructor(private readonly transport: BrowserTransport, private readonly enabled = true, private readonly configuredConnection?: string, private readonly diagnostics?: BrowserDiagnostics, private readonly accessDiagnostics?:PopupDiagnostics,private readonly taskDiagnostics=new BrowserTaskDiagnostics(),private readonly readPause=(ms:number,signal:AbortSignal)=>delay(ms,undefined,{signal}),private readonly sendJournal=new PrivateExecutionJournal()) {
     transport.subscribe((connection, event) => {
       const session = this.sessions.get(event.backendSessionId); if (!session || session.closed || session.connection !== connection) return;
       if(event.trace){session.accessCorrelation=event.trace.correlationId;session.traceNext=true;this.accessDiagnostics?.event(event.trace.correlationId,'backend_received');}
@@ -50,7 +51,7 @@ export class AttachedChromeProvider implements BrowserProvider {
     if(session.admission===admission||session.workflow)return false;
     // A trusted new user turn starts a new progress ledger, not a new Chrome
     // permission. Never import an earlier objective's action as completion proof.
-    session.drafts?.invalidateDrafts();session.requestedIdentifiers=[...new Set(utterance?.match(/[^\s<>@]+@[^\s<>@]+\.[a-zA-Z]{2,}|\+[1-9][0-9 ()-]{5,24}/g)??[])].slice(0,10);session.userAccessRejected=false;session.admission=admission;session.intent=classifyTaskIntent(utterance);session.readAdmission=undefined;session.inventory=undefined;session.progress.clear();session.terminal=false;session.cancelled=false;
+    session.drafts?.invalidateDrafts();session.requestedIdentifiers=[...new Set(utterance?.match(/[^\s<>@]+@[^\s<>@]+\.[a-zA-Z]{2,}|\+[1-9][0-9 ()-]{5,24}/g)??[])].slice(0,10);session.userAccessRejected=false;session.admission=admission;session.intent=classifyTaskIntent(utterance);session.readAdmission=undefined;session.inventory=undefined;session.progress.clear();session.terminal=false;session.cancelled=false;session.consequentialUnverified=false;session.consequentialUnknown=false;
     // New admission gets fresh operational context, never old completion proof.
     // Keep the uncertainty latch and Chrome consent/scopes intact.
     session.contextRecovery=undefined;session.observation=undefined;session.lastObservation=undefined;session.context='OBSERVATION_REQUIRED';session.completed=undefined;session.pendingStep=undefined;session.pendingRecovery=undefined;session.failures=0;session.rejectionToken=undefined;session.ready=undefined;
@@ -73,14 +74,14 @@ export class AttachedChromeProvider implements BrowserProvider {
   }
   private async call(operation: Operation, args: Record<string, unknown>, signal: AbortSignal): Promise<Reply> {
     const session = this.session();if(session.traceNext&&session.accessCorrelation&&!['status','listAuthorizedTabs'].includes(operation)){session.traceNext=false;this.accessDiagnostics?.event(session.accessCorrelation,'next_task_tool','START');} const deadlineAt = Math.min(Date.now() + 17_000, session.deadline ?? Infinity);
-    if (['click','type','press','media','scroll','navigate','back','forward','reload'].includes(operation)) this.allowAction(session);
+    if (['click','type','press','media','scroll','navigate','back','forward','reload','sendSelectedMessage'].includes(operation)) this.allowAction(session);
     const connection = await this.connection(session, signal);
     if (signal.aborted || deadlineAt <= Date.now()) throw new ToolError('TIMEOUT');
     const request = parseRequest({ protocol: 'atlas.browser', version: 1, kind: 'request', requestId: randomUUID(), backendSessionId: session.id, taskId: session.task, connectionEpoch: this.transport.epoch, deadlineAt, operation, args, ...(this.diagnostics?.enabled?{observeTrace:true}:{}) });
     if(operation==='observe'&&this.diagnostics?.enabled)session.observeRequestId=request.requestId;
     let reply: Reply; const transportStarted = performance.now(); let rejectAbort!: (error: Error) => void;
     const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
-    const dispatchedAction = ['click','type','press','media','scroll','navigate','back','forward','reload'].includes(operation);
+    const dispatchedAction = ['click','type','press','media','scroll','navigate','back','forward','reload','sendSelectedMessage'].includes(operation);
     const abortedAfterDispatch = () => { if (dispatchedAction) session.uncertain = true; rejectAbort(new ToolError(dispatchedAction ? 'EXECUTION_UNKNOWN' : 'TIMEOUT')); };
     signal.addEventListener('abort', abortedAfterDispatch, { once: true });
     try { const waiting = this.transport.request(connection, request, signal); if (signal.aborted) abortedAfterDispatch(); reply = replySchema.parse(await Promise.race([waiting, aborted])); }
@@ -164,20 +165,21 @@ export class AttachedChromeProvider implements BrowserProvider {
   }
   private draftContext(data:AttachedObservation):DraftContext {
     const session=this.session(),tab=session.tabs.get(session.active??'');
-    if(data.conversationEvidence)throw new ToolError('REJECTED');
+    if(data.conversationEvidence&&!data.manualSelection)throw new ToolError('REJECTED');
     // Successful extension observe attests all three existing permission layers.
     // Bind that evidence to this exact backend admission and operational scope.
-    if(session.uncertain||session.cancelled||session.workflow||session.accessRevoked||!session.admission||!session.connection||!this.transport.connections().includes(session.connection)||!tab||tab.id!==data.tabId||tab.scopeId!==data.scopeId||!data.conversationContext||new URL(data.url).origin!==data.conversationContext.origin)throw new ToolError('REJECTED');
-    return draftContextSchema.parse({backendSessionId:session.id,taskId:session.task,admissionId:session.admission,connectionEpoch:this.transport.epoch,origin:data.conversationContext.origin,scopeId:data.scopeId,tabId:data.tabId,documentId:data.documentId,snapshotId:data.snapshotId,snapshotExpiresAt:data.expiresAt,grantExpiresAt:tab.expiresAt,chromePermission:true,siteAuthorized:true,grantValid:true,requestedIdentifiers:session.requestedIdentifiers??[],semantic:data.conversationContext});
+    const origin=new URL(data.url).origin;
+    if(session.uncertain||session.cancelled||session.workflow||session.accessRevoked||!session.admission||!session.connection||!this.transport.connections().includes(session.connection)||!tab||tab.id!==data.tabId||tab.scopeId!==data.scopeId||!data.conversationContext&&!data.manualSelection||data.conversationContext&&origin!==data.conversationContext.origin||data.manualSelection&&(data.conversationEvidence?.state==='INVALIDATED'||data.manualSelection.scopeId!==data.scopeId||data.manualSelection.tabId!==data.tabId||data.manualSelection.documentId!==data.documentId||data.manualSelection.epoch!==this.transport.epoch))throw new ToolError('REJECTED');
+    return draftContextSchema.parse({backendSessionId:session.id,taskId:session.task,admissionId:session.admission,connectionEpoch:this.transport.epoch,origin,scopeId:data.scopeId,tabId:data.tabId,documentId:data.documentId,snapshotId:data.snapshotId,snapshotExpiresAt:data.expiresAt,grantExpiresAt:tab.expiresAt,chromePermission:true,siteAuthorized:true,grantValid:true,requestedIdentifiers:session.requestedIdentifiers??[],semantic:data.conversationContext??{origin,conversations:[],truncated:false,trust:'UNTRUSTED_PAGE_EVIDENCE'},...(data.manualSelection?{manualSelection:data.manualSelection}:{})});
   }
   async prepareDraft(input:unknown,signal:AbortSignal):Promise<unknown> {
     const session=this.session();
     const epoch=this.transport.epoch;const data=await this.observeWithResume(signal);
     if(epoch!==this.transport.epoch)throw new ToolError('REJECTED');
-    if(data.conversationEvidence)return {...assessConversationEvidence(data.conversationEvidence),draftOnly:true,candidateCount:0};
-    if(!data.conversationContext)return {status:'INSUFFICIENT_EVIDENCE',candidateCount:0,draftOnly:true};
+    if(data.conversationEvidence&&!data.manualSelection)return {...assessConversationEvidence(data.conversationEvidence),draftOnly:true,candidateCount:0};
+    if(!data.conversationContext&&!data.manualSelection)return {status:'INSUFFICIENT_EVIDENCE',candidateCount:0,draftOnly:true};
     const context=this.draftContext(data);signal.throwIfAborted();
-    session.drafts??=ConsequentialFoundation.drafts(session.id);
+    session.drafts??=ConsequentialFoundation.drafts(session.id,Date.now,this.sendJournal);
     return session.drafts.prepareDraft(input,context,signal);
   }
   async reviewDraft(intentId:string,signal:AbortSignal):Promise<unknown> {
@@ -361,7 +363,9 @@ export class AttachedChromeProvider implements BrowserProvider {
       fresh:session.intent?.intent==='READ_ONLY'&&session.intent.context==='TABS'?!!session.inventory&&session.inventory.expires-Date.now()>250&&!session.accessRevoked:session.context==='READY'&&!!session.observation&&session.observation.expires-Date.now()>250&&!!tab&&tab.expiresAt>Date.now(),
       verificationRequired:!!record?.verifiable,verified:record?.result().outcome==='ACTION_VERIFIED',verificationExhausted:!!record?.verificationExhausted,
       cancelled:!!session.cancelled,terminal:!!session.terminal||!!session.accessRevoked||session.workflow?.outcome==='REQUIRES_USER_INTERACTION',
-      recoveryExhausted:session.contextRecovery?.status==='INCONCLUSIVE'&&session.contextRecovery.attempts>=2
+      recoveryExhausted:session.contextRecovery?.status==='INCONCLUSIVE'&&session.contextRecovery.attempts>=2,
+      consequentialUnverified:!!session.consequentialUnverified,
+      consequentialUnknown:!!session.consequentialUnknown
     };
     const accepted=canEndTask(request,facts);
     this.traceTask({stage:'END_TASK_GUARD',phase:'GUARD',taskId:session.task,admissionId:session.admission,call:this.diagnostics?.callId(),requestedReason:request.reason,outcome:accepted?'ACCEPTED':'REJECTED',...(accepted?{}:{reason:'OBJECTIVE_PENDING'}),guardMs:Math.min(30000,performance.now()-guardStarted),guard:facts});

@@ -3,6 +3,18 @@ import type { ConversationEvidence } from '../../../src/browser/consequential/co
 export class WhatsAppSemanticAdapter {
  private handles=new WeakMap<Element,string>();
  constructor(private readonly id:()=>string) {}
+ // Used only after a real popup gesture. Ambiguous/hidden structure cannot be
+ // selected, and the returned nodes never leave the content script.
+ select(doc:Document,visible:(node:HTMLElement)=>boolean):{panel:HTMLElement;header:HTMLElement;composer:HTMLElement}|undefined {
+  const one=(scope:Document|Element,selector:string)=>{const matches=[...scope.querySelectorAll<HTMLElement>(selector)].filter(visible);return matches.length===1?matches[0]:undefined;};
+  const panel=one(doc,'#main[data-testid="conversation-panel-wrapper"]');
+  const header=panel&&one(panel,'[data-testid="conversation-header"]');
+  const composer=panel&&one(panel,'[data-testid="conversation-compose-box-input"]');
+  if(!panel||!header||!composer||!/^(https:\/\/web\.whatsapp\.com)$/.test(doc.location?.origin??''))return;
+  if(!composer.matches('textarea,[contenteditable="true"][role="textbox"]')||composer.closest('[role="search"]')||composer.matches(':disabled,[readonly],[aria-disabled="true"],[aria-readonly="true"]'))return;
+  if(/^(group info|informaci[oó]n del grupo)$/i.test(header.getAttribute('aria-label')??''))return;
+  return {panel,header,composer};
+ }
  private handle(node:Element):string {let value=this.handles.get(node);if(!value){value=this.id();this.handles.set(node,value);}return value;}
  // Only during an explicit READ. No message contents/old values are captured.
  watch(doc:Document):{changed:()=>boolean;stop:()=>void} {

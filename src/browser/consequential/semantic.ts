@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { manualSelectionSchema } from './manual-selection.js';
 const uuid = z.string().uuid();
 export const conversationSchema = z.object({
   conversationId: uuid,
@@ -35,6 +36,6 @@ export const draftContextSchema=z.object({
   snapshotExpiresAt:z.number().int().positive(),grantExpiresAt:z.number().int().positive(),
   chromePermission:z.literal(true),siteAuthorized:z.literal(true),grantValid:z.literal(true),
   requestedIdentifiers:z.array(z.string().min(1).max(200)).max(10),
-  semantic:semanticContextSchema
+  semantic:semanticContextSchema,manualSelection:manualSelectionSchema.optional()
 }).strict();
 export type DraftContext=z.infer<typeof draftContextSchema>;

@@ -15,7 +15,7 @@ async function command(action: string, fields: Record<string,unknown> = {}, corr
     const reply = await chrome.runtime.sendMessage({ action, ...fields,correlationId });
     accessDiagnostics.event(correlationId,'state_ready',closed?'CLOSED':sequence!==requestSequence?'OUT_OF_ORDER':reply.error?'FAILED':'OK',performance.now()-started);if(closed||sequence!==requestSequence)return;
     if (reply.error) { state.textContent = reply.error; return; }
-    state.textContent = reply.connected ? 'Conectado a Atlas' : 'Atlas no está conectado. Iniciá Atlas en modo attached.';
+    state.textContent = reply.selectionApplied ? 'Conversación seleccionada para esta tarea. Atlas sólo puede preparar un borrador privado; no escribirá ni enviará en WhatsApp.' : reply.connected ? 'Conectado a Atlas' : 'Atlas no está conectado. Iniciá Atlas en modo attached.';
     pending.replaceChildren(); authorized.replaceChildren(); sites.replaceChildren();
     for (const request of reply.pending) {
       const row = document.createElement('div'); const text = document.createElement('p');
@@ -34,6 +34,7 @@ async function command(action: string, fields: Record<string,unknown> = {}, corr
     }
     for (const tab of reply.authorized) {
       const row=document.createElement('div');const text=document.createElement('p');text.textContent=`${tab.title || 'Pestaña autorizada'} · ${tab.url} · ${tab.state}`;row.append(text);
+      if(tab.state==='ACTIVE'&&new URL(tab.url).origin==='https://web.whatsapp.com')button(row,'Confirmo que esta conversación es el destinatario',()=>command('selectConversation',{id:tab.scopeId}));
       button(row,'Revocar pestaña',()=>command('revoke',{id:tab.scopeId}));authorized.append(row);
     }
     for (const site of reply.sites) {

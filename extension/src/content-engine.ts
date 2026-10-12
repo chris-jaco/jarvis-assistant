@@ -8,13 +8,16 @@ import { MediaState, resolveMedia, mediaContainer } from './media-state.js';
 import type { SearchControl } from './search-controls.js';
 import type { MediaControl } from './media-state.js';
 import type { BrowserCapability, FunctionalKind } from '../../src/browser/provider.js';
+import type { ManualSelection } from '../../src/browser/consequential/manual-selection.js';
 interface Access { scopeId: string; tabId: string; session: string; epoch: string; origin: string; expiresAt: number }
 interface Entry { node: HTMLElement; documentId: string; snapshotId: string; action: string; href?: string; fingerprint: string; form: HTMLFormElement | null; modal?: HTMLElement; search?: SearchControl; media?: MediaControl }
+interface SelectedConversation { evidence:ManualSelection;panel:HTMLElement;header:HTMLElement;composer:HTMLElement;observer:MutationObserver;changed:boolean }
 export class ContentEngine {
   private mediaState: MediaState;
   private semanticAdapters = new SemanticAdapterRegistry(() => this.id());
   private conversations = new ConversationObserver(() => this.id());
   private access?: Access; private documentId: string; private documentUrl: string; private refs = new Map<string, Entry>(); private snapshotExpires = 0;
+  private selection?:SelectedConversation;
   private accessTimer?: number; private snapshotTimer?: number;
   constructor(private readonly win: Window & typeof globalThis, private readonly now = Date.now, private readonly id: () => string = () => crypto.randomUUID(), private readonly settle = (ms:number):Promise<void> => new Promise(resolve=>win.setTimeout(resolve,ms))) {
     this.mediaState = new MediaState(win);
@@ -29,12 +32,35 @@ export class ContentEngine {
   }
   initialize(access: Access): void {
     if (access.origin !== this.win.location.origin || access.expiresAt <= this.now()) throw new Error('ACCESS_DENIED');
-    if (!this.access || this.access.scopeId !== access.scopeId || this.access.epoch !== access.epoch || this.access.session !== access.session) this.refs.clear();
+    if (!this.access || this.access.scopeId !== access.scopeId || this.access.epoch !== access.epoch || this.access.session !== access.session) { this.refs.clear();this.clearSelection(); }
     this.access = access; this.win.clearTimeout(this.accessTimer); this.accessTimer = this.win.setTimeout(() => this.revoke(), Math.max(0, access.expiresAt - this.now()));
   }
-  revoke(): void { this.win.clearTimeout(this.accessTimer); this.win.clearTimeout(this.snapshotTimer); this.access = undefined; this.refs.clear(); }
+  revoke(): void { this.win.clearTimeout(this.accessTimer); this.win.clearTimeout(this.snapshotTimer); this.access = undefined; this.refs.clear();this.clearSelection(); }
   private navigationChanged = (): void => { this.documentChanged(); };
-  documentChanged(): void { this.documentId = this.id(); this.documentUrl = this.win.location.href; this.refs.clear(); this.snapshotExpires = 0; }
+  documentChanged(): void { this.documentId = this.id(); this.documentUrl = this.win.location.href; this.refs.clear(); this.snapshotExpires = 0;this.clearSelection(); }
+  private clearSelection():void {this.selection?.observer.disconnect();this.selection=undefined;}
+  private selected(access:Access):ManualSelection|undefined {
+    const selected=this.selection;
+    if(!selected)return;
+    if(selected.observer.takeRecords().length)selected.changed=true;
+    const {panel,header,composer,evidence}=selected;
+    if(selected.changed||evidence.expiresAt<=this.now()||evidence.scopeId!==access.scopeId||evidence.tabId!==access.tabId||evidence.epoch!==access.epoch||evidence.documentId!==this.documentId||this.win.location.href!==this.documentUrl||!panel.isConnected||!header.isConnected||!composer.isConnected||!panel.contains(header)||!panel.contains(composer)||!this.visible(panel)||!this.visible(header)||!this.visible(composer)||composer.matches(':disabled,[readonly],[aria-disabled="true"],[aria-readonly="true"]')) {this.clearSelection();return;}
+    return evidence;
+  }
+  // Called exclusively by the extension popup path, after an actual user click.
+  selectConversation(access:Access):boolean {
+    const current=this.access;
+    if(!current||current.session!==access.session||current.epoch!==access.epoch||current.scopeId!==access.scopeId||current.tabId!==access.tabId||current.origin!==access.origin||current.expiresAt<=this.now()||this.win.location.origin!==current.origin||this.challenge())return false;
+    const nodes=this.semanticAdapters.select(current.origin)?.select(this.win.document,el=>this.visible(el));
+    if(!nodes)return false;
+    this.clearSelection();
+    const evidence:ManualSelection={selectionId:this.id(),scopeId:current.scopeId,tabId:current.tabId,documentId:this.documentId,epoch:current.epoch,expiresAt:Math.min(current.expiresAt,this.now()+5*60_000),assurance:'USER_SELECTED'};
+    const selected:SelectedConversation={evidence,...nodes,observer:new this.win.MutationObserver(()=>{selected.changed=true;}),changed:false};
+    selected.observer.observe(nodes.header,{attributes:true,childList:true,subtree:true,characterData:true});
+    selected.observer.observe(nodes.composer,{childList:true,subtree:true,characterData:true});
+    this.selection=selected;
+    return true;
+  }
   destroy(): void {
     this.revoke();
     for (const event of ['popstate', 'hashchange', 'pagehide', 'pageshow']) this.win.removeEventListener(event, this.navigationChanged);
@@ -86,6 +112,9 @@ export class ContentEngine {
       const access = this.access;
       if (!access || access.session !== identity.session || access.epoch !== identity.epoch || access.expiresAt <= this.now() || access.origin !== this.win.location.origin || args.scopeId !== access.scopeId || args.tabId !== access.tabId) throw new Error('ACCESS_DENIED');
       if (deadlineAt <= this.now()) throw new Error('TIMEOUT');
+      // V0.5.3.6A is READ-only for WhatsApp. No backend configuration or
+      // protocol message can enable composer writes in this extension build.
+      if (operation === 'sendSelectedMessage') return { outcome: 'ERROR', code: 'REJECTED' };
       const challenge = this.challenge(); if (challenge) { this.refs.clear(); return { outcome: 'REQUIRES_USER_INTERACTION', handoffId: this.id(), reason: challenge }; }
       if (operation === 'observe') { const started = this.now(); const data = await this.observe(access, deadlineAt); return { outcome: 'OK', data, timings: { observationBuildMs: Math.min(30_000, Math.max(0, this.now() - started)) } }; }
       if (operation === 'scroll') { dispatched = true; this.win.scrollBy(0, args.direction === 'down' ? 600 : -600); this.refs.clear(); return { outcome: 'OK', data: { completed: true } }; }
@@ -202,7 +231,8 @@ export class ContentEngine {
     const evidenceAfter=adapter?.read(doc,el=>this.visible(el),evidenceBinding);
     const conversationEvidence=evidenceAfter&&(evidenceWatch?.changed()||JSON.stringify(evidenceBefore)!==JSON.stringify(evidenceAfter))?{...evidenceAfter,state:'INVALIDATED' as const,reason:'CONTEXT_CHANGED' as const,handles:{}}:evidenceAfter;
     const conversationContext = JSON.stringify(semanticBefore) === JSON.stringify(semanticAfter) ? semanticAfter : undefined;
-    const built = observationSchema.parse({ ...(conversationEvidence?{conversationEvidence}:{}), media, expiresAt: 1, tabId: access.tabId, scopeId: access.scopeId, documentId: this.documentId, snapshotId, url: displayUrl(this.win.location.href), title: privateText(doc.title), elements, truncated, ...(modal ? { dialog: { role: privateText(modal.getAttribute('role') ?? 'dialog',30), name: privateText(modal.getAttribute('aria-label') || modal.querySelector('h1,h2,h3')?.textContent || 'Dialog') } } : {}) });
+    const manualSelection=this.selected(access);
+    const built = observationSchema.parse({ ...(conversationEvidence?{conversationEvidence}:{}), ...(manualSelection?{manualSelection}:{}), media, expiresAt: 1, tabId: access.tabId, scopeId: access.scopeId, documentId: this.documentId, snapshotId, url: displayUrl(this.win.location.href), title: privateText(doc.title), elements, truncated, ...(modal ? { dialog: { role: privateText(modal.getAttribute('role') ?? 'dialog',30), name: privateText(modal.getAttribute('aria-label') || modal.querySelector('h1,h2,h3')?.textContent || 'Dialog') } } : {}) });
     this.snapshotExpires = this.now() + 15_000; this.snapshotTimer = this.win.setTimeout(() => this.refs.clear(), 15_000);
     return { ...built, ...(conversationContext?.conversations.length&&JSON.stringify({...built,conversationContext}).length<=12_000?{conversationContext}:{}), expiresAt: this.snapshotExpires };
     } finally {evidenceWatch?.stop();}

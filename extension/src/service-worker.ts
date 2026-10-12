@@ -21,7 +21,18 @@ const controller = new ExtensionController({
   navigate: async (id, url) => { await chrome.tabs.update(id, { url, active: true }); },
   history: async (id, action) => { if (action === 'reload') await chrome.tabs.reload(id); else if (action === 'back') await chrome.tabs.goBack(id); else await chrome.tabs.goForward(id); },
   invalidate,
-  content: (id, grant, request) => contentRequest(chrome, () => controller.epoch, id, grant, request)
+  content: (id, grant, request) => contentRequest(chrome, () => controller.epoch, id, grant, request),
+  selectConversation:async (id,grant,epoch)=>{
+    const injected=await chrome.scripting.executeScript({target:{tabId:id,frameIds:[0]},world:'ISOLATED',files:['content.js']});
+    const documentId=injected.find(row=>row.frameId===0)?.documentId;
+    const target=documentId?{documentId}:{frameId:0};
+    const access={scopeId:grant.scopeId,tabId:grant.tabId,session:grant.session,epoch,origin:grant.origin,expiresAt:grant.expiresAt};
+    const initialized=await chrome.tabs.sendMessage(id,{kind:'init',access},target);
+    if(initialized?.completed!==true)return false;
+    const selected=await chrome.tabs.sendMessage(id,{kind:'selectConversation',access},target);
+    const tab=await chrome.tabs.get(id);
+    return selected?.selected===true&&!tab.pendingUrl&&!!tab.url&&new URL(tab.url).origin===grant.origin;
+  }
 }, message => { if (port) { try { port.postMessage(message); } catch { /* Disconnect resets grants below. */ } } void badge(); }, Date.now, () => crypto.randomUUID(), sites,accessDiagnostics);
 async function badge() { await chrome.action.setBadgeText({ text: controller.pending().length ? '?' : controller.authorized().length ? 'ON' : '' }); await chrome.action.setBadgeBackgroundColor({ color: '#35E6D0' }); }
 function connect(): void {
@@ -52,6 +63,7 @@ const popupRequest = z.discriminatedUnion('action', [
   z.object({ correlationId:z.string().uuid().optional(),action: z.literal('state') }).strict(),
   z.object({ correlationId:z.string().uuid().optional(),action: z.literal('approve'), id: z.string().uuid(), origin: z.string().url().max(300), always: z.boolean() }).strict(),
   z.object({ correlationId:z.string().uuid().optional(),action: z.literal('revokeSite'), origin: z.string().url().max(300) }).strict(),
+  z.object({correlationId:z.string().uuid().optional(),action:z.literal('selectConversation'),id:z.string().uuid()}).strict(),
   ...['revoke','renew','deny'].map(action => z.object({ correlationId:z.string().uuid().optional(),action: z.literal(action), id: z.string().uuid() }).strict())
 ] as unknown as [z.ZodObject, z.ZodObject, ...z.ZodObject[]]);
 chrome.runtime.onMessage.addListener((raw, sender, send) => {
@@ -60,11 +72,13 @@ chrome.runtime.onMessage.addListener((raw, sender, send) => {
   void (async () => {const workerStarted=performance.now(); try {
     const message = popupRequest.parse(raw);const correlationId=(message as {correlationId?:string}).correlationId;const started=performance.now();if(correlationId)accessDiagnostics.event(correlationId,'worker_handler_entered','START');
     if (message.action === 'approve') await controller.approve(message.id as string, (message as {origin:string}).origin, (message as {always:boolean}).always,correlationId);
+    const selectionApplied=message.action==='selectConversation' ? await controller.selectConversation(message.id as string) : false;
+    if(message.action==='selectConversation'&&!selectionApplied)throw new Error('REJECTED');
     if (message.action === 'revokeSite') await sites.revoke((message as {origin:string}).origin);
     if (message.action === 'revoke') await controller.revoke(message.id as string);
     if (message.action === 'renew') await controller.renew(message.id as string);
     if (message.action === 'deny') controller.deny(message.id as string, true);
-    await badge(); const current = await resolveActiveTab(() => chrome.tabs.query({ active: true })); const currentOrigin = current?.url && /^https?:/.test(current.url) ? new URL(current.url).origin : 'Página no soportada'; const response={ currentOrigin, connected: !!port && !!controller.epoch, pending: await controller.preparePending(), authorized: controller.authorized(), sites: await sites.list() };if(correlationId)accessDiagnostics.event(correlationId,'state_ready','OK',performance.now()-started);send(response);
+    await badge(); const current = await resolveActiveTab(() => chrome.tabs.query({ active: true })); const currentOrigin = current?.url && /^https?:/.test(current.url) ? new URL(current.url).origin : 'Página no soportada'; const response={ currentOrigin, connected: !!port && !!controller.epoch, selectionApplied, pending: await controller.preparePending(), authorized: controller.authorized(), sites: await sites.list() };if(correlationId)accessDiagnostics.event(correlationId,'state_ready','OK',performance.now()-started);send(response);
   } catch (error) {if(typeof raw?.correlationId==='string')accessDiagnostics.event(raw.correlationId,'state_ready','FAILED',performance.now()-workerStarted); send({ error: error instanceof Error && activeTabErrors.includes(error.message as typeof activeTabErrors[number]) ? error.message : 'No se pudo completar el cambio de acceso. Revisá la pestaña, el permiso de Chrome y los sitios permitidos; no se asumió aprobación.' }); } })(); return true;
 });
 chrome.tabs.onRemoved.addListener(id => { for (const grant of controller.grants.values()) if (grant.chromeId === id) void controller.revoke(grant.scopeId).then(badge); });

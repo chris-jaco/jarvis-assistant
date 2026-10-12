@@ -1,0 +1,48 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { mkdtemp,rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { AttachedChromeProvider } from '../browser/attached/provider.js';
+import type { BrowserTransport } from '../browser/attached/transport.js';
+import type { Reply } from '../browser/attached/protocol.js';
+import { PrivateExecutionJournal } from '../browser/consequential/journal.js';
+import { canEndTask } from '../browser/task-lifecycle.js';
+import { BrowserAdapter } from './adapters/browser.js';
+import { ToolExecutor } from './execution.js';
+import { ToolRegistry } from './registry.js';
+
+test('attached provider exposes private drafts but no send tool or dispatch',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'atlas-send-provider-'));const journal=new PrivateExecutionJournal(join(dir,'journal.json'));
+ const session=randomUUID(),connection=randomUUID(),epoch=randomUUID(),scopeId=randomUUID(),tabId=randomUUID(),documentId=randomUUID(),selectionId=randomUUID();
+ const tab={id:tabId,scopeId,title:'WhatsApp Web',url:'https://web.whatsapp.com/',active:true,expiresAt:Date.now()+120_000,state:'ACTIVE' as const};
+ let dispatches=0;const operations:string[]=[];
+ const transport:BrowserTransport={epoch,connections:()=>[connection],subscribe:()=>()=>{},close:()=>{},request:async(_connection,request):Promise<Reply>=>{
+  operations.push(request.operation);
+  if(request.operation==='listAuthorizedTabs')return {outcome:'OK',data:[tab]};
+  if(request.operation==='observe')return {outcome:'OK',data:{tabId,scopeId,documentId,snapshotId:randomUUID(),expiresAt:Date.now()+15_000,url:tab.url,title:tab.title,elements:[],truncated:false,conversationEvidence:{provenance:{adapter:'whatsapp',version:1},state:'INSUFFICIENT_EVIDENCE',reason:'STRUCTURE_ONLY',conversationKind:'NOT_VERIFIED',truncated:false,activePanelCandidate:true,header:true,composer:true,composerEnabled:true,contactCandidates:0,contactPanel:'NOT_VERIFIED',phoneEvidence:'NOT_VERIFIED',contactAssociation:'NOT_VERIFIED',identity:'NOT_VERIFIED',phoneMatch:'NOT_VERIFIED',handles:{conversation:randomUUID(),header:randomUUID(),composer:randomUUID()},binding:{tabId,scopeId,documentId,epoch},trust:'UNTRUSTED_PAGE_EVIDENCE'},manualSelection:{selectionId,scopeId,tabId,documentId,epoch,expiresAt:Date.now()+120_000,assurance:'USER_SELECTED'}}};
+  if(request.operation==='sendSelectedMessage'){dispatches++;assert.equal(request.args.selectionId,selectionId);assert.equal(request.args.text,'Exact message');return {outcome:'OK',data:{sendState:'DISPATCHED_UNVERIFIED',draftVisible:false}};}
+  return {outcome:'ERROR',code:'REJECTED'};
+ }};
+ const provider=new AttachedChromeProvider(transport,true,undefined,undefined,undefined,undefined,undefined,journal),adapter=new BrowserAdapter(provider),registry=new ToolRegistry();registry.add(adapter);const executor=new ToolExecutor(registry);
+ try{
+  await adapter.inSession(session,async()=>{await adapter.admitGoal(randomUUID(),'Mandale a Sofía: Exact message');await provider.listTabs(new AbortController().signal);
+   const prepared=await executor.invoke(randomUUID(),'browser.prepareDraft',{recipientHint:'Sofía',text:'Exact message'});assert.equal(prepared.status,'success');if(prepared.status!=='success')throw new Error();const draft=prepared.data as {intent:{intentId:string;recipient:{uniqueness:string}};confirmationEnabled:boolean;executionEnabled:boolean};assert.equal(draft.intent.recipient.uniqueness,'USER_SELECTED');assert.equal(draft.confirmationEnabled,false);assert.equal(draft.executionEnabled,false);
+   assert.equal(registry.resolve('browser.sendMessage'),undefined);
+   const denied=await executor.invoke(randomUUID(),'browser.sendMessage',{intentId:draft.intent.intentId});assert.equal(denied.status,'error');
+   assert.equal(dispatches,0);
+  });
+  assert.deepEqual(operations.filter(x=>x==='sendSelectedMessage'),[]);
+  assert.deepEqual(await journal.recover(),[]);
+ }finally{executor.close();await provider.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test('an unverified consequential dispatch cannot close as COMPLETED',()=>{
+ const facts={intent:'ACTION_REQUIRED' as const,readObtained:true,progress:true,pending:false,unknown:false,fresh:true,verificationRequired:false,verified:false,verificationExhausted:false,cancelled:false,terminal:false,recoveryExhausted:false,consequentialUnverified:true};
+ assert.equal(canEndTask({reason:'COMPLETED'},facts),false);
+ assert.equal(canEndTask({reason:'INCONCLUSIVE'},facts),true);
+ assert.equal(canEndTask({reason:'INCONCLUSIVE'},{...facts,unknown:true,consequentialUnverified:false,consequentialUnknown:true}),true);
+ assert.equal(canEndTask({reason:'INCONCLUSIVE'},{...facts,unknown:true,consequentialUnverified:false,consequentialUnknown:false}),false);
+ assert.equal(canEndTask({reason:'COMPLETED'},{...facts,consequentialUnverified:false}),true);
+});
