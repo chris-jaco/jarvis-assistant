@@ -34,7 +34,7 @@ const traceSchema=z.object({
   taskId:z.string().uuid().optional(),admissionId:z.string().uuid().optional(),tokenId:z.string().uuid().optional(),tokens:z.array(z.string().uuid()).max(3).optional(),correlationId:z.string().uuid().optional(),
   at:z.number().finite().nonnegative().optional(),call:z.string().regex(/^b[1-9]\d{0,8}$/).optional(),
   responseId:z.string().regex(/^resp_[A-Za-z0-9_-]{1,100}$/).optional(),callId:z.string().regex(/^call_[A-Za-z0-9_-]{1,100}$/).optional(),
-  stage:z.enum(['CONTINUATION','END_TASK','RESPONSE_CREATED','TOOL_COMMITTED','WORKFLOW','ADMISSION','END_TASK_GUARD','CONTINUATION_BLOCKED','RESPONSE_REQUESTED','RESPONSE_DONE','RESPONSE_OUTPUT','PRESENTATION','PLAYBACK','REALTIME_SESSION_ERROR','REALTIME_TRANSPORT_STATE','TOOLS_SESSION_DELETE','MANUAL_REQUEST_CREATED','MANUAL_POPUP_SELECTED','MANUAL_EVENT_EMITTED','MANUAL_EVENT_RECEIVED','MANUAL_CONTINUATION_PENDING','MANUAL_CONTINUATION_DELIVERED','MANUAL_CONTINUATION_CONSUMED']),
+  stage:z.enum(['CONTINUATION','END_TASK','RESPONSE_CREATED','TOOL_COMMITTED','WORKFLOW','ADMISSION','ADMISSION_PRESERVED','DRAFT_AUTHORITY','DRAFT_PRECONDITION','END_TASK_GUARD','CONTINUATION_BLOCKED','RESPONSE_REQUESTED','RESPONSE_DONE','RESPONSE_OUTPUT','PRESENTATION','PLAYBACK','REALTIME_SESSION_ERROR','REALTIME_TRANSPORT_STATE','TOOLS_SESSION_DELETE','MANUAL_REQUEST_CREATED','MANUAL_POPUP_SELECTED','MANUAL_EVENT_EMITTED','MANUAL_EVENT_RECEIVED','MANUAL_CONTINUATION_PENDING','MANUAL_CONTINUATION_DELIVERED','MANUAL_CONTINUATION_CONSUMED']),
   manualRequestId:z.string().uuid().optional(),manualStatus:z.enum(['SELECTED','CANCELLED','EXPIRED','INVALIDATED']).optional(),
   connectionGeneration:z.number().int().min(1).max(1_000_000).optional(),elapsedMs:z.number().int().min(0).max(86_400_000).optional(),
   sessionStage:z.enum(['TOKEN','TOOLS','MEMORY','CONNECTING','CONNECTED']).optional(),transportState:z.enum(['UNKNOWN','CONNECTING','CONNECTED','DISCONNECTED','FAILED']).optional(),
@@ -55,7 +55,8 @@ const traceSchema=z.object({
   tokenState:z.enum(['RECEIVED','PENDING','DELIVERED','CONSUMED']).optional(),toolInFlight:z.boolean().optional(),
   taskState:browserExecutionStateSchema.optional(),requestedReason:z.enum(['COMPLETED','CANCELLED','TERMINAL','INCONCLUSIVE']).optional(),
   outcome:z.enum(['ACCEPTED','REJECTED','OK','ACCESS_PENDING','REQUIRES_USER_INTERACTION','ERROR']).optional(),
-  reason:z.enum(['OBJECTIVE_PENDING','ORIGIN_PERMISSION','CAPTCHA','AUTHENTICATION','MFA','CHALLENGE','UNSUPPORTED_CONTROL','MEDIA_USER_GESTURE','CONVERSATION_SELECTION']).optional()
+  reason:z.enum(['OBJECTIVE_PENDING','ORIGIN_PERMISSION','CAPTCHA','AUTHENTICATION','MFA','CHALLENGE','UNSUPPORTED_CONTROL','MEDIA_USER_GESTURE','CONVERSATION_SELECTION']).optional(),
+  admissionRelation:z.enum(['INCIDENTAL']).optional(),draftAuthority:z.enum(['EXACT_TRANSCRIPT']).optional(),draftRejectReason:z.enum(['MANUAL_SELECTION_MISSING','MANUAL_SELECTION_NOT_SELECTED','MANUAL_REQUEST_MISMATCH','ADMISSION_MISMATCH','TASK_MISMATCH','SCOPE_MISMATCH','TAB_MISMATCH','DOCUMENT_MISMATCH','EPOCH_MISMATCH','ORIGIN_MISMATCH','ACCESS_REVOKED','TASK_CANCELLED','WORKFLOW_PENDING','CONNECTION_CHANGED','DRAFT_EXPIRED','EXECUTION_UNCERTAIN','CONTENT_MISMATCH','OTHER_PRECONDITION']).optional()
 }).strict();
 export type BrowserTaskTrace=z.infer<typeof traceSchema>;
 export class BrowserTaskDiagnostics {

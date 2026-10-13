@@ -30,6 +30,10 @@ test('attached provider exposes private drafts but no send tool or dispatch',asy
  const provider=new AttachedChromeProvider(transport,true,undefined,undefined,undefined,undefined,undefined,journal),adapter=new BrowserAdapter(provider),registry=new ToolRegistry();registry.add(adapter);const executor=new ToolExecutor(registry);
  try{
   await adapter.inSession(session,async()=>{await adapter.admitGoal(admissionId,'Write a WhatsApp draft message and leave it as a draft');await provider.listTabs(new AbortController().signal);await provider.requestManualSelection(new AbortController().signal);selected=true;listener?.(connection,{protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:epoch,backendSessionId:session,event:'manualSelectionResolved',scopeId,manualRequestId,manualStatus:'SELECTED',taskId:provider.state(session).taskId,admissionId});provider.acknowledge(provider.state(session).continuation!);
+   assert.deepEqual(await provider.prepareDraft({recipientHint:'Sofía',text:'Exact message'},new AbortController().signal),{status:'TEXT_CONFIRMATION_REQUIRED',draftOnly:true,format:'Decí: texto exacto: <mensaje> fin del mensaje'});
+   assert.equal(await provider.admitGoal(randomUUID(),'Exact message: Exact message end message.'),false);
+   assert.equal(await provider.admitGoal(randomUUID(),'Да'),false);assert.equal(provider.state(session).manualSelection?.status,'SELECTED');
+   for(const changed of ['exact message','Exact  message','Exact message.','Exact messagé'])await assert.rejects(provider.prepareDraft({recipientHint:'Sofía',text:changed},new AbortController().signal),(error:any)=>error.category==='REJECTED');
    const prepared=await executor.invoke(randomUUID(),'browser.prepareDraft',{recipientHint:'Sofía',text:'Exact message'});assert.equal(prepared.status,'success');if(prepared.status!=='success')throw new Error();const draft=prepared.data as {intent:{intentId:string;recipient:{uniqueness:string}};confirmationEnabled:boolean;executionEnabled:boolean};assert.equal(draft.intent.recipient.uniqueness,'USER_SELECTED');assert.equal(draft.confirmationEnabled,false);assert.equal(draft.executionEnabled,false);
    const writePending=await executor.invoke(randomUUID(),'browser.writeDraft',{intentId:draft.intent.intentId});assert.equal(writePending.status,'pending');if(writePending.status!=='pending')throw new Error();
    assert.equal((await provider.endTask(new AbortController().signal,{reason:'COMPLETED'},true) as {outcome:string}).outcome,'END_TASK_REJECTED');assert.equal(dispatches,0);
@@ -37,6 +41,8 @@ test('attached provider exposes private drafts but no send tool or dispatch',asy
    assert.equal(registry.resolve('browser.sendMessage'),undefined);
    const denied=await executor.invoke(randomUUID(),'browser.sendMessage',{intentId:draft.intent.intentId});assert.equal(denied.status,'error');
    assert.equal(dispatches,1);
+   assert.equal(await provider.admitGoal(randomUUID(),'Prepare a different WhatsApp draft'),true);assert.equal(provider.state(session).manualSelection,null);
+   await assert.rejects(provider.prepareDraft({recipientHint:'Sofía',text:'Exact message'},new AbortController().signal),(error:any)=>error.category==='REJECTED');
   });
   assert.deepEqual(operations.filter(x=>x==='sendSelectedMessage'),[]);
   assert.equal((await journal.recover()).filter(row=>row.phase==='WRITE_DRAFT').length,1);

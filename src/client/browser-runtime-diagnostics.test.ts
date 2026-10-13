@@ -38,6 +38,15 @@ test('manual diagnostic schema admits a known waiting reason and rejects private
  diagnostic.event({stage:'TOOLS_SESSION_DELETE',closeReason:'PRIVATE_SENTINEL'});
  assert.equal(rows.length,4);assert.ok(!JSON.stringify(rows).includes('PRIVATE_SENTINEL'));
 });
+test('draft precondition diagnostics expose only closed enums and no draft content',()=>{
+ const {rows,diagnostic}=trace(),taskId=uuid(),admissionId=uuid();
+ diagnostic.event({stage:'DRAFT_PRECONDITION',taskId,admissionId,outcome:'REJECTED',draftRejectReason:'CONTENT_MISMATCH'});
+ diagnostic.event({stage:'ADMISSION_PRESERVED',taskId,admissionId,admissionRelation:'INCIDENTAL'});
+ diagnostic.event({stage:'DRAFT_AUTHORITY',taskId,admissionId,draftAuthority:'EXACT_TRANSCRIPT'});
+ assert.equal(rows.length,3);assert.equal(rows[0]?.draftRejectReason,'CONTENT_MISMATCH');
+ diagnostic.event({stage:'DRAFT_PRECONDITION',taskId,admissionId,outcome:'REJECTED',draftRejectReason:'PRIVATE_SENTINEL',text:'PRIVATE_SENTINEL'});
+ assert.equal(rows.length,3);assert.ok(!JSON.stringify(rows).includes('PRIVATE_SENTINEL'));
+});
 test('tool session DELETE carries a closed reason only while diagnostics remain opt-in',async()=>{
  const originalFetch=globalThis.fetch,originalDebug=console.debug;const rows:BrowserTaskTrace[]=[],reasons:string[]=[];
  console.debug=(prefix,...args)=>{if(prefix==='[ATLAS browser task]')rows.push(JSON.parse(String(args[0])));};

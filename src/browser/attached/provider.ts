@@ -10,6 +10,7 @@ import { observeTracer, observationFacts } from '../../diagnostics/browser-obser
 import type { BrowserExecutionState } from '../execution-state.js';
 import { BrowserTaskDiagnostics } from '../../diagnostics/browser-task.js';
 import { classifyTaskIntent,classifyBrowserDraftGoal, type TaskIntent,type BrowserDraftGoal } from '../task-intent.js';
+import { exactDraftContent,exactDraftClarification,incidentalAcknowledgement } from '../draft-authority.js';
 import { canEndTask, endTaskSchema } from '../task-lifecycle.js';
 import type { ContinuationReceipt, EndTaskRequest } from '../task-lifecycle.js';
 import type { PopupDiagnostics } from '../../diagnostics/popup.js';
@@ -27,7 +28,7 @@ import type { BrowserTransport } from './transport.js';
 const contextReadReasons: readonly string[] = ['UPSTREAM','TIMEOUT','OBSERVATION_REQUIRED','SNAPSHOT_EXPIRED','DOCUMENT_CHANGED','ELEMENT_CHANGED','SNAPSHOT_CONSUMED'];
 interface ContextRecovery { status: 'READY' | 'REQUIRED' | 'RECOVERING' | 'INCONCLUSIVE'; attempts: number; ready: string | null }
 type ManualResolution='SELECTED'|'CANCELLED'|'EXPIRED'|'INVALIDATED';
-interface Session { effects?:ConsequentialEffectAuthority; writeIntents?:Map<string,FrozenIntent>; writeCapabilities?:Map<string,EffectCapability>; writeConfirmations?:Map<string,string>; draftGoal?:BrowserDraftGoal; draftWritten?:boolean }
+interface Session { effects?:ConsequentialEffectAuthority; writeIntents?:Map<string,FrozenIntent>; writeCapabilities?:Map<string,EffectCapability>; writeConfirmations?:Map<string,string>; draftGoal?:BrowserDraftGoal; draftWritten?:boolean; authorizedDraft?:{text:string;admissionId:string} }
 interface Session { consequentialUnverified?:boolean; consequentialUnknown?:boolean; userAccessRejected?:boolean; requestedIdentifiers?:string[]; drafts?:ConsequentialFoundation; privateDraft?:{intentId:string;admissionId:string;expiresAt:number}; manualWait?:{requestId:string;admissionId:string;scopeId:string;taskId:string;epoch:string;status:'PENDING'|ManualResolution}; observeRequestId?:string; intent?:TaskIntent; readAdmission?:string; inventory?:{admission:string;expires:number}; admission?:string; progress:Map<string,ActionRecord>; acknowledged:Set<string>; rejectionToken?:string; cancelled?:boolean; terminal?:boolean; contextRecovery?: ContextRecovery; accessCorrelation?:string; traceNext?:boolean; actionRecord?: ActionRecord; accessRevoked?: boolean; id: string; task: string; connection?: string; active?: string; tabs: Map<string, AuthorizedTab>; workflow?: Exclude<Reply, { outcome: 'OK' } | { outcome: 'ERROR' }>; ready?: string; observation?: { tabId: string; scopeId: string; documentId: string; snapshotId: string; refs: Set<string>; expires: number }; closed?: boolean; failures: number; uncertain?: boolean; invalidation?: BrowserConflictDetail['reason']; context: 'READY' | 'OBSERVATION_REQUIRED'; pendingStep?: string; pendingRecovery?: {signature:string;scopeId:string}; completed?: { key: string; result: unknown; record:ActionRecord }; knownRefs: Map<string, string>; lastObservation?: AttachedObservation; timings: BrowserTimings; tail: Promise<unknown>; closingTask?:boolean; deadline?: number }
 export class BrowserWorkflow extends Error { constructor(readonly reply: Exclude<Reply, { outcome: 'OK' }>) { super(reply.outcome); } }
 export class AttachedChromeProvider implements BrowserProvider {
@@ -67,9 +68,21 @@ export class AttachedChromeProvider implements BrowserProvider {
   async admitGoal(admission:string, utterance?:string,traceState:BrowserExecutionState='RUNNING'):Promise<boolean> {
     const session=this.session();await session.tail.catch(()=>{});
     if(session.admission===admission||session.workflow)return false;
+    if(session.manualWait?.status==='SELECTED'&&session.admission){
+      const exact=exactDraftClarification(utterance);
+      if(session.draftGoal==='WRITE_DRAFT_TO_COMPOSER'&&exact.status==='EXACT'){
+        session.authorizedDraft={text:exact.text,admissionId:session.admission};
+        this.traceTask({stage:'DRAFT_AUTHORITY',taskId:session.task,admissionId:session.admission,draftAuthority:'EXACT_TRANSCRIPT'});
+        return false;
+      }
+      if(incidentalAcknowledgement(utterance)){
+        this.traceTask({stage:'ADMISSION_PRESERVED',taskId:session.task,admissionId:session.admission,admissionRelation:'INCIDENTAL'});
+        return false;
+      }
+    }
     // A trusted new user turn starts a new progress ledger, not a new Chrome
     // permission. Never import an earlier objective's action as completion proof.
-    session.requestedIdentifiers=[...new Set(utterance?.match(/[^\s<>@]+@[^\s<>@]+\.[a-zA-Z]{2,}|\+[1-9][0-9 ()-]{5,24}/g)??[])].slice(0,10);session.userAccessRejected=false;session.admission=admission;session.intent=classifyTaskIntent(utterance);session.draftGoal=classifyBrowserDraftGoal(utterance);session.draftWritten=false;session.readAdmission=undefined;session.inventory=undefined;session.progress.clear();session.privateDraft=undefined;session.manualWait=undefined;session.terminal=false;session.cancelled=false;session.consequentialUnverified=false;session.consequentialUnknown=false;
+    session.requestedIdentifiers=[...new Set(utterance?.match(/[^\s<>@]+@[^\s<>@]+\.[a-zA-Z]{2,}|\+[1-9][0-9 ()-]{5,24}/g)??[])].slice(0,10);session.userAccessRejected=false;session.admission=admission;session.intent=classifyTaskIntent(utterance);session.draftGoal=classifyBrowserDraftGoal(utterance);const exact=exactDraftContent(utterance);session.authorizedDraft=session.draftGoal==='WRITE_DRAFT_TO_COMPOSER'&&exact.status==='EXACT'?{text:exact.text,admissionId:admission}:undefined;session.draftWritten=false;session.readAdmission=undefined;session.inventory=undefined;session.progress.clear();session.privateDraft=undefined;session.manualWait=undefined;session.terminal=false;session.cancelled=false;session.consequentialUnverified=false;session.consequentialUnknown=false;
     // New admission gets fresh operational context, never old completion proof.
     // Keep the uncertainty latch and Chrome consent/scopes intact.
     session.contextRecovery=undefined;session.observation=undefined;session.lastObservation=undefined;session.context='OBSERVATION_REQUIRED';session.completed=undefined;session.pendingStep=undefined;session.pendingRecovery=undefined;session.failures=0;session.rejectionToken=undefined;session.ready=undefined;
@@ -196,24 +209,54 @@ export class AttachedChromeProvider implements BrowserProvider {
   }
   private draftContext(data:AttachedObservation):DraftContext {
     const session=this.session(),tab=session.tabs.get(session.active??'');
-    if(data.conversationEvidence&&!data.manualSelection)throw new ToolError('REJECTED');
+    if(data.conversationEvidence&&!data.manualSelection)this.rejectDraft('MANUAL_SELECTION_MISSING');
     // Successful extension observe attests all three existing permission layers.
     // Bind that evidence to this exact backend admission and operational scope.
     const origin=new URL(data.url).origin;
     const wait=session.manualWait;
-    if(session.uncertain||session.cancelled||session.workflow||session.accessRevoked||!session.admission||!session.connection||!this.transport.connections().includes(session.connection)||!tab||tab.id!==data.tabId||tab.scopeId!==data.scopeId||!data.conversationContext&&!data.manualSelection||data.conversationContext&&origin!==data.conversationContext.origin||data.manualSelection&&(!wait||wait.status!=='SELECTED'||data.conversationEvidence?.state==='INVALIDATED'||data.manualSelection.manualRequestId!==wait.requestId||data.manualSelection.admissionId!==wait.admissionId||data.manualSelection.taskId!==wait.taskId||data.manualSelection.scopeId!==wait.scopeId||data.manualSelection.scopeId!==data.scopeId||data.manualSelection.tabId!==data.tabId||data.manualSelection.documentId!==data.documentId||data.manualSelection.epoch!==wait.epoch||data.manualSelection.epoch!==this.transport.epoch||wait.admissionId!==session.admission||wait.taskId!==session.task))throw new ToolError('REJECTED');
+    if(session.uncertain)this.rejectDraft('EXECUTION_UNCERTAIN');
+    if(session.cancelled)this.rejectDraft('TASK_CANCELLED');
+    if(session.workflow)this.rejectDraft('WORKFLOW_PENDING');
+    if(session.accessRevoked)this.rejectDraft('ACCESS_REVOKED');
+    if(!session.admission)this.rejectDraft('ADMISSION_MISMATCH');
+    if(!session.connection||!this.transport.connections().includes(session.connection))this.rejectDraft('CONNECTION_CHANGED');
+    if(!tab||tab.id!==data.tabId)this.rejectDraft('TAB_MISMATCH');
+    if(tab.scopeId!==data.scopeId)this.rejectDraft('SCOPE_MISMATCH');
+    if(!data.conversationContext&&!data.manualSelection)this.rejectDraft('OTHER_PRECONDITION');
+    if(data.conversationContext&&origin!==data.conversationContext.origin)this.rejectDraft('ORIGIN_MISMATCH');
+    if(data.manualSelection){
+      if(!wait)this.rejectDraft('MANUAL_SELECTION_MISSING');
+      if(wait.status!=='SELECTED')this.rejectDraft('MANUAL_SELECTION_NOT_SELECTED');
+      if(data.conversationEvidence?.state==='INVALIDATED')this.rejectDraft('OTHER_PRECONDITION');
+      if(data.manualSelection.manualRequestId!==wait.requestId)this.rejectDraft('MANUAL_REQUEST_MISMATCH');
+      if(data.manualSelection.admissionId!==wait.admissionId||wait.admissionId!==session.admission)this.rejectDraft('ADMISSION_MISMATCH');
+      if(data.manualSelection.taskId!==wait.taskId||wait.taskId!==session.task)this.rejectDraft('TASK_MISMATCH');
+      if(data.manualSelection.scopeId!==wait.scopeId||data.manualSelection.scopeId!==data.scopeId)this.rejectDraft('SCOPE_MISMATCH');
+      if(data.manualSelection.tabId!==data.tabId)this.rejectDraft('TAB_MISMATCH');
+      if(data.manualSelection.documentId!==data.documentId)this.rejectDraft('DOCUMENT_MISMATCH');
+      if(data.manualSelection.epoch!==wait.epoch||data.manualSelection.epoch!==this.transport.epoch)this.rejectDraft('EPOCH_MISMATCH');
+    }
     return draftContextSchema.parse({backendSessionId:session.id,taskId:session.task,admissionId:session.admission,connectionEpoch:this.transport.epoch,origin,scopeId:data.scopeId,tabId:data.tabId,documentId:data.documentId,snapshotId:data.snapshotId,snapshotExpiresAt:data.expiresAt,grantExpiresAt:tab.expiresAt,chromePermission:true,siteAuthorized:true,grantValid:true,requestedIdentifiers:session.requestedIdentifiers??[],semantic:data.conversationContext??{origin,conversations:[],truncated:false,trust:'UNTRUSTED_PAGE_EVIDENCE'},...(data.manualSelection?{manualSelection:data.manualSelection}:{})});
+  }
+  private rejectDraft(reason:'MANUAL_SELECTION_MISSING'|'MANUAL_SELECTION_NOT_SELECTED'|'MANUAL_REQUEST_MISMATCH'|'ADMISSION_MISMATCH'|'TASK_MISMATCH'|'SCOPE_MISMATCH'|'TAB_MISMATCH'|'DOCUMENT_MISMATCH'|'EPOCH_MISMATCH'|'ORIGIN_MISMATCH'|'ACCESS_REVOKED'|'TASK_CANCELLED'|'WORKFLOW_PENDING'|'CONNECTION_CHANGED'|'DRAFT_EXPIRED'|'EXECUTION_UNCERTAIN'|'CONTENT_MISMATCH'|'OTHER_PRECONDITION'):never {
+    const session=this.session();this.traceTask({stage:'DRAFT_PRECONDITION',taskId:session.task,admissionId:session.admission,draftRejectReason:reason,outcome:'REJECTED'});throw new ToolError(reason==='DRAFT_EXPIRED'?'EXPIRED':'REJECTED');
   }
   async prepareDraft(input:unknown,signal:AbortSignal):Promise<unknown> {
     const session=this.session();
     if(session.manualWait?.status==='PENDING'&&session.workflow)throw new BrowserWorkflow(session.workflow);
+    if(session.draftGoal==='WRITE_DRAFT_TO_COMPOSER'){
+      const request=(input&&typeof input==='object'?input:{}) as {text?:unknown};
+      if(!session.authorizedDraft||session.authorizedDraft.admissionId!==session.admission)return {status:'TEXT_CONFIRMATION_REQUIRED',draftOnly:true,format:'Decí: texto exacto: <mensaje> fin del mensaje'};
+      if(typeof request.text!=='string'||request.text!==session.authorizedDraft.text)this.rejectDraft('CONTENT_MISMATCH');
+    }
     const epoch=this.transport.epoch;const data=await this.observeWithResume(signal);
-    if(epoch!==this.transport.epoch)throw new ToolError('REJECTED');
+    if(epoch!==this.transport.epoch)this.rejectDraft('EPOCH_MISMATCH');
     if(data.conversationEvidence&&!data.manualSelection)return {...assessConversationEvidence(data.conversationEvidence),draftOnly:true,candidateCount:0};
     if(!data.conversationContext&&!data.manualSelection)return {status:'INSUFFICIENT_EVIDENCE',candidateCount:0,draftOnly:true};
     const context=this.draftContext(data);signal.throwIfAborted();
     session.drafts??=ConsequentialFoundation.drafts(session.id,Date.now,this.sendJournal);
-    const result=session.drafts.prepareDraft(input,context,signal);
+    let result:ReturnType<ConsequentialFoundation['prepareDraft']>;
+    try{result=session.drafts.prepareDraft(input,context,signal);}catch(error){if(error instanceof ToolError)this.traceTask({stage:'DRAFT_PRECONDITION',taskId:session.task,admissionId:session.admission,draftRejectReason:error.category==='EXPIRED'?'DRAFT_EXPIRED':'OTHER_PRECONDITION',outcome:'REJECTED'});throw error;}
     if(result.status==='FROZEN')session.privateDraft={intentId:result.intent.intentId,admissionId:session.admission!,expiresAt:result.intent.expiresAt};
     return result;
   }
@@ -440,7 +483,7 @@ export class AttachedChromeProvider implements BrowserProvider {
     catch(error){if(session.accessRevoked)session.drafts?.invalidateDrafts();this.traceTask({stage:'END_TASK',phase:'TRANSPORT',taskId:session.task,admissionId:session.admission,call:this.diagnostics?.callId(),requestedReason:request.reason,outcome:'ERROR',transportMs:Math.min(30000,performance.now()-transportStarted)});throw error;}
     finally{session.closingTask=false;}
     this.traceTask({stage:'END_TASK',phase:'TRANSPORT',taskId:session.task,admissionId:session.admission,call:this.diagnostics?.callId(),requestedReason:request.reason,outcome:'ACCEPTED',transportMs:Math.min(30000,performance.now()-transportStarted)});
-    session.admission=undefined;session.intent=undefined;session.draftGoal=undefined;session.draftWritten=false;session.readAdmission=undefined;session.inventory=undefined;session.accessRevoked=false;session.task=randomUUID();session.progress.clear();session.privateDraft=undefined;session.manualWait=undefined;session.acknowledged.clear();session.rejectionToken=undefined;session.cancelled=false;session.terminal=false;
+    session.admission=undefined;session.intent=undefined;session.draftGoal=undefined;session.authorizedDraft=undefined;session.draftWritten=false;session.readAdmission=undefined;session.inventory=undefined;session.accessRevoked=false;session.task=randomUUID();session.progress.clear();session.privateDraft=undefined;session.manualWait=undefined;session.acknowledged.clear();session.rejectionToken=undefined;session.cancelled=false;session.terminal=false;
     session.pendingStep=undefined;session.pendingRecovery=undefined;session.completed=undefined;session.failures=0;session.observation=undefined;session.workflow=undefined;session.ready=undefined;session.contextRecovery=undefined;
     // No fallible post-close READ may undo accepted task termination.
     session.tabs.clear();session.active=undefined;
