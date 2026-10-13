@@ -35,7 +35,7 @@ function renderMetrics(): void { const { connectionMs, detectedTurns, interrupti
 toggle.addEventListener('click', () => { if (state === 'disconnected' || state === 'error') { void provider.connect(); if ((state as ConnectionState) === 'connecting') levels.prepare(); } else provider.disconnect(); });
 interrupt.addEventListener('click', () => provider.interrupt());
 play.addEventListener('click', () => { levels.resume(); void audio.play().then(() => { play.hidden = true; }).catch(() => { element('message').textContent = 'Revisá los permisos de reproducción del navegador.'; }); });
-window.addEventListener('pagehide', () => { provider.disconnect(); levels.stop(); confirmation.dispose(); orb.dispose(); });
+window.addEventListener('pagehide', () => { provider.disconnect('PAGEHIDE'); levels.stop(); confirmation.dispose(); orb.dispose(); });
 // pagehide may place the page in the back/forward cache. Reload only when restored,
 // so disposed listeners cannot leave a revived page with a partially active UI.
 window.addEventListener('pageshow', event => { if (event.persisted) window.location.reload(); });

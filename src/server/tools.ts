@@ -1,5 +1,6 @@
 import { continuationReceiptSchema, explicitBrowserCancellation } from '../browser/task-lifecycle.js';
 import { PopupDiagnostics } from '../diagnostics/popup.js';
+import { BrowserTaskDiagnostics, sessionCloseReasonSchema } from '../diagnostics/browser-task.js';
 import { IsolatedBrowserProvider } from '../browser/isolated.js';
 import { AttachedChromeProvider } from '../browser/attached/provider.js';
 import { NativeTransport } from '../browser/attached/transport.js';
@@ -72,6 +73,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
   const trace = confirmationTracer(confirmationTrace, diagnostics.sink);
   const memoryDiagnostics = new MemoryDiagnostics(diagnostics.development === true, diagnostics.memorySink, env.JARVIS_MEMORY_PROFILE === 'true');
   const browserDiagnostics = dependencies.runtime?.browser?.diagnostics ?? new BrowserDiagnostics(env.BROWSER_TRACE === 'true', diagnostics.browserSink);
+  const taskDiagnostics=new BrowserTaskDiagnostics();taskDiagnostics.enabled=browserDiagnostics.enabled;
   const { registry, timezone, memory, browser } = dependencies.runtime ?? createToolRuntime(env, memoryDiagnostics, browserDiagnostics);
   const classifier = dependencies.classifier ?? new ConfirmationIntentClassifier(env.OPENAI_API_KEY);
   const sessions = new Map<string, { browserSessionId: string; executor: ToolExecutor; expiresAt: number; busy: boolean; seenTurns: Set<string>; workingIds: string[]; memoryGeneration: number; lastMemorySequence: number; spellingEvidence: string; jobs: Set<Promise<void>>; closed: boolean }>();
@@ -99,7 +101,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
     const id = /(?:^|;\s*)jarvis_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie ?? '')?.[1];
     const session = id ? sessions.get(id) : undefined;
     if (!session) { send(401, { error: 'Sesión de herramientas caducada. Reconecta.' }); return true; }
-    if (path === '/api/tools/session' && req.method === 'DELETE') { browserDiagnostics.lifecycle(session.executor, 'session_closed'); session.closed = true; session.executor.close(); void browser?.endSession(session.browserSessionId).catch(() => {}); sessions.delete(id!); send(200, { closed: true }); return true; }
+    if (path === '/api/tools/session' && req.method === 'DELETE') { const parsed=sessionCloseReasonSchema.safeParse(req.headers['x-atlas-session-close']);taskDiagnostics.event({stage:'TOOLS_SESSION_DELETE',closeReason:parsed.success?parsed.data:'UNKNOWN'});browserDiagnostics.lifecycle(session.executor, 'session_closed'); session.closed = true; session.executor.close(); void browser?.endSession(session.browserSessionId).catch(() => {}); sessions.delete(id!); send(200, { closed: true }); return true; }
     if (path === '/api/tools/activity' && req.method === 'GET') { const pending=session.executor.pendingState();const state=browser?.state(session.browserSessionId,!!pending);send(200, { activity: session.executor.telemetry.snapshot(), pending, ...(state ? { browser:state } : {}) }); return true; }
     if (req.method !== 'POST') { send(405, { error: 'Método no permitido.' }); return true; }
     const contextualRead = path === '/api/tools/memory-context' || path === '/api/tools/memory-turn' || path === '/api/tools/browser-continuation' || path === '/api/tools/browser-cancel';
@@ -229,5 +231,5 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
     finally { if (!contextualRead) session.busy = false; }
     return true;
   };
-  return { handle, close: () => { void browser?.close().catch(() => undefined); clearInterval(timer); for (const session of sessions.values()) { browserDiagnostics.lifecycle(session.executor, 'session_closed'); session.closed = true; session.executor.close(); void browser?.endSession(session.browserSessionId).catch(() => {}); } sessions.clear(); } };
+  return { handle, close: () => { void browser?.close().catch(() => undefined); clearInterval(timer); for (const session of sessions.values()) { taskDiagnostics.event({stage:'TOOLS_SESSION_DELETE',closeReason:'SERVER_SHUTDOWN'});browserDiagnostics.lifecycle(session.executor, 'session_closed'); session.closed = true; session.executor.close(); void browser?.endSession(session.browserSessionId).catch(() => {}); } sessions.clear(); } };
 }

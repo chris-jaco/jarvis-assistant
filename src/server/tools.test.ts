@@ -28,6 +28,22 @@ test('HTTP tool sessions require ownership, reject cross-origin/non-JSON/oversiz
   } finally { await f.close(); }
 });
 
+test('session DELETE logs only allowlisted closure reasons with BROWSER_TRACE enabled',async()=>{
+ const original=console.debug,rows:unknown[]=[];
+ console.debug=(prefix,...args)=>{if(prefix==='[ATLAS browser task]')rows.push(JSON.parse(String(args[0])));};
+ try{for(const enabled of [false,true]){
+  const runtime=createToolsHandler({USER_TIMEZONE:'Europe/Madrid',BROWSER_TRACE:String(enabled)});
+  const server=createServer(async(req,res)=>{if(!await runtime.handle(req,res)){res.writeHead(404);res.end();}});
+  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
+  try{const url=`http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+   const created=await fetch(`${url}/api/tools/session`,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),cookie=created.headers.get('set-cookie')!.split(';')[0]!;
+   const closed=await fetch(`${url}/api/tools/session`,{method:'DELETE',headers:{Cookie:cookie,'X-Atlas-Session-Close':'REALTIME_ERROR'}});assert.equal(closed.status,200);
+   assert.equal(rows.filter((row:any)=>row.stage==='TOOLS_SESSION_DELETE').length,enabled?1:0);
+   if(enabled)assert.deepEqual(rows.find((row:any)=>row.stage==='TOOLS_SESSION_DELETE'),{stage:'TOOLS_SESSION_DELETE',closeReason:'REALTIME_ERROR',at:(rows.find((row:any)=>row.stage==='TOOLS_SESSION_DELETE') as any).at});
+  }finally{runtime.close();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+ }}finally{console.debug=original;}
+});
+
 test('confirmation diagnostics require development mode AND explicit opt-in, including server logs', async () => {
   for (const [development, enabled] of [[false, false], [false, true], [true, false], [true, true]]) {
     const f = await fixture(development, enabled); try {

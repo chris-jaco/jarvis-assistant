@@ -1,12 +1,47 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BrowserTaskDiagnostics, type BrowserTaskTrace } from '../diagnostics/browser-task.js';
+import { BrowserTaskDiagnostics, realtimeErrorFacts, type BrowserTaskTrace } from '../diagnostics/browser-task.js';
 import { PresentationGate } from '../provider/presentation-gate.js';
 import { BrowserContinuation } from '../provider/browser-continuation.js';
 import { VoiceToolBridge } from '../provider/tools.js';
 import { RunContext } from '@openai/agents-core';
 const uuid=()=>crypto.randomUUID();
 function trace(){const rows:BrowserTaskTrace[]=[];const diagnostic=new BrowserTaskDiagnostics(row=>rows.push(row));diagnostic.enabled=true;return {rows,diagnostic};}
+test('Realtime error diagnostics accept only allowlisted facts and are disabled by default',()=>{
+ const privateMessage='PRIVATE_SENTINEL';const error={name:'NetworkError',code:'ECONNRESET',message:privateMessage,stack:privateMessage,sdp:privateMessage};
+ const {rows,diagnostic}=trace();diagnostic.event({stage:'REALTIME_SESSION_ERROR',...realtimeErrorFacts(error),connectionGeneration:2,elapsedMs:3500,sessionStage:'CONNECTED',transportState:'DISCONNECTED'});
+ assert.equal(rows.length,1);assert.equal(rows[0]?.errorType,'NetworkError');assert.equal(rows[0]?.errorCode,'ECONNRESET');
+ assert.deepEqual(realtimeErrorFacts({name:privateMessage,code:privateMessage,message:privateMessage}),{});
+ assert.deepEqual(realtimeErrorFacts({type:'error',error:{type:'error',error:{type:'invalid_request_error',code:'conversation_already_has_active_response',message:privateMessage}}}),{errorType:'invalid_request_error',errorCode:'conversation_already_has_active_response'});
+ diagnostic.event({stage:'REALTIME_SESSION_ERROR',errorType:privateMessage,connectionGeneration:2});
+ diagnostic.event({stage:'REALTIME_SESSION_ERROR',message:privateMessage});assert.equal(rows.length,1);
+ diagnostic.enabled=false;diagnostic.event({stage:'TOOLS_SESSION_DELETE',closeReason:'REALTIME_ERROR'});assert.equal(rows.length,1);
+ assert.ok(!JSON.stringify(rows).includes(privateMessage));
+});
+test('manual diagnostic schema admits a known waiting reason and rejects private payloads',()=>{
+ const {rows,diagnostic}=trace(),taskId=uuid(),manualRequestId=uuid();
+ diagnostic.event({stage:'WORKFLOW',taskId,taskState:'WAITING_MANUAL',outcome:'REQUIRES_USER_INTERACTION',reason:'CONVERSATION_SELECTION'});
+ diagnostic.event({stage:'MANUAL_REQUEST_CREATED',taskId,manualRequestId});
+ diagnostic.event({stage:'MANUAL_EVENT_RECEIVED',taskId,manualRequestId,manualStatus:'SELECTED'});
+ diagnostic.event({stage:'TOOLS_SESSION_DELETE',closeReason:'PAGEHIDE'});
+ assert.equal(rows.length,4);
+ diagnostic.event({stage:'MANUAL_EVENT_RECEIVED',taskId,manualRequestId,message:'PRIVATE_SENTINEL'});
+ diagnostic.event({stage:'TOOLS_SESSION_DELETE',closeReason:'PRIVATE_SENTINEL'});
+ assert.equal(rows.length,4);assert.ok(!JSON.stringify(rows).includes('PRIVATE_SENTINEL'));
+});
+test('tool session DELETE carries a closed reason only while diagnostics remain opt-in',async()=>{
+ const originalFetch=globalThis.fetch,originalDebug=console.debug;const rows:BrowserTaskTrace[]=[],reasons:string[]=[];
+ console.debug=(prefix,...args)=>{if(prefix==='[ATLAS browser task]')rows.push(JSON.parse(String(args[0])));};
+ globalThis.fetch=async(_path,init)=>{
+  if(init?.method==='DELETE'){reasons.push(new Headers(init.headers).get('X-Atlas-Session-Close')??'');return Response.json({closed:true});}
+  return Response.json({tools:[],timezone:'Europe/Madrid',now:new Date().toISOString(),browserTrace:true});
+ };
+ try{const bridge=new VoiceToolBridge(()=>{},()=>{});await bridge.initialize();bridge.close('REALTIME_ERROR');await new Promise(resolve=>setTimeout(resolve,0));
+  assert.deepEqual(reasons,['REALTIME_ERROR']);assert.equal(rows.filter(row=>row.stage==='TOOLS_SESSION_DELETE').length,1);assert.equal(rows.find(row=>row.stage==='TOOLS_SESSION_DELETE')?.closeReason,'REALTIME_ERROR');
+  rows.length=0;globalThis.fetch=async(_path,init)=>{if(init?.method==='DELETE')return Response.json({closed:true});return Response.json({tools:[],timezone:'Europe/Madrid',now:new Date().toISOString(),browserTrace:false});};
+  const disabled=new VoiceToolBridge(()=>{},()=>{});await disabled.initialize();disabled.close('REALTIME_ERROR');assert.equal(rows.length,0);
+ }finally{globalThis.fetch=originalFetch;console.debug=originalDebug;}
+});
 test('runtime diagnostics reject payloads, unknown states, private IDs and sensitive nested fields; disabled/sink failures are inert',()=>{
  const {rows,diagnostic}=trace();const safe={stage:'ADMISSION',taskId:uuid(),admissionId:uuid(),intent:'ACTION_REQUIRED',source:'FALLBACK',taskState:'RUNNING'};
  diagnostic.event(safe);assert.equal(rows.length,1);assert.ok(rows[0]!.at);

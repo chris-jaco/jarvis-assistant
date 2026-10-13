@@ -20,7 +20,7 @@ export interface Surface {
   clearManualSelection?(tab:number,manualRequestId:string):Promise<void>;
   invalidate(tab: number, documentOnly?: boolean): Promise<void>;
 }
-interface ManualSelectionRequest {id:string;admissionId:string;documentId:string;expiresAt:number}
+interface ManualSelectionRequest {id:string;admissionId:string;documentId:string;expiresAt:number;trace:boolean}
 export interface Grant { scopeId: string; tabId: string; chromeId: number; windowId?:number; origin: string; session: string; task: string; expiresAt: number; lifetime: 'task' | 'session'; title: string; url: string; handoff?: { id: string; reason: Extract<Reply, { outcome: 'REQUIRES_USER_INTERACTION' }>['reason'] }; manualRequest?:ManualSelectionRequest; manualSelected?:boolean; suspended?: boolean; persistent?: boolean }
 interface Ticket { id: string; request: Request; expiresAt: number; chromeId?: number; origin?: string; priorScope?: string; tabId?: string }
 export class ExtensionController {
@@ -84,7 +84,11 @@ export class ExtensionController {
     const pending=grant.manualRequest;if(!pending||this.resolvedManual.has(pending.id))return;
     grant.manualRequest=undefined;grant.manualSelected=status==='SELECTED';this.manualSelecting.delete(grant.scopeId);this.resolvedManual.add(pending.id);if(this.resolvedManual.size>200)this.resolvedManual.delete(this.resolvedManual.values().next().value!);
     if(status!=='SELECTED')void this.surface.clearManualSelection?.(grant.chromeId,pending.id).catch(()=>{});
+    this.traceManual(grant,pending,'MANUAL_EVENT_EMITTED',status);
     if(this.epoch)this.emit({protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:this.epoch,backendSessionId:grant.session,event:'manualSelectionResolved',scopeId:grant.scopeId,manualRequestId:pending.id,manualStatus:status,taskId:grant.task,admissionId:pending.admissionId});
+  }
+  private traceManual(grant:Grant,pending:ManualSelectionRequest,manualStage:'MANUAL_POPUP_SELECTED'|'MANUAL_EVENT_EMITTED',manualStatus?:'SELECTED'|'CANCELLED'|'EXPIRED'|'INVALIDATED'):void {
+    if(pending.trace&&this.epoch)this.emit({protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:this.epoch,backendSessionId:grant.session,event:'manualSelectionTrace',manualStage,scopeId:grant.scopeId,manualRequestId:pending.id,taskId:grant.task,admissionId:pending.admissionId,...(manualStatus?{manualStatus}:{})});
   }
   private cleanup(): void { for (const grant of [...this.grants.values()]) {if(grant.manualRequest&&grant.manualRequest.expiresAt<=this.now())this.resolveManual(grant,'EXPIRED');if (grant.expiresAt <= this.now()) void this.revoke(grant.scopeId);} for (const [id, ticket] of this.tickets) if (ticket.expiresAt <= this.now() || this.ended.has(ticket.request.backendSessionId)) this.tickets.delete(id); }
   expire(): void { this.cleanup(); }
@@ -93,6 +97,7 @@ export class ExtensionController {
   async selectConversation(scopeId:string,popupTab?:ResolvedActiveTab):Promise<boolean> {
     this.cleanup();const grant=this.grants.get(scopeId),epoch=this.epoch,pending=grant?.manualRequest;
     if(!grant||!pending||!epoch||this.manualSelecting.has(scopeId)||grant.suspended||grant.handoff||grant.expiresAt<=this.now()||pending.expiresAt<=this.now()||this.ended.has(grant.session)||this.endedTasks.has(grant.session+':'+grant.task)||!this.activeTasks.has(grant.session+':'+grant.task)||!this.surface.selectConversation)throw new Error('ACCESS_DENIED');
+    this.traceManual(grant,pending,'MANUAL_POPUP_SELECTED');
     this.manualSelecting.add(scopeId);
     try {
     const selected=popupTab??await this.surface.current();
@@ -264,7 +269,7 @@ export class ExtensionController {
       if(grant.handoff||grant.suspended)throw new Error('ACCESS_DENIED');
       const existing=grant.manualRequest;
       if(existing){if(existing.admissionId!==admissionId||existing.documentId!==documentId)this.resolveManual(grant,'INVALIDATED');else return {outcome:'REQUIRES_USER_INTERACTION',handoffId:existing.id,reason:'CONVERSATION_SELECTION'};}
-      const pending:ManualSelectionRequest={id:this.id(),admissionId,documentId,expiresAt:Math.min(grant.expiresAt,this.now()+5*60_000)};
+      const pending:ManualSelectionRequest={id:this.id(),admissionId,documentId,expiresAt:Math.min(grant.expiresAt,this.now()+5*60_000),trace:request.observeTrace===true};
       grant.manualSelected=false;grant.manualRequest=pending;
       return {outcome:'REQUIRES_USER_INTERACTION',handoffId:pending.id,reason:'CONVERSATION_SELECTION'};
     }

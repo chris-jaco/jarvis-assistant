@@ -33,9 +33,15 @@ export class AttachedChromeProvider implements BrowserProvider {
     transport.subscribe((connection, event) => {
       const session = this.sessions.get(event.backendSessionId); if (!session || session.closed || session.connection !== connection) return;
       if(event.trace){session.accessCorrelation=event.trace.correlationId;session.traceNext=true;this.accessDiagnostics?.event(event.trace.correlationId,'backend_received');}
+      if(event.event==='manualSelectionTrace'){
+        const wait=session.manualWait;
+        if(wait?.status==='PENDING'&&event.manualRequestId===wait.requestId&&event.scopeId===wait.scopeId&&event.taskId===wait.taskId&&event.admissionId===wait.admissionId)this.traceTask({stage:event.manualStage,taskId:wait.taskId,admissionId:wait.admissionId,manualRequestId:wait.requestId,...(event.manualStatus?{manualStatus:event.manualStatus}:{})});
+        return;
+      }
       if(event.event==='manualSelectionResolved'){
         const wait=session.manualWait;
         if(!wait||wait.status!=='PENDING'||event.manualRequestId!==wait.requestId||event.scopeId!==wait.scopeId||event.taskId!==wait.taskId||event.admissionId!==wait.admissionId)return;
+        this.traceTask({stage:'MANUAL_EVENT_RECEIVED',taskId:wait.taskId,admissionId:wait.admissionId,manualRequestId:wait.requestId,manualStatus:event.manualStatus});
         wait.status=event.manualStatus!;session.workflow=undefined;session.ready=randomUUID();if(event.manualStatus!=='SELECTED')session.terminal=true;return;
       }
       if(!(event.event==='accessRevoked'&&session.closingTask))session.drafts?.invalidateDrafts();
@@ -141,6 +147,7 @@ export class AttachedChromeProvider implements BrowserProvider {
     if(reply.outcome==='ERROR')this.unwrap(reply);
     if(reply.outcome!=='REQUIRES_USER_INTERACTION'||reply.reason!=='CONVERSATION_SELECTION')throw new ToolError('REJECTED');
     session.manualWait={requestId:reply.handoffId,admissionId:session.admission,scopeId:data.scopeId,taskId:session.task,epoch:this.transport.epoch,status:'PENDING'};
+    this.traceTask({stage:'MANUAL_REQUEST_CREATED',taskId:session.task,admissionId:session.admission,manualRequestId:reply.handoffId,taskState:'WAITING_MANUAL'});
     return reply;
   }
   async listAuthorizedTabs(signal: AbortSignal): Promise<BrowserTab[]> { return this.listTabs(signal); }

@@ -1,6 +1,6 @@
 import { BrowserTaskAdmission } from './browser-task-admission.js';
 import { continuationReceiptSchema, explicitBrowserCancellation } from '../browser/task-lifecycle.js';
-import { BrowserTaskDiagnostics } from '../diagnostics/browser-task.js';
+import { BrowserTaskDiagnostics, type SessionCloseReason } from '../diagnostics/browser-task.js';
 import { PopupDiagnostics } from '../diagnostics/popup.js';
 import { actionOutcomeSchema, outcomeInstruction } from '../browser/action-outcome.js';
 import type { BrowserExecutionState } from '../browser/execution-state.js';
@@ -18,8 +18,8 @@ import type { ToolActivity } from '../tools/telemetry.js';
 setSensitiveDataLoggingEnabled(false);
 export interface PendingConfirmation { confirmationId: string; summary: string; expiresAt: number }
 interface Descriptor { permission?:'READ'|'WRITE'|'SENSITIVE'; id: string; description: string; inputSchema: unknown }
-export async function toolRequest(path: string, data?: unknown, method = 'POST', browserRequest?: { sequence: number; response(call: string): void }): Promise<unknown> {
-  const response = await fetch(`/api/tools/${path}`, { method, headers: { 'Content-Type': 'application/json', ...(browserRequest ? { 'X-Atlas-Browser-Request': String(browserRequest.sequence) } : {}) },
+export async function toolRequest(path: string, data?: unknown, method = 'POST', browserRequest?: { sequence: number; response(call: string): void }, closeReason?:SessionCloseReason): Promise<unknown> {
+  const response = await fetch(`/api/tools/${path}`, { method, headers: { 'Content-Type': 'application/json', ...(browserRequest ? { 'X-Atlas-Browser-Request': String(browserRequest.sequence) } : {}),...(path==='session'&&method==='DELETE'&&closeReason?{'X-Atlas-Session-Close':closeReason}:{}) },
     ...(data === undefined ? {} : { body: JSON.stringify(data) }), signal: AbortSignal.timeout(30_000) });
   if (!response.ok) throw new Error('No se pudo contactar con las herramientas. Reconecta si la sesión caducó.');
   const call = response.headers.get('X-Atlas-Browser-Call');
@@ -321,5 +321,5 @@ export class VoiceToolBridge {
       if (data.browser) {const state=browserExecutionStateSchema.safeParse((data.browser as {executionState?:unknown}).executionState);if(state.success&&this.browserInvocations===0)this.present(data.browser);this.browserContinuation.update(data.browser, this.confirmationActive,this.browserBusy());}
     } catch { /* Polling never breaks voice playback. Tool requests report failures. */ }
   }
-  close(): void { this.diagnostic('bridge.close', 'session_closed'); this.closed = true; this.admission.clear(); this.browserContinuation.close(); this.sdkPending.clear();this.sdkCommitted.clear();this.sdkToolNames.clear();this.sdkAnnounced.clear();this.sdkResponses.clear();this.sdkAwaitingResponse=false;this.browserUserTurns.clear();this.responseTrace.clear();this.requestedTraceTokens=[];this.observedResponses.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE').catch(() => undefined); }
+  close(reason:SessionCloseReason='UNKNOWN'): void { this.diagnostic('bridge.close', 'session_closed');this.taskDiagnostics.event({stage:'TOOLS_SESSION_DELETE',closeReason:reason,taskState:this.lastBrowserState}); this.closed = true; this.admission.clear(); this.browserContinuation.close(); this.sdkPending.clear();this.sdkCommitted.clear();this.sdkToolNames.clear();this.sdkAnnounced.clear();this.sdkResponses.clear();this.sdkAwaitingResponse=false;this.browserUserTurns.clear();this.responseTrace.clear();this.requestedTraceTokens=[];this.observedResponses.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE',undefined,reason).catch(() => undefined); }
 }

@@ -1,4 +1,4 @@
-import { BrowserTaskDiagnostics } from '../diagnostics/browser-task.js';
+import { BrowserTaskDiagnostics, realtimeErrorFacts, type SessionCloseReason } from '../diagnostics/browser-task.js';
 import { PresentationGate } from './presentation-gate.js';
 import { OpenAIRealtimeWebRTC, RealtimeAgent, RealtimeSession } from '@openai/agents-realtime';
 import { ASSISTANT_NAME, JARVIS_INSTRUCTIONS, REALTIME_MODEL, JARVIS_VOICE, TURN_EAGERNESS } from '../core/personality.js';
@@ -23,9 +23,14 @@ export class OpenAIVoiceProvider implements VoiceProvider {
   constructor(private readonly observer: ProviderObserver, private readonly audio: HTMLAudioElement) {}
 
   async connect(): Promise<void> {
-    this.disconnect();
+    this.disconnect('RECONNECT');
     const generation = ++this.generation;
     const current = () => generation === this.generation;
+    const startedAt=performance.now();let connectedAt:number|undefined;let sessionStage:'TOKEN'|'TOOLS'|'MEMORY'|'CONNECTING'|'CONNECTED'='TOKEN';
+    let transportState:'UNKNOWN'|'CONNECTING'|'CONNECTED'|'DISCONNECTED'|'FAILED'='UNKNOWN';
+    const elapsedMs=()=>Math.min(86_400_000,Math.max(0,Math.round(performance.now()-(connectedAt??startedAt))));
+    const realtimeDiagnostics=new BrowserTaskDiagnostics();
+    const connectionGeneration=Math.min(1_000_000,generation);
     this.active = true;
     this.metrics.reset();
     this.observer.transcript([]);
@@ -33,7 +38,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
     const abort = new AbortController();
     this.abort = abort;
     const timeout = setTimeout(() => {
-      if (current()) this.fail('La conexión tardó demasiado. Vuelve a conectar.');
+      if (current()) this.fail('La conexión tardó demasiado. Vuelve a conectar.','CONNECT_TIMEOUT');
     }, 30_000);
     try {
       if (!navigator.mediaDevices?.getUserMedia || typeof RTCPeerConnection === 'undefined') {
@@ -58,8 +63,10 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       const gate=new PresentationGate(muted=>{this.audio.muted=muted;},playbackDiagnostics,()=>({visibility:document.visibilityState,paused:this.audio.paused,ended:this.audio.ended}));this.presentation=gate;
       const bridge = new VoiceToolBridge((rows, pending) => { if (current()) this.observer.tools?.(rows, pending); }, message => { if (current()&&this.session){const id=crypto.randomUUID();gate.internal(id);transport.sendMessage(message,{item:{id,type:'message',role:'user',content:[{type:'input_text',text:message}]}},{triggerResponse:false});transport.requestResponse({metadata:{atlas_presentation_source:'INTERNAL_BROWSER_CONTINUATION'}});} },undefined,undefined,{state:state=>gate.update(state),tool:browser=>{gate.tool();if(browser)gate.beginBrowser();}});
       this.tools = bridge;
+      sessionStage='TOOLS';
       const toolConfig = await bridge.initialize();
       playbackDiagnostics.enabled=bridge.browserTraceEnabled;
+      realtimeDiagnostics.enabled=bridge.browserTraceEnabled;
       if (!current()) { bridge.close(); return; }
       const transport = new OpenAIRealtimeWebRTC({ mediaStream: stream, audioElement: this.audio });
       const baseInstructions = `${JARVIS_INSTRUCTIONS}\n${toolConfig.context}`;
@@ -68,7 +75,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
         if (current() && this.session) { memoryContext = context; updateMemoryInstructions(transport, `${baseInstructions}\n${memoryContext}`); }
       }, () => bridge.confirmationActive);
       this.memory = memory;
-      memoryContext = await memory.initial();
+      sessionStage='MEMORY';memoryContext = await memory.initial();
       if (!current()) { memory.close(); return; }
       const session = new RealtimeSession(new RealtimeAgent({ name: ASSISTANT_NAME, instructions: () => `${baseInstructions}\n${memoryContext}`, tools: toolConfig.tools }), {
         model: REALTIME_MODEL, transport, tracingDisabled: true,
@@ -81,9 +88,12 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       this.session = session;
       session.on('agent_tool_end', (_context,_agent,_tool,result,details) => {if(current()&&'callId' in details.toolCall)bridge.toolOutputCommitted(details.toolCall.callId,result);});
       let speaking = false;
-      session.on('error', () => { if (current()) this.fail('Se interrumpió la conversación. Revisá tu conexión y volvé a conectar.'); });
+      session.on('error', error => { if (current()) {realtimeDiagnostics.event({stage:'REALTIME_SESSION_ERROR',...realtimeErrorFacts(error),transportState,connectionGeneration,elapsedMs:elapsedMs(),sessionStage});this.fail('Se interrumpió la conversación. Revisá tu conexión y volvé a conectar.','REALTIME_ERROR');} });
       transport.on('connection_change', status => {
-        if (current() && status === 'disconnected' && this.active) this.fail('Se perdió la conexión. Vuelve a conectar para iniciar una sesión nueva.');
+        if (!current())return;
+        transportState=status==='connected'?'CONNECTED':status==='connecting'?'CONNECTING':status==='disconnected'?'DISCONNECTED':'UNKNOWN';
+        realtimeDiagnostics.event({stage:'REALTIME_TRANSPORT_STATE',transportState,connectionGeneration,elapsedMs:elapsedMs(),sessionStage});
+        if (status === 'disconnected' && this.active) this.fail('Se perdió la conexión. Vuelve a conectar para iniciar una sesión nueva.','TRANSPORT_DISCONNECTED');
       });
       session.on('transport_event', event => {
         if (!current()) return;
@@ -136,9 +146,9 @@ export class OpenAIVoiceProvider implements VoiceProvider {
         }
         this.observer.transcript(entries);
       });
-      await session.connect({ apiKey: data.value });
+      sessionStage='CONNECTING';await session.connect({ apiKey: data.value });
       if (!current()) { session.close(); return; }
-      this.metrics.connected();
+      connectedAt=performance.now();sessionStage='CONNECTED';this.metrics.connected();
       this.state('connected');
       // Browsers may reject autoplay; provide a user-gesture playback button in the UI.
       void this.audio.play().catch(() => {
@@ -148,16 +158,16 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       if (!current()) return;
       const denied = error instanceof DOMException && error.name === 'NotAllowedError';
       const absent = error instanceof DOMException && error.name === 'NotFoundError';
-      this.fail(denied ? 'Permiso de micrófono denegado. Actívalo en el navegador y vuelve a conectar.' : absent ? 'No se encontró un micrófono.' : error instanceof ClientError ? error.message : 'No se pudo conectar. Comprueba micrófono, red y configuración del backend.');
+      this.fail(denied ? 'Permiso de micrófono denegado. Actívalo en el navegador y vuelve a conectar.' : absent ? 'No se encontró un micrófono.' : error instanceof ClientError ? error.message : 'No se pudo conectar. Comprueba micrófono, red y configuración del backend.','CONNECT_FAILURE');
     } finally { clearTimeout(timeout); }
   }
-  private fail(message: string): void { this.disconnect(); this.state('error', message); }
-  disconnect(): void {
+  private fail(message: string,reason:SessionCloseReason): void { this.disconnect(reason); this.state('error', message); }
+  disconnect(reason:SessionCloseReason='USER_DISCONNECT'): void {
     ++this.generation;
     this.active = false;
     this.presentation?.close();this.presentation=undefined;
     this.memory?.close(); this.memory = undefined;
-    this.tools?.close(); this.tools = undefined;
+    this.tools?.close(reason); this.tools = undefined;
     this.observer.tools?.([], null);
     this.abort?.abort();
     this.abort = undefined;
@@ -178,6 +188,6 @@ export class OpenAIVoiceProvider implements VoiceProvider {
     if (this.tools?.pending?.confirmationId === confirmationId) void this.tools.decide(approved);
   }
   interrupt(): void {
-    try { this.session?.interrupt(); } catch { this.fail('No se pudo interrumpir la respuesta. Vuelve a conectar.'); }
+    try { this.session?.interrupt(); } catch { this.fail('No se pudo interrumpir la respuesta. Vuelve a conectar.','INTERRUPT_FAILURE'); }
   }
 }

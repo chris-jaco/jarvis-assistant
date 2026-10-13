@@ -10,8 +10,11 @@ import type { DraftContext } from '../browser/consequential/semantic.js';
 import { AttachedChromeProvider } from '../browser/attached/provider.js';
 import type { BrowserTransport } from '../browser/attached/transport.js';
 import type { Reply } from '../browser/attached/protocol.js';
+import { eventSchema } from '../browser/attached/protocol.js';
 import { BrowserAdapter } from './adapters/browser.js';
 import { BrowserContinuation } from '../provider/browser-continuation.js';
+import { BrowserTaskDiagnostics, type BrowserTaskTrace } from '../diagnostics/browser-task.js';
+import { BrowserDiagnostics } from '../browser/diagnostics.js';
 
 const source='<main id="main" data-testid="conversation-panel-wrapper"><header data-testid="conversation-header">PERSONAL_NAME</header><footer><div data-testid="conversation-compose-box-input" role="textbox" contenteditable="true"></div><button>Send</button></footer></main>';
 function fixture(html=source){
@@ -166,12 +169,28 @@ test('manual selection request is scoped, popup-only and resolves concurrently a
  const replay:any=await controller.receive({...raw,requestId:randomUUID()});assert.equal(replay.handoffId,pending.handoffId);
  const concurrent=await Promise.allSettled([controller.selectConversation(scopeId),controller.selectConversation(scopeId)]);assert.equal(concurrent.filter(result=>result.status==='fulfilled'&&result.value).length,1);assert.equal(selections,1);
  const selected=events.filter(event=>event.event==='manualSelectionResolved');assert.equal(selected.length,1);assert.equal(selected[0].manualStatus,'SELECTED');assert.equal(selected[0].admissionId,admissionId);assert.equal(controller.authorized()[0]!.manualSelectionPending,undefined);
+ assert.equal(events.filter(event=>event.event==='manualSelectionTrace').length,0,'BROWSER_TRACE disabled cannot emit manual diagnostic events');
  const next:any=await controller.receive({...raw,requestId:randomUUID(),args:{scopeId,tabId,documentId:randomUUID(),admissionId}});assert.equal(next.reason,'CONVERSATION_SELECTION');controller.cancelManualSelection(scopeId);
  assert.equal(events.filter(event=>event.event==='manualSelectionResolved'&&event.manualStatus==='CANCELLED').length,1);await assert.rejects(async()=>controller.cancelManualSelection(scopeId));
  const expiring:any=await controller.receive({...raw,requestId:randomUUID(),args:{scopeId,tabId,documentId:randomUUID(),admissionId}});assert.equal(expiring.reason,'CONVERSATION_SELECTION');now+=5*60_000+1;controller.expire();assert.equal(events.filter(event=>event.event==='manualSelectionResolved'&&event.manualStatus==='EXPIRED').length,1);
  const changing:any=await controller.receive({...raw,requestId:randomUUID(),deadlineAt:now+10_000,args:{scopeId,tabId,documentId:randomUUID(),admissionId}});assert.equal(changing.reason,'CONVERSATION_SELECTION');await controller.documentChanged(7);assert.equal(events.filter(event=>event.event==='manualSelectionResolved'&&event.manualStatus==='INVALIDATED').length,1);
  const switching:any=await controller.receive({...raw,requestId:randomUUID(),deadlineAt:now+10_000,args:{scopeId,tabId,documentId:randomUUID(),admissionId}});assert.equal(switching.reason,'CONVERSATION_SELECTION');await controller.activeTabChanged(8,2);assert.equal(controller.authorized()[0]!.manualSelectionPending,true,'another Chrome window cannot invalidate this request');await controller.activeTabChanged(8,1);assert.equal(events.filter(event=>event.event==='manualSelectionResolved'&&event.manualStatus==='INVALIDATED').length,2);
  url='https://example.test/';await assert.rejects(controller.selectConversation(scopeId));
+});
+
+test('manual extension trace follows the real request and popup resolution without page data',async()=>{
+ const epoch=randomUUID(),session=randomUUID(),task=randomUUID(),admissionId=randomUUID(),documentId=randomUUID(),events:unknown[]=[],now=Date.now();
+ const surface:Surface={current:async()=>({id:7,windowId:1,url:'https://web.whatsapp.com/',title:'PRIVATE_SENTINEL'}),create:async()=>7,activate:async()=>{},navigate:async()=>{},history:async()=>{},invalidate:async()=>{},content:async()=>({outcome:'ERROR',code:'REJECTED'}),selectConversation:async()=>true};
+ const controller=new ExtensionController(surface,event=>events.push(event),()=>now,randomUUID,{allows:async()=>true,allowAlways:async()=>{}});
+ await controller.reset({protocol:'atlas.browser',version:1,kind:'hello',connectionEpoch:epoch});
+ const base={protocol:'atlas.browser',version:1,kind:'request',backendSessionId:session,taskId:task,connectionEpoch:epoch,deadlineAt:now+10_000};
+ const access:any=await controller.receive({...base,requestId:randomUUID(),operation:'requestTabAccess',args:{target:{kind:'current'},purpose:'Fixture',lifetime:'task'}});
+ const pending:any=await controller.receive({...base,requestId:randomUUID(),operation:'requestManualSelection',observeTrace:true,args:{scopeId:access.data.scopeId,tabId:access.data.id,documentId,admissionId}});
+ assert.equal(pending.reason,'CONVERSATION_SELECTION');assert.equal(await controller.selectConversation(access.data.scopeId),true);
+ const diagnostic=events.map(event=>eventSchema.parse(event)).filter(event=>event.event==='manualSelectionTrace');
+ assert.deepEqual(diagnostic.map(event=>event.manualStage),['MANUAL_POPUP_SELECTED','MANUAL_EVENT_EMITTED']);
+ assert.ok(diagnostic.every(event=>event.manualRequestId===pending.handoffId&&event.taskId===task&&event.admissionId===admissionId));
+ assert.ok(!JSON.stringify(diagnostic).includes('PRIVATE_SENTINEL'));
 });
 
 test('cancel, expiry and reconnect win against delayed selection publication exactly once',async()=>{
@@ -190,10 +209,13 @@ test('cancel, expiry and reconnect win against delayed selection publication exa
 
 test('manual resolution continuation is silent, single-use and distinguishes selection from identity',()=>{
  const taskId=randomUUID(),requestId=randomUUID(),ready=randomUUID(),messages:string[]=[];const receipts:any[]=[];
- const continuation=new BrowserContinuation(async()=>({}),message=>messages.push(message),undefined,undefined,receipt=>receipts.push(receipt));
+ const rows:BrowserTaskTrace[]=[];const diagnostics=new BrowserTaskDiagnostics(row=>rows.push(row));diagnostics.enabled=true;
+ const continuation=new BrowserContinuation(async()=>({}),message=>messages.push(message),undefined,diagnostics,receipt=>receipts.push(receipt));
  continuation.update({taskId,workflow:{outcome:'REQUIRES_USER_INTERACTION',handoffId:requestId,reason:'CONVERSATION_SELECTION'},ready:null,executionState:'WAITING_MANUAL',manualSelection:{status:'PENDING',requestId}},false);assert.equal(messages.length,0);
  const selected={taskId,workflow:null,ready,continuation:{taskId,tokens:[ready]},executionState:'RUNNING' as const,manualSelection:{status:'SELECTED' as const,requestId}};continuation.update(selected,false);continuation.update(selected,false);
  assert.equal(messages.length,1);assert.match(messages[0]!,/USER_SELECTED, no identidad verificada/);assert.match(messages[0]!,/no escribas ni envíes/);assert.equal(receipts.length,1);
+ assert.deepEqual(rows.filter(row=>row.stage.startsWith('MANUAL_CONTINUATION_')).map(row=>row.stage),['MANUAL_CONTINUATION_PENDING','MANUAL_CONTINUATION_DELIVERED','MANUAL_CONTINUATION_CONSUMED']);
+ assert.ok(rows.filter(row=>row.stage==='CONTINUATION'&&row.tokenId===ready).every(row=>row.tokenReason==='MANUAL_SELECTION_READY'));
 });
 
 test('WAITING_MANUAL resumes once with USER_SELECTED and a frozen draft survives task close without send authority',async()=>{
@@ -202,12 +224,14 @@ test('WAITING_MANUAL resumes once with USER_SELECTED and a frozen draft survives
  let evidenceRequestId=requestId;
  const observation=()=>({tabId,scopeId,documentId,snapshotId:randomUUID(),expiresAt:Date.now()+15_000,url:tab.url,title:tab.title,elements:[{ref,role:'textbox',name:'',type:'text',disabled:false,action:'blocked' as const}],truncated:false,conversationEvidence:{provenance:{adapter:'whatsapp' as const,version:1 as const},state:'INSUFFICIENT_EVIDENCE' as const,reason:'STRUCTURE_ONLY' as const,conversationKind:'NOT_VERIFIED' as const,truncated:false,activePanelCandidate:true,header:true,composer:true,composerEnabled:true,contactCandidates:0,contactPanel:'NOT_VERIFIED' as const,phoneEvidence:'NOT_VERIFIED' as const,contactAssociation:'NOT_VERIFIED' as const,identity:'NOT_VERIFIED' as const,phoneMatch:'NOT_VERIFIED' as const,handles:{conversation:randomUUID(),header:randomUUID(),composer:randomUUID()},binding:{tabId,scopeId,documentId,epoch},trust:'UNTRUSTED_PAGE_EVIDENCE' as const},...(selected?{manualSelection:{selectionId,manualRequestId:evidenceRequestId,admissionId,taskId:provider.state(session).taskId!,scopeId,tabId,documentId,epoch,expiresAt:Date.now()+60_000,assurance:'USER_SELECTED' as const}}:{})});
  const transport:BrowserTransport={epoch,connections:()=>[connection],subscribe:next=>{listener=next;return()=>{listener=undefined;}},close:()=>{},request:async(_connection,request):Promise<Reply>=>{operations.push(request.operation);if(request.operation==='listAuthorizedTabs')return {outcome:'OK',data:[tab]};if(request.operation==='observe')return {outcome:'OK',data:observation()};if(request.operation==='requestManualSelection')return {outcome:'REQUIRES_USER_INTERACTION',handoffId:requestId,reason:'CONVERSATION_SELECTION'};if(request.operation==='endTask')return {outcome:'OK',data:{completed:true}};actions++;return {outcome:'ERROR',code:'REJECTED'};}};
- const provider=new AttachedChromeProvider(transport),adapter=new BrowserAdapter(provider);try{await adapter.inSession(session,async()=>{
+ const rows:BrowserTaskTrace[]=[];const diagnostics=new BrowserTaskDiagnostics(row=>rows.push(row));
+ const provider=new AttachedChromeProvider(transport,true,undefined,new BrowserDiagnostics(true,()=>{}),undefined,diagnostics),adapter=new BrowserAdapter(provider);try{await adapter.inSession(session,async()=>{
   await adapter.admitGoal(admissionId,'Prepará un borrador para la conversación que voy a seleccionar');await provider.listTabs(new AbortController().signal);
   assert.equal(adapter.tools().some(tool=>tool.id==='browser.requestManualSelection'),true);const pending=await provider.requestManualSelection(new AbortController().signal);assert.equal(pending.outcome,'REQUIRES_USER_INTERACTION');assert.equal(provider.state(session).manualSelection?.status,'PENDING');assert.equal(adapter.state(session)!.executionState,'WAITING_MANUAL');
   const navigate=adapter.tools().find(tool=>tool.id==='browser.navigate')!;const blocked:any=await navigate.execute({url:'https://web.whatsapp.com/'},new AbortController().signal);assert.equal(blocked.browserState.reason,'CONVERSATION_SELECTION');assert.equal(adapter.state(session)!.executionState,'WAITING_MANUAL');assert.equal(actions,0);
   const premature:any=await provider.endTask(new AbortController().signal,{reason:'COMPLETED'});assert.equal(premature.outcome,'END_TASK_REJECTED');
   const taskId=provider.state(session).taskId!;selected=true;const event={protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:epoch,backendSessionId:session,event:'manualSelectionResolved',scopeId,manualRequestId:requestId,manualStatus:'SELECTED',taskId,admissionId};listener?.(connection,{...event,admissionId:randomUUID()});assert.equal(provider.state(session).manualSelection?.status,'PENDING');assert.equal(provider.state(session).ready,null);listener?.(connection,event);
+  assert.equal(rows.filter(row=>row.stage==='MANUAL_REQUEST_CREATED').length,1);assert.equal(rows.filter(row=>row.stage==='MANUAL_EVENT_RECEIVED').length,1);
   const ready=provider.state(session).ready;assert.ok(ready);assert.equal(provider.state(session).manualSelection?.status,'SELECTED');listener?.(connection,event);assert.equal(provider.state(session).ready,ready,'duplicate resolution cannot create another continuation');
   provider.acknowledge(provider.state(session).continuation!);
   evidenceRequestId=randomUUID();await assert.rejects(provider.prepareDraft({recipientHint:'Conversación seleccionada',text:'Texto privado'},new AbortController().signal),error=>error instanceof Error);evidenceRequestId=requestId;
