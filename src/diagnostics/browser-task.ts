@@ -3,17 +3,38 @@ import { browserExecutionStateSchema } from '../browser/execution-state.js';
 export const sessionCloseReasonSchema=z.enum(['REALTIME_ERROR','TRANSPORT_DISCONNECTED','USER_DISCONNECT','PAGEHIDE','RECONNECT','CONNECT_TIMEOUT','CONNECT_FAILURE','INTERRUPT_FAILURE','SERVER_SHUTDOWN','UNKNOWN']);
 export type SessionCloseReason=z.infer<typeof sessionCloseReasonSchema>;
 const errorTypeSchema=z.enum(['AbortError','NotAllowedError','NetworkError','TimeoutError','TypeError','invalid_request_error','server_error','transcription_error']);
-const errorCodeSchema=z.enum(['ECONNRESET','ETIMEDOUT','ECONNABORTED','NETWORK_ERROR','SESSION_EXPIRED','RATE_LIMITED','session_expired','rate_limit_exceeded','conversation_already_has_active_response','invalid_event','invalid_value','invalid_type','missing_required_parameter']);
-export function realtimeErrorFacts(error:unknown):{errorType?:z.infer<typeof errorTypeSchema>;errorCode?:z.infer<typeof errorCodeSchema>} {
+const errorCodeSchema=z.enum(['ECONNRESET','ETIMEDOUT','ECONNABORTED','NETWORK_ERROR','SESSION_EXPIRED','RATE_LIMITED','session_expired','rate_limit_exceeded','conversation_already_has_active_response','invalid_event','invalid_value','invalid_type','missing_required_parameter','UNKNOWN']);
+const errorEventKindSchema=z.enum(['CONVERSATION_ITEM_CREATE','RESPONSE_CREATE','UNKNOWN']);
+const errorParamSchema=z.enum(['item','item.id','item.type','item.role','item.content','response','response.metadata','type','UNKNOWN']);
+type RealtimeErrorCandidate={name?:unknown;type?:unknown;code?:unknown;param?:unknown;event_id?:unknown;error?:unknown};
+function realtimeErrorCandidate(error:unknown):RealtimeErrorCandidate|undefined {
   try {
-    if(!error||typeof error!=='object')return {};
+    if(!error||typeof error!=='object')return;
     // The SDK emits {type:'error',error}, and server errors may nest a second
     // {type:'error',error:{type,code}}. Inspect only these fixed properties.
-    let candidate=error as {name?:unknown;type?:unknown;code?:unknown;error?:unknown};
+    let candidate=error as RealtimeErrorCandidate;
     for(let depth=0;depth<2&&candidate.type==='error'&&candidate.error&&typeof candidate.error==='object';depth++)candidate=candidate.error as typeof candidate;
-    const type=errorTypeSchema.safeParse(candidate.name??candidate.type),code=errorCodeSchema.safeParse(candidate.code);
-    return {...(type.success?{errorType:type.data}:{}),...(code.success?{errorCode:code.data}:{})};
-  }catch{return {};}
+    return candidate;
+  }catch{return;}
+}
+export class RealtimeErrorCorrelation {
+  private readonly itemEvents=new Set<string>();
+  constructor(private readonly generation:number) {}
+  conversationItemEventId():string {
+    const id=`atlas_internal_${this.generation}_${crypto.randomUUID()}`;
+    this.itemEvents.add(id);while(this.itemEvents.size>64)this.itemEvents.delete(this.itemEvents.values().next().value!);return id;
+  }
+  facts(error:unknown):ReturnType<typeof realtimeErrorFacts> {
+    const candidate=realtimeErrorCandidate(error),linked=typeof candidate?.event_id==='string'?candidate.event_id:'';
+    const errorEventKind=this.itemEvents.has(linked)?'CONVERSATION_ITEM_CREATE':/^agents_js_response_create_[1-9]\d*$/.test(linked)?'RESPONSE_CREATE':'UNKNOWN';
+    if(errorEventKind==='CONVERSATION_ITEM_CREATE')this.itemEvents.delete(linked);
+    return realtimeErrorFacts(error,errorEventKind);
+  }
+  clear():void {this.itemEvents.clear();}
+}
+export function realtimeErrorFacts(error:unknown,errorEventKind:z.infer<typeof errorEventKindSchema>='UNKNOWN'):{errorType?:z.infer<typeof errorTypeSchema>;errorCode:z.infer<typeof errorCodeSchema>;errorEventKind:z.infer<typeof errorEventKindSchema>;errorParam:z.infer<typeof errorParamSchema>} {
+  const candidate=realtimeErrorCandidate(error),type=errorTypeSchema.safeParse(candidate?.name??candidate?.type),code=errorCodeSchema.safeParse(candidate?.code),param=errorParamSchema.safeParse(candidate?.param);
+  return {...(type.success?{errorType:type.data}:{}),errorCode:code.success?code.data:'UNKNOWN',errorEventKind,errorParam:param.success?param.data:'UNKNOWN'};
 }
 const traceSchema=z.object({
   taskId:z.string().uuid().optional(),admissionId:z.string().uuid().optional(),tokenId:z.string().uuid().optional(),tokens:z.array(z.string().uuid()).max(3).optional(),correlationId:z.string().uuid().optional(),
@@ -23,7 +44,7 @@ const traceSchema=z.object({
   manualRequestId:z.string().uuid().optional(),manualStatus:z.enum(['SELECTED','CANCELLED','EXPIRED','INVALIDATED']).optional(),
   connectionGeneration:z.number().int().min(1).max(1_000_000).optional(),elapsedMs:z.number().int().min(0).max(86_400_000).optional(),
   sessionStage:z.enum(['TOKEN','TOOLS','MEMORY','CONNECTING','CONNECTED']).optional(),transportState:z.enum(['UNKNOWN','CONNECTING','CONNECTED','DISCONNECTED','FAILED']).optional(),
-  errorType:errorTypeSchema.optional(),errorCode:errorCodeSchema.optional(),closeReason:sessionCloseReasonSchema.optional(),
+  errorType:errorTypeSchema.optional(),errorCode:errorCodeSchema.optional(),errorEventKind:errorEventKindSchema.optional(),errorParam:errorParamSchema.optional(),closeReason:sessionCloseReasonSchema.optional(),
   intent:z.enum(['READ_ONLY','ACTION_REQUIRED']).optional(),source:z.enum(['TRANSCRIPT','FALLBACK','SDK_OUTPUT','NOTIFICATION','BACKEND_EVENT']).optional(),
   phase:z.enum(['GUARD','TRANSPORT','RESULT']).optional(),
   sdkPendingCalls:z.number().int().min(0).optional(),sdkAnnouncedCalls:z.number().int().min(0).optional(),sdkActiveResponses:z.number().int().min(0).optional(),activeInvocations:z.number().int().min(0).optional(),

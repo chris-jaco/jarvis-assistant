@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BrowserTaskDiagnostics, realtimeErrorFacts, type BrowserTaskTrace } from '../diagnostics/browser-task.js';
+import { BrowserTaskDiagnostics, RealtimeErrorCorrelation, realtimeErrorFacts, type BrowserTaskTrace } from '../diagnostics/browser-task.js';
 import { PresentationGate } from '../provider/presentation-gate.js';
 import { BrowserContinuation } from '../provider/browser-continuation.js';
 import { VoiceToolBridge } from '../provider/tools.js';
@@ -11,12 +11,22 @@ test('Realtime error diagnostics accept only allowlisted facts and are disabled 
  const privateMessage='PRIVATE_SENTINEL';const error={name:'NetworkError',code:'ECONNRESET',message:privateMessage,stack:privateMessage,sdp:privateMessage};
  const {rows,diagnostic}=trace();diagnostic.event({stage:'REALTIME_SESSION_ERROR',...realtimeErrorFacts(error),connectionGeneration:2,elapsedMs:3500,sessionStage:'CONNECTED',transportState:'DISCONNECTED'});
  assert.equal(rows.length,1);assert.equal(rows[0]?.errorType,'NetworkError');assert.equal(rows[0]?.errorCode,'ECONNRESET');
- assert.deepEqual(realtimeErrorFacts({name:privateMessage,code:privateMessage,message:privateMessage}),{});
- assert.deepEqual(realtimeErrorFacts({type:'error',error:{type:'error',error:{type:'invalid_request_error',code:'conversation_already_has_active_response',message:privateMessage}}}),{errorType:'invalid_request_error',errorCode:'conversation_already_has_active_response'});
+ assert.deepEqual(realtimeErrorFacts({name:privateMessage,code:privateMessage,message:privateMessage}),{errorCode:'UNKNOWN',errorEventKind:'UNKNOWN',errorParam:'UNKNOWN'});
+ assert.deepEqual(realtimeErrorFacts({type:'error',error:{type:'error',error:{type:'invalid_request_error',code:'conversation_already_has_active_response',param:'response',message:privateMessage}}}),{errorType:'invalid_request_error',errorCode:'conversation_already_has_active_response',errorEventKind:'UNKNOWN',errorParam:'response'});
  diagnostic.event({stage:'REALTIME_SESSION_ERROR',errorType:privateMessage,connectionGeneration:2});
  diagnostic.event({stage:'REALTIME_SESSION_ERROR',message:privateMessage});assert.equal(rows.length,1);
  diagnostic.enabled=false;diagnostic.event({stage:'TOOLS_SESSION_DELETE',closeReason:'REALTIME_ERROR'});assert.equal(rows.length,1);
  assert.ok(!JSON.stringify(rows).includes(privateMessage));
+});
+test('Realtime error correlation classifies only current opaque events and never exposes identifiers or payloads',()=>{
+ const privateValue='PRIVATE_SENTINEL',first=new RealtimeErrorCorrelation(4),second=new RealtimeErrorCorrelation(5),itemEvent=first.conversationItemEventId();
+ const wrap=(event_id:string,param:unknown='item.id')=>({type:'error',error:{type:'error',error:{type:'invalid_request_error',code:'invalid_value',event_id,param,message:privateValue,payload:privateValue}}});
+ const item=first.facts(wrap(itemEvent));assert.deepEqual(item,{errorType:'invalid_request_error',errorCode:'invalid_value',errorEventKind:'CONVERSATION_ITEM_CREATE',errorParam:'item.id'});
+ const response=first.facts(wrap('agents_js_response_create_7','response.metadata'));assert.deepEqual(response,{errorType:'invalid_request_error',errorCode:'invalid_value',errorEventKind:'RESPONSE_CREATE',errorParam:'response.metadata'});
+ assert.equal(first.facts(wrap('unrelated',privateValue)).errorEventKind,'UNKNOWN');assert.equal(first.facts(wrap('unrelated',privateValue)).errorParam,'UNKNOWN');
+ assert.equal(second.facts(wrap(itemEvent)).errorEventKind,'UNKNOWN','another connection generation cannot claim the item event');
+ const cleared=first.conversationItemEventId();first.clear();assert.equal(first.facts(wrap(cleared)).errorEventKind,'UNKNOWN');
+ assert.ok(!JSON.stringify([item,response]).includes(itemEvent));assert.ok(!JSON.stringify([item,response]).includes(privateValue));
 });
 test('manual diagnostic schema admits a known waiting reason and rejects private payloads',()=>{
  const {rows,diagnostic}=trace(),taskId=uuid(),manualRequestId=uuid();

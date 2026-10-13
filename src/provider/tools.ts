@@ -37,6 +37,7 @@ export class VoiceToolBridge {
   private sdkPending=new Set<string>();
   private sdkToolNames=new Set<string>();private sdkCommitted=new Set<string>();
   private sdkAnnounced=new Set<string>();private sdkResponses=new Set<string>();private sdkAwaitingResponse=false;
+  realtimeState():{sdkActiveResponses:number;sdkAwaitingResponse:boolean} {return {sdkActiveResponses:this.sdkResponses.size,sdkAwaitingResponse:this.sdkAwaitingResponse};}
   private browserBusy():boolean {return this.browserInvocations>0||this.sdkPending.size>0||this.sdkAnnounced.size>0||this.sdkAwaitingResponse||this.sdkResponses.size>0;}
   private receiptAcks:Promise<unknown>=Promise.resolve();
   toolOutputCommitted(callId:string,raw:string):void {

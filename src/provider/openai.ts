@@ -1,4 +1,4 @@
-import { BrowserTaskDiagnostics, realtimeErrorFacts, type SessionCloseReason } from '../diagnostics/browser-task.js';
+import { BrowserTaskDiagnostics, RealtimeErrorCorrelation, type SessionCloseReason } from '../diagnostics/browser-task.js';
 import { PresentationGate } from './presentation-gate.js';
 import { OpenAIRealtimeWebRTC, RealtimeAgent, RealtimeSession } from '@openai/agents-realtime';
 import { ASSISTANT_NAME, JARVIS_INSTRUCTIONS, REALTIME_MODEL, JARVIS_VOICE, TURN_EAGERNESS } from '../core/personality.js';
@@ -18,6 +18,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
   private state(state: import('../core/provider.js').ConnectionState, message?: string): void { this.visualState = state; this.observer.state(state, message); }
   private abort?: AbortController;
   private generation = 0;
+  private realtimeCorrelation?:RealtimeErrorCorrelation;
   private active = false;
   readonly metrics = new SessionMetrics();
   constructor(private readonly observer: ProviderObserver, private readonly audio: HTMLAudioElement) {}
@@ -31,6 +32,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
     const elapsedMs=()=>Math.min(86_400_000,Math.max(0,Math.round(performance.now()-(connectedAt??startedAt))));
     const realtimeDiagnostics=new BrowserTaskDiagnostics();
     const connectionGeneration=Math.min(1_000_000,generation);
+    const realtimeCorrelation=new RealtimeErrorCorrelation(connectionGeneration);this.realtimeCorrelation=realtimeCorrelation;
     this.active = true;
     this.metrics.reset();
     this.observer.transcript([]);
@@ -61,7 +63,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       if (!current()) return;
       const playbackDiagnostics=new BrowserTaskDiagnostics();
       const gate=new PresentationGate(muted=>{this.audio.muted=muted;},playbackDiagnostics,()=>({visibility:document.visibilityState,paused:this.audio.paused,ended:this.audio.ended}));this.presentation=gate;
-      const bridge = new VoiceToolBridge((rows, pending) => { if (current()) this.observer.tools?.(rows, pending); }, message => { if (current()&&this.session){const id=crypto.randomUUID();gate.internal(id);transport.sendMessage(message,{item:{id,type:'message',role:'user',content:[{type:'input_text',text:message}]}},{triggerResponse:false});transport.requestResponse({metadata:{atlas_presentation_source:'INTERNAL_BROWSER_CONTINUATION'}});} },undefined,undefined,{state:state=>gate.update(state),tool:browser=>{gate.tool();if(browser)gate.beginBrowser();}});
+      const bridge = new VoiceToolBridge((rows, pending) => { if (current()) this.observer.tools?.(rows, pending); }, message => { if (current()&&this.session){const id=crypto.randomUUID(),eventId=realtimeDiagnostics.enabled?realtimeCorrelation.conversationItemEventId():undefined;gate.internal(id);transport.sendMessage(message,{...(eventId?{event_id:eventId}:{}),item:{id,type:'message',role:'user',content:[{type:'input_text',text:message}]}},{triggerResponse:false});transport.requestResponse({metadata:{atlas_presentation_source:'INTERNAL_BROWSER_CONTINUATION'}});} },undefined,undefined,{state:state=>gate.update(state),tool:browser=>{gate.tool();if(browser)gate.beginBrowser();}});
       this.tools = bridge;
       sessionStage='TOOLS';
       const toolConfig = await bridge.initialize();
@@ -88,7 +90,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       this.session = session;
       session.on('agent_tool_end', (_context,_agent,_tool,result,details) => {if(current()&&'callId' in details.toolCall)bridge.toolOutputCommitted(details.toolCall.callId,result);});
       let speaking = false;
-      session.on('error', error => { if (current()) {realtimeDiagnostics.event({stage:'REALTIME_SESSION_ERROR',...realtimeErrorFacts(error),transportState,connectionGeneration,elapsedMs:elapsedMs(),sessionStage});this.fail('Se interrumpió la conversación. Revisá tu conexión y volvé a conectar.','REALTIME_ERROR');} });
+      session.on('error', error => { if (current()) {realtimeDiagnostics.event({stage:'REALTIME_SESSION_ERROR',...realtimeCorrelation.facts(error),...bridge.realtimeState(),transportState,connectionGeneration,elapsedMs:elapsedMs(),sessionStage});this.fail('Se interrumpió la conversación. Revisá tu conexión y volvé a conectar.','REALTIME_ERROR');} });
       transport.on('connection_change', status => {
         if (!current())return;
         transportState=status==='connected'?'CONNECTED':status==='connecting'?'CONNECTING':status==='disconnected'?'DISCONNECTED':'UNKNOWN';
@@ -165,6 +167,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
   disconnect(reason:SessionCloseReason='USER_DISCONNECT'): void {
     ++this.generation;
     this.active = false;
+    this.realtimeCorrelation?.clear();this.realtimeCorrelation=undefined;
     this.presentation?.close();this.presentation=undefined;
     this.memory?.close(); this.memory = undefined;
     this.tools?.close(reason); this.tools = undefined;
