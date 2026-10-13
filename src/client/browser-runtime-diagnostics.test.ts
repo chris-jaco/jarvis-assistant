@@ -43,9 +43,13 @@ test('draft precondition diagnostics expose only closed enums and no draft conte
  diagnostic.event({stage:'DRAFT_PRECONDITION',taskId,admissionId,outcome:'REJECTED',draftRejectReason:'CONTENT_MISMATCH'});
  diagnostic.event({stage:'ADMISSION_PRESERVED',taskId,admissionId,admissionRelation:'INCIDENTAL'});
  diagnostic.event({stage:'DRAFT_AUTHORITY',taskId,admissionId,draftAuthority:'EXACT_TRANSCRIPT'});
- assert.equal(rows.length,3);assert.equal(rows[0]?.draftRejectReason,'CONTENT_MISMATCH');
+ diagnostic.event({stage:'TOOL_CATALOG',writeDraftAvailability:'AVAILABLE'});
+ diagnostic.event({stage:'DRAFT_CONTINUATION',taskId,draftGoal:'WRITE_DRAFT_TO_COMPOSER',continuationIntent:'PRESERVED'});
+ diagnostic.event({stage:'WRITE_CONFIRMATION',taskId,admissionId,writeConfirmation:'REQUESTED'});
+ diagnostic.event({stage:'WRITE_EXECUTION',taskId,admissionId,writeExecution:'DRAFT_WRITTEN'});
+ assert.equal(rows.length,7);assert.equal(rows[0]?.draftRejectReason,'CONTENT_MISMATCH');
  diagnostic.event({stage:'DRAFT_PRECONDITION',taskId,admissionId,outcome:'REJECTED',draftRejectReason:'PRIVATE_SENTINEL',text:'PRIVATE_SENTINEL'});
- assert.equal(rows.length,3);assert.ok(!JSON.stringify(rows).includes('PRIVATE_SENTINEL'));
+ assert.equal(rows.length,7);assert.ok(!JSON.stringify(rows).includes('PRIVATE_SENTINEL'));
 });
 test('tool session DELETE carries a closed reason only while diagnostics remain opt-in',async()=>{
  const originalFetch=globalThis.fetch,originalDebug=console.debug;const rows:BrowserTaskTrace[]=[],reasons:string[]=[];

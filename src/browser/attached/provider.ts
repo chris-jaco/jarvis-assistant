@@ -67,26 +67,27 @@ export class AttachedChromeProvider implements BrowserProvider {
   acknowledge(receipt:ContinuationReceipt):void {const session=this.session();if(receipt.taskId!==session.task)return;const available=this.receipt(session).tokens;for(const token of receipt.tokens)if(available.includes(token))session.acknowledged.add(token);}
   async admitGoal(admission:string, utterance?:string,traceState:BrowserExecutionState='RUNNING'):Promise<boolean> {
     const session=this.session();await session.tail.catch(()=>{});
-    if(session.admission===admission||session.workflow)return false;
-    if(session.manualWait?.status==='SELECTED'&&session.admission){
+    if(session.admission===admission)return false;
+    if(session.admission&&!session.cancelled&&!session.terminal&&!session.accessRevoked&&!session.uncertain){
       const exact=exactDraftClarification(utterance);
       if(session.draftGoal==='WRITE_DRAFT_TO_COMPOSER'&&exact.status==='EXACT'){
         session.authorizedDraft={text:exact.text,admissionId:session.admission};
-        this.traceTask({stage:'DRAFT_AUTHORITY',taskId:session.task,admissionId:session.admission,draftAuthority:'EXACT_TRANSCRIPT'});
+        this.traceTask({stage:'DRAFT_AUTHORITY',taskId:session.task,admissionId:session.admission,draftAuthority:'EXACT_TRANSCRIPT',draftAuthorityStatus:'READY'});
         return false;
       }
-      if(incidentalAcknowledgement(utterance)){
+      if(session.draftGoal&&incidentalAcknowledgement(utterance)){
         this.traceTask({stage:'ADMISSION_PRESERVED',taskId:session.task,admissionId:session.admission,admissionRelation:'INCIDENTAL'});
         return false;
       }
     }
+    if(session.workflow)return false;
     // A trusted new user turn starts a new progress ledger, not a new Chrome
     // permission. Never import an earlier objective's action as completion proof.
     session.requestedIdentifiers=[...new Set(utterance?.match(/[^\s<>@]+@[^\s<>@]+\.[a-zA-Z]{2,}|\+[1-9][0-9 ()-]{5,24}/g)??[])].slice(0,10);session.userAccessRejected=false;session.admission=admission;session.intent=classifyTaskIntent(utterance);session.draftGoal=classifyBrowserDraftGoal(utterance);const exact=exactDraftContent(utterance);session.authorizedDraft=session.draftGoal==='WRITE_DRAFT_TO_COMPOSER'&&exact.status==='EXACT'?{text:exact.text,admissionId:admission}:undefined;session.draftWritten=false;session.readAdmission=undefined;session.inventory=undefined;session.progress.clear();session.privateDraft=undefined;session.manualWait=undefined;session.terminal=false;session.cancelled=false;session.consequentialUnverified=false;session.consequentialUnknown=false;
     // New admission gets fresh operational context, never old completion proof.
     // Keep the uncertainty latch and Chrome consent/scopes intact.
     session.contextRecovery=undefined;session.observation=undefined;session.lastObservation=undefined;session.context='OBSERVATION_REQUIRED';session.completed=undefined;session.pendingStep=undefined;session.pendingRecovery=undefined;session.failures=0;session.rejectionToken=undefined;session.ready=undefined;
-    this.traceTask({stage:'ADMISSION',taskId:session.task,admissionId:admission,intent:session.intent.intent,source:utterance?'TRANSCRIPT':'FALLBACK',taskState:traceState});
+    this.traceTask({stage:'ADMISSION',taskId:session.task,admissionId:admission,intent:session.intent.intent,draftGoal:session.draftGoal,source:utterance?'TRANSCRIPT':'FALLBACK',taskState:traceState});
     return true;
   }
   private traceObserve(raw:unknown):void {if(!this.diagnostics?.enabled)return;const s=this.scope.getStore();if(!s||s.closed)return;observeTracer(this.diagnostics?.enabled===true)({boundary:'BACKEND',...(s.observeRequestId?{requestId:s.observeRequestId}:{}),...((raw&&typeof raw==='object')?raw:{}),taskId:s.task,...(s.admission?{admissionId:s.admission}:{})});}
@@ -246,7 +247,7 @@ export class AttachedChromeProvider implements BrowserProvider {
     if(session.manualWait?.status==='PENDING'&&session.workflow)throw new BrowserWorkflow(session.workflow);
     if(session.draftGoal==='WRITE_DRAFT_TO_COMPOSER'){
       const request=(input&&typeof input==='object'?input:{}) as {text?:unknown};
-      if(!session.authorizedDraft||session.authorizedDraft.admissionId!==session.admission)return {status:'TEXT_CONFIRMATION_REQUIRED',draftOnly:true,format:'Decí: texto exacto: <mensaje> fin del mensaje'};
+      if(!session.authorizedDraft||session.authorizedDraft.admissionId!==session.admission){this.traceTask({stage:'DRAFT_AUTHORITY',taskId:session.task,admissionId:session.admission,draftAuthorityStatus:'TEXT_CONFIRMATION_REQUIRED'});return {status:'TEXT_CONFIRMATION_REQUIRED',draftOnly:true,format:'Decí: texto exacto: <mensaje> fin del mensaje'};}
       if(typeof request.text!=='string'||request.text!==session.authorizedDraft.text)this.rejectDraft('CONTENT_MISMATCH');
     }
     const epoch=this.transport.epoch;const data=await this.observeWithResume(signal);
@@ -274,14 +275,15 @@ export class AttachedChromeProvider implements BrowserProvider {
     session.effects.requestConfirmation(intentId,'WRITE_DRAFT');session.writeIntents.set(intentId,review.intent);
     return {intentId,summary:`¿Confirmás escribir el borrador exacto en la conversación seleccionada? Esto no lo envía.\n\n${review.intent.content.text}`};
   }
-  pendingWriteDraft(intentId:string,confirmationId:string):void {const s=this.session();if(!s.effects?.has(intentId))throw new ToolError('REJECTED');s.writeConfirmations!.set(intentId,confirmationId);}
+  pendingWriteDraft(intentId:string,confirmationId:string):void {const s=this.session();if(!s.effects?.has(intentId))throw new ToolError('REJECTED');s.writeConfirmations!.set(intentId,confirmationId);this.traceTask({stage:'WRITE_CONFIRMATION',taskId:s.task,admissionId:s.admission,writeConfirmation:'REQUESTED'});}
   decideWriteDraft(intentId:string,confirmationId:string,approved:boolean):void {
     const s=this.session(),intent=s.writeIntents?.get(intentId),wait=s.manualWait;
     if(!intent||!wait||wait.status!=='SELECTED'||s.writeConfirmations?.get(intentId)!==confirmationId)throw new ToolError('REJECTED');
-    s.writeConfirmations.delete(intentId);if(!approved){s.effects!.invalidate(intentId);return;}
+    s.writeConfirmations.delete(intentId);if(!approved){s.effects!.invalidate(intentId);this.traceTask({stage:'WRITE_CONFIRMATION',taskId:s.task,admissionId:s.admission,writeConfirmation:'REJECTED'});return;}
+    this.traceTask({stage:'WRITE_CONFIRMATION',taskId:s.task,admissionId:s.admission,writeConfirmation:'ACCEPTED'});
     const capability=s.effects!.authorize(intentId,'WRITE_DRAFT',confirmationId,{manualRequestId:wait.requestId,selectionId:intent.recipient.evidenceId});s.writeCapabilities!.set(intentId,capability);
   }
-  invalidateWriteDraft(intentId:string):void {const s=this.session();s.writeConfirmations?.delete(intentId);if(s.effects?.has(intentId))s.effects.invalidate(intentId);}
+  invalidateWriteDraft(intentId:string):void {const s=this.session();s.writeConfirmations?.delete(intentId);if(s.effects?.has(intentId))s.effects.invalidate(intentId);this.traceTask({stage:'WRITE_CONFIRMATION',taskId:s.task,admissionId:s.admission,writeConfirmation:'EXPIRED'});}
   async executeWriteDraft(intentId:string,signal:AbortSignal):Promise<unknown> {
     const s=this.session(),authority=s.effects,capability=s.writeCapabilities?.get(intentId),intent=s.writeIntents?.get(intentId);
     if(!authority||!capability||!intent)throw new ToolError('REJECTED');
@@ -289,9 +291,9 @@ export class AttachedChromeProvider implements BrowserProvider {
     if(reviewed.status!=='FROZEN'||reviewed.intent?.content.text!==intent.content.text)throw new ToolError('REJECTED');
     await authority.reserve(capability);authority.begin(capability.executionId);
     let reply:Reply;try{reply=await this.call('writeSelectedDraft',{scopeId:capability.scopeId,tabId:capability.tabId,documentId:capability.documentId,capability,text:intent.content.text},signal);}
-    catch(error){await authority.finish(capability.executionId,'UNKNOWN');throw new ToolError('EXECUTION_UNKNOWN');}
-    if(reply.outcome==='OK'&&(reply.data as {draftState?:string}).draftState==='WRITTEN_VERIFIED'){await authority.finish(capability.executionId,'SUCCESS');s.draftWritten=true;return {status:'DRAFT_WRITTEN',intentId};}
-    await authority.finish(capability.executionId,'UNKNOWN');throw new ToolError('EXECUTION_UNKNOWN');
+    catch(error){await authority.finish(capability.executionId,'UNKNOWN');this.traceTask({stage:'WRITE_EXECUTION',taskId:s.task,admissionId:s.admission,writeExecution:'UNKNOWN'});throw new ToolError('EXECUTION_UNKNOWN');}
+    if(reply.outcome==='OK'&&(reply.data as {draftState?:string}).draftState==='WRITTEN_VERIFIED'){await authority.finish(capability.executionId,'SUCCESS');s.draftWritten=true;this.traceTask({stage:'WRITE_EXECUTION',taskId:s.task,admissionId:s.admission,writeExecution:'DRAFT_WRITTEN'});return {status:'DRAFT_WRITTEN',intentId};}
+    await authority.finish(capability.executionId,'UNKNOWN');this.traceTask({stage:'WRITE_EXECUTION',taskId:s.task,admissionId:s.admission,writeExecution:'UNKNOWN'});throw new ToolError('EXECUTION_UNKNOWN');
   }
   async resume(handoffId: string, signal: AbortSignal): Promise<Reply> {
     const session = this.session(); if (session.workflow?.outcome !== 'REQUIRES_USER_INTERACTION' || session.workflow.handoffId !== handoffId) throw new ToolError('REJECTED');
@@ -475,7 +477,7 @@ export class AttachedChromeProvider implements BrowserProvider {
       consequentialUnknown:!!session.consequentialUnknown
     };
     const accepted=canEndTask(request,facts);
-    this.traceTask({stage:'END_TASK_GUARD',phase:'GUARD',taskId:session.task,admissionId:session.admission,call:this.diagnostics?.callId(),requestedReason:request.reason,outcome:accepted?'ACCEPTED':'REJECTED',...(accepted?{}:{reason:'OBJECTIVE_PENDING'}),guardMs:Math.min(30000,performance.now()-guardStarted),guard:facts});
+    this.traceTask({stage:'END_TASK_GUARD',phase:'GUARD',taskId:session.task,admissionId:session.admission,call:this.diagnostics?.callId(),requestedReason:request.reason,outcome:accepted?'ACCEPTED':'REJECTED',taskCompletion:accepted?'ALLOWED':session.draftGoal==='WRITE_DRAFT_TO_COMPOSER'&&!session.draftWritten?'BLOCKED_PENDING_WRITE':undefined,...(accepted?{}:{reason:'OBJECTIVE_PENDING'}),guardMs:Math.min(30000,performance.now()-guardStarted),guard:facts});
     if(!accepted){session.rejectionToken??=randomUUID();return {outcome:'END_TASK_REJECTED',reason:'OBJECTIVE_PENDING'};}
     const transportStarted=performance.now();
     session.closingTask=true;

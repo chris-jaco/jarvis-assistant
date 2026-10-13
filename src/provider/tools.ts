@@ -91,6 +91,7 @@ export class VoiceToolBridge {
     this.lifecycleEnabled=config.browserTaskLifecycle===true;if(this.lifecycleEnabled)this.admission.begin();
     this.sdkToolNames=new Set(config.tools.filter(tool=>tool.id.startsWith('browser.')).map(tool=>tool.id.replaceAll('.','_')));
     this.taskDiagnostics.enabled=config.browserTrace===true;
+    this.taskDiagnostics.event({stage:'TOOL_CATALOG',writeDraftAvailability:this.sdkToolNames.has('browser_writeDraft')?'AVAILABLE':'UNAVAILABLE'});
     this.accessDiagnostics.enabled=config.accessTrace===true;
     this.browserTrace = browserTracer(config.browserTrace === true, this.browserSink);
     this.trace = confirmationTracer(config.confirmationTrace === true, this.traceSink);

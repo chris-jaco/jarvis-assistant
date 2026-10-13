@@ -7,7 +7,7 @@ export type ExactDraftContent = Readonly<{ status:'EXACT'; text:string }> | Read
  */
 export function exactDraftContent(utterance?:string):ExactDraftContent {
   if(!utterance||utterance.length>2000)return {status:'AMBIGUOUS'};
-  const marker=/(?:texto exacto|mensaje exacto|exact text|exact message)\s*:\s*/giu;
+  const marker=/(?:(?:el )?(?:texto|mensaje) exacto\s*(?::\s*|es\s+)|(?:the )?exact (?:text|message)\s*(?::\s*|is\s+))/giu;
   const matches=[...utterance.matchAll(marker)];
   if(matches.length===1){
     const start=matches[0]!.index!+matches[0]![0].length;
@@ -21,7 +21,7 @@ export function exactDraftContent(utterance?:string):ExactDraftContent {
 /** Clarifications may preserve an existing admission only when they contain no new objective. */
 export function exactDraftClarification(utterance?:string):ExactDraftContent {
   if(!utterance||utterance.length>2000)return {status:'AMBIGUOUS'};
-  if(!/^(?:texto exacto|mensaje exacto|exact text|exact message)\s*:/iu.test(utterance))return {status:'AMBIGUOUS'};
+  if(!/^(?:(?:el )?(?:texto|mensaje) exacto\s*(?::\s*|es\s+)|(?:the )?exact (?:text|message)\s*(?::\s*|is\s+))/iu.test(utterance))return {status:'AMBIGUOUS'};
   return exactDraftContent(utterance);
 }
 

@@ -12,6 +12,15 @@ import { canEndTask } from '../browser/task-lifecycle.js';
 import { BrowserAdapter } from './adapters/browser.js';
 import { ToolExecutor } from './execution.js';
 import { ToolRegistry } from './registry.js';
+import { VoiceToolBridge } from '../provider/tools.js';
+
+test('effective Realtime catalog exposes controlled writeDraft but no sendMessage',async()=>{
+ const connection=randomUUID();const transport:BrowserTransport={epoch:randomUUID(),connections:()=>[connection],subscribe:()=>()=>{},close:()=>{},request:async()=>({outcome:'ERROR',code:'REJECTED'})};
+ const provider=new AttachedChromeProvider(transport),registry=new ToolRegistry();registry.add(new BrowserAdapter(provider));
+ const descriptors=registry.descriptors();assert.ok(descriptors.some(tool=>tool.id==='browser.writeDraft'));assert.ok(!descriptors.some(tool=>tool.id==='browser.sendMessage'));
+ const original=globalThis.fetch;globalThis.fetch=async(path,init)=>String(path).endsWith('/session')&&init?.method!=='DELETE'?Response.json({tools:descriptors,timezone:'Europe/Madrid',now:new Date().toISOString(),browserTrace:true,browserTaskLifecycle:true}):String(path).endsWith('/activity')?Response.json({activity:[],pending:null,browser:null}):Response.json({closed:true});
+ const bridge=new VoiceToolBridge(()=>{},()=>{});try{const config=await bridge.initialize();assert.ok(config.tools.some(tool=>tool.name==='browser_writeDraft'));assert.ok(!config.tools.some(tool=>tool.name==='browser_sendMessage'));}finally{bridge.close();globalThis.fetch=original;await provider.close();}
+});
 
 test('attached provider exposes private drafts but no send tool or dispatch',async()=>{
  const dir=await mkdtemp(join(tmpdir(),'atlas-send-provider-'));const journal=new PrivateExecutionJournal(join(dir,'journal.json'));
@@ -29,9 +38,11 @@ test('attached provider exposes private drafts but no send tool or dispatch',asy
  }};
  const provider=new AttachedChromeProvider(transport,true,undefined,undefined,undefined,undefined,undefined,journal),adapter=new BrowserAdapter(provider),registry=new ToolRegistry();registry.add(adapter);const executor=new ToolExecutor(registry);
  try{
-  await adapter.inSession(session,async()=>{await adapter.admitGoal(admissionId,'Write a WhatsApp draft message and leave it as a draft');await provider.listTabs(new AbortController().signal);await provider.requestManualSelection(new AbortController().signal);selected=true;listener?.(connection,{protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:epoch,backendSessionId:session,event:'manualSelectionResolved',scopeId,manualRequestId,manualStatus:'SELECTED',taskId:provider.state(session).taskId,admissionId});provider.acknowledge(provider.state(session).continuation!);
+  await adapter.inSession(session,async()=>{await adapter.admitGoal(admissionId,'Write a WhatsApp draft message and leave it as a draft');
    assert.deepEqual(await provider.prepareDraft({recipientHint:'Sofía',text:'Exact message'},new AbortController().signal),{status:'TEXT_CONFIRMATION_REQUIRED',draftOnly:true,format:'Decí: texto exacto: <mensaje> fin del mensaje'});
-   assert.equal(await provider.admitGoal(randomUUID(),'Exact message: Exact message end message.'),false);
+   await provider.listTabs(new AbortController().signal);await provider.requestManualSelection(new AbortController().signal);
+   assert.equal(await provider.admitGoal(randomUUID(),'The exact message is Exact message end message.'),false);
+   selected=true;listener?.(connection,{protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:epoch,backendSessionId:session,event:'manualSelectionResolved',scopeId,manualRequestId,manualStatus:'SELECTED',taskId:provider.state(session).taskId,admissionId});provider.acknowledge(provider.state(session).continuation!);
    assert.equal(await provider.admitGoal(randomUUID(),'Да'),false);assert.equal(provider.state(session).manualSelection?.status,'SELECTED');
    for(const changed of ['exact message','Exact  message','Exact message.','Exact messagé'])await assert.rejects(provider.prepareDraft({recipientHint:'Sofía',text:changed},new AbortController().signal),(error:any)=>error.category==='REJECTED');
    const prepared=await executor.invoke(randomUUID(),'browser.prepareDraft',{recipientHint:'Sofía',text:'Exact message'});assert.equal(prepared.status,'success');if(prepared.status!=='success')throw new Error();const draft=prepared.data as {intent:{intentId:string;recipient:{uniqueness:string}};confirmationEnabled:boolean;executionEnabled:boolean};assert.equal(draft.intent.recipient.uniqueness,'USER_SELECTED');assert.equal(draft.confirmationEnabled,false);assert.equal(draft.executionEnabled,false);

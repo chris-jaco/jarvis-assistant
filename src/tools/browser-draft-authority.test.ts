@@ -6,6 +6,7 @@ test('exact draft authority preserves case, punctuation, spaces, and Unicode',()
   const text='Átlas  TEST — mañana,  08:00 ✅';
   assert.deepEqual(exactDraftContent(`Escribí en WhatsApp. Texto exacto: ${text} fin del mensaje.`),{status:'EXACT',text});
   assert.deepEqual(exactDraftContent('Write this exact message: Hello,  WORLD! end message'),{status:'EXACT',text:'Hello,  WORLD!'});
+  assert.deepEqual(exactDraftClarification('El texto exacto es Atlas Test V2. Fin del mensaje.'),{status:'EXACT',text:'Atlas Test V2.'});
   assert.deepEqual(exactDraftClarification('Exact message: Texto exacto — sin normalizar end message'),{status:'EXACT',text:'Texto exacto — sin normalizar'});
 });
 

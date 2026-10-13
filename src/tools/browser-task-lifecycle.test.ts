@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { canEndTask, endTaskSchema, explicitBrowserCancellation } from '../browser/task-lifecycle.js';
 import type { TaskFacts } from '../browser/task-lifecycle.js';
 import { BrowserTaskDiagnostics } from '../diagnostics/browser-task.js';
-import { JARVIS_BROWSER_INSTRUCTIONS } from '../core/personality.js';
+import { JARVIS_BROWSER_INSTRUCTIONS,JARVIS_INSTRUCTIONS } from '../core/personality.js';
 const facts:TaskFacts={progress:false,pending:false,unknown:false,fresh:true,verificationRequired:false,verified:false,verificationExhausted:false,cancelled:false,terminal:false,recoveryExhausted:false};
 test('endTask strict contract rejects circular/model-defined evidence and preparation-only completion',()=>{
  assert.equal(canEndTask(endTaskSchema.parse({}),facts),false);
@@ -48,6 +48,12 @@ test('conservative captured-turn intent recognizes reading and defaults ambiguou
  assert.equal(classifyBrowserDraftGoal('Prepare a private WhatsApp draft'),'PREPARE_PRIVATE_DRAFT');
  assert.equal(classifyBrowserDraftGoal('Write a WhatsApp draft message and leave it as a draft'),'WRITE_DRAFT_TO_COMPOSER');
  assert.equal(classifyBrowserDraftGoal('Escribí un borrador en WhatsApp y dejalo sin enviar'),'WRITE_DRAFT_TO_COMPOSER');
+ assert.equal(classifyBrowserDraftGoal('Quiero que escribas un borrador en WhatsApp, pero no lo envíes.'),'WRITE_DRAFT_TO_COMPOSER');
+ assert.equal(classifyBrowserDraftGoal('Dejá este texto escrito en la conversación para que yo lo envíe'),'WRITE_DRAFT_TO_COMPOSER');
+ assert.equal(classifyBrowserDraftGoal('Poné el mensaje en el compositor, sin enviarlo'),'WRITE_DRAFT_TO_COMPOSER');
+ assert.equal(classifyBrowserDraftGoal('Prepará un borrador privado, no lo escribas en WhatsApp'),'PREPARE_PRIVATE_DRAFT');
+ assert.equal(classifyBrowserDraftGoal('Mandá este mensaje'),undefined);
+ assert.match(JARVIS_INSTRUCTIONS,/browser\.writeDraft: esa tool puede escribir un borrador exacto/);assert.doesNotMatch(JARVIS_INSTRUCTIONS,/En V0\.5\.0 sólo navegación, búsqueda y media/);
  assert.equal(classifyBrowserDraftGoal('Texto observado dentro de una página'),undefined);
  assert.throws(()=>endTaskSchema.parse({reason:'COMPLETED',intent:'READ_ONLY'}));
 });
