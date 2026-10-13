@@ -20,13 +20,13 @@ async function fixture(deferIntent = false) {
     if (path === 'session') return Response.json({ tools: registry.descriptors(), timezone: 'Europe/Madrid', now: new Date(now).toISOString() });
     if (path === 'invoke') return Response.json(await executor.invoke(body.invocationId, body.toolId, body.input));
     if (path === 'activity') return Response.json({ activity: executor.telemetry.snapshot(), pending: executor.pendingState() });
-    if (path === 'decision') return Response.json(await executor.decide(body.confirmationId, body.approved));
+    if (path === 'decision') return Response.json(await executor.decide(body.confirmationId, body.approved, body.editedContent === undefined ? undefined : { editedContent: body.editedContent }));
     if (path === 'intent') { if (deferIntent) await gate; return Response.json({ confirmationId: body.confirmationId, intent: 'affirmative' }); }
     throw new Error('Unexpected test request');
   };
   const provider = new OpenAIVoiceProvider({ state: () => {}, transcript: () => {} }, doc.querySelector('audio')!);
   const yes = doc.querySelector<HTMLButtonElement>('#tool-approve')!; const no = doc.querySelector<HTMLButtonElement>('#tool-reject')!;
-  const ui = new ConfirmationDialog(dialog, doc.querySelector('#tool-confirmation')!, doc.querySelector('#confirmation-status')!, yes, no, (approved, id) => provider.confirmTool(approved, id));
+  const ui = new ConfirmationDialog(dialog, doc.querySelector('#tool-confirmation')!, doc.querySelector('#confirmation-status')!, doc.querySelector<HTMLTextAreaElement>('#confirmation-content')!, yes, no, (approved: boolean, id: string, editedContent?: string) => provider.confirmTool(approved, id, editedContent));
   const bridge = new VoiceToolBridge((_rows, pending) => ui.update(pending), () => {}); Object.defineProperty(provider, 'tools', { value: bridge });
   const config = await bridge.initialize(); const invoke = () => config.tools[0]!.invoke(new RunContext(), JSON.stringify({ inputJson: JSON.stringify({ body: frozen }) }));
   await invoke();

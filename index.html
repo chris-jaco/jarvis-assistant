@@ -28,7 +28,7 @@
 </main>
 <dialog id="confirmation-dialog" aria-labelledby="confirmation-title" aria-describedby="tool-confirmation confirmation-status">
   <span class="eyebrow">ATLAS</span><h2 id="confirmation-title">Confirmar acción</h2>
-  <p id="tool-confirmation"></p><p id="confirmation-status" role="status"></p>
+  <p id="tool-confirmation"></p><textarea id="confirmation-content" rows="6" maxlength="2000" hidden></textarea><p id="confirmation-status" role="status"></p>
   <div class="dialog-actions"><button id="tool-reject">Cancelar</button><button id="tool-approve" class="primary">Confirmar</button></div>
 </dialog>
 <script type="module" src="/src/client/main.ts"></script>

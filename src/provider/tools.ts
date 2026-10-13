@@ -16,7 +16,7 @@ import { intentSchema } from '../tools/confirmation-intent.js';
 import type { ToolResult } from '../tools/types.js';
 import type { ToolActivity } from '../tools/telemetry.js';
 setSensitiveDataLoggingEnabled(false);
-export interface PendingConfirmation { confirmationId: string; summary: string; expiresAt: number }
+export interface PendingConfirmation { confirmationId: string; summary: string; expiresAt: number; review?:{kind:'EDITABLE_CONTENT';content:string;label:string;maxLength:number} }
 interface Descriptor { permission?:'READ'|'WRITE'|'SENSITIVE'; id: string; description: string; inputSchema: unknown }
 export async function toolRequest(path: string, data?: unknown, method = 'POST', browserRequest?: { sequence: number; response(call: string): void }, closeReason?:SessionCloseReason): Promise<unknown> {
   const response = await fetch(`/api/tools/${path}`, { method, headers: { 'Content-Type': 'application/json', ...(browserRequest ? { 'X-Atlas-Browser-Request': String(browserRequest.sequence) } : {}),...(path==='session'&&method==='DELETE'&&closeReason?{'X-Atlas-Session-Close':closeReason}:{}) },
@@ -54,7 +54,6 @@ export class VoiceToolBridge {
     this.taskDiagnostics.event({stage:'TOOL_COMMITTED',...this.browserContinuation.traceContext(),...(/^call_[A-Za-z0-9_-]{1,100}$/.test(callId)?{callId}:{}),toolInFlight:this.browserInvocations>0});
   }
   private traceResponse(event:{type:string;[key:string]:unknown}):void {
-    if(!this.taskDiagnostics.enabled)return;
     const response=event.response as {id?:string;status?:string;output?:{type?:string}[]}|undefined;const id=typeof event.response_id==='string'?event.response_id:response?.id;
     if(!id||!/^resp_[A-Za-z0-9_-]{1,100}$/.test(id))return;
     if(event.type==='response.created'){this.responseTrace.set(id,{producedMessage:false,producedFunctionCall:false,tokens:this.requestedTraceTokens});this.requestedTraceTokens=[];while(this.responseTrace.size>256)this.responseTrace.delete(this.responseTrace.keys().next().value!);}
@@ -62,10 +61,15 @@ export class VoiceToolBridge {
     if(event.type==='response.output_item.added'&&row){const item=event.item as {type?:string}|undefined;row.producedMessage ||= item?.type==='message';row.producedFunctionCall ||= item?.type==='function_call';}
     if(event.type==='response.done'&&row){row.producedMessage ||= response?.output?.some(item=>item.type==='message')===true;row.producedFunctionCall ||= response?.output?.some(item=>item.type==='function_call')===true;}
     if(['response.done','response.output_item.added'].includes(event.type))this.taskDiagnostics.event({stage:event.type==='response.done'?'RESPONSE_DONE':'RESPONSE_OUTPUT',relation:'NEXT_RESPONSE_CANDIDATE',...this.browserContinuation.traceContext(),responseId:id,...this.traceSchedule(),tokens:row?.tokens??[],producedMessage:row?.producedMessage??false,producedFunctionCall:row?.producedFunctionCall??false,...(event.type==='response.done'?{status:['completed','cancelled','failed','incomplete','in_progress'].includes(response?.status??'')?response?.status:'UNKNOWN'}:{})});
+    if(event.type==='response.done'&&this.draftPhase==='CONTENT_REQUIRED'&&!this.pending&&row?.producedMessage&&!row.producedFunctionCall){
+      if(this.draftNoProgress++===0)this.notify('El workflow backend requiere preparar ahora la revisión visual del contenido. Sin hablar ni reconstruir el texto, llamá browser.prepareDraft una sola vez con el candidato actual.');
+      else {this.taskDiagnostics.event({stage:'TOOL_PROGRESS_STALLED',...this.browserContinuation.traceContext(),draftPhase:'FAILED',producedMessage:true,producedFunctionCall:false});void toolRequest('browser-stall',{}).then(()=>this.refresh()).catch(()=>{});}
+    }else if(event.type==='response.done'&&row?.producedFunctionCall)this.draftNoProgress=0;
   }
   private lifecycleEnabled=false;private admission=new BrowserTaskAdmission();private admissionInFlight?:Promise<void>;private lastBrowserState?:BrowserExecutionState;
   private presentationRevision=0;private browserInvocations=0;
-  private present(raw:unknown):void {const parsed=z.object({executionState:browserExecutionStateSchema,revision:z.number().int().positive().optional(),taskActive:z.boolean().optional()}).passthrough().safeParse(raw);if(!parsed.success)return;const state=parsed.data;if(state.revision!==undefined){if(state.revision<=this.presentationRevision)return;this.presentationRevision=state.revision;}if(state.taskActive!==false||state.executionState==='WAITING_CONFIRMATION')this.presentation?.state(state.executionState);this.lastBrowserState=state.executionState;}
+  private draftPhase?:string;private draftNoProgress=0;
+  private present(raw:unknown):void {const parsed=z.object({executionState:browserExecutionStateSchema,revision:z.number().int().positive().optional(),taskActive:z.boolean().optional(),draftPhase:z.string().optional()}).passthrough().safeParse(raw);if(!parsed.success)return;const state=parsed.data;if(state.revision!==undefined){if(state.revision<=this.presentationRevision)return;this.presentationRevision=state.revision;}if(state.draftPhase!==this.draftPhase){this.draftPhase=state.draftPhase;this.draftNoProgress=0;}if(state.taskActive!==false||state.executionState==='WAITING_CONFIRMATION')this.presentation?.state(state.executionState);this.lastBrowserState=state.executionState;}
   private armed = false;
   private decisionInFlight = false;
   private intentRevision = 0;
@@ -243,7 +247,7 @@ export class VoiceToolBridge {
     // A new turn supersedes an unresolved semantic decision. Old classification
     // must not execute while the user is already correcting or changing intent.
     if (this.intentInFlight && !this.captured.has(itemId)) ++this.intentRevision;
-    if (!this.captured.has(itemId) && this.pending && this.pending.expiresAt > Date.now()) this.captured.set(itemId, { id: this.pending.confirmationId, approvable: this.armed });
+    if (!this.captured.has(itemId) && this.pending && this.pending.expiresAt > Date.now()) this.captured.set(itemId, { id: this.pending.confirmationId, approvable: this.armed&&!this.pending.review });
     const capture = this.captured.get(itemId);
     this.diagnostic('speech.capture', capture ? 'captured' : 'not_captured', { itemId, capturedId: capture?.id, capturedApprovable: capture?.approvable });
   }
@@ -299,7 +303,7 @@ export class VoiceToolBridge {
       this.decisionInFlight = false;
     }
   }
-  async decide(approved: boolean): Promise<void> {
+  async decide(approved: boolean,editedContent?:string): Promise<void> {
     const pending = this.pending; if (!pending || this.closed) return;
     ++this.intentRevision;
     this.diagnostic('POST /decision', approved ? 'approved' : 'rejected');
@@ -307,7 +311,8 @@ export class VoiceToolBridge {
     // the authoritative decision result (not the user's yes) has been received.
     this.decisionInFlight = true;
     this.pending = null; this.armed = false; this.promptPlayback = undefined; this.captured.clear();
-    try { const result = await toolRequest('decision', { confirmationId: pending.confirmationId, approved });
+    try { const result = await toolRequest('decision', { confirmationId: pending.confirmationId, approved,...(editedContent===undefined?{}:{editedContent}) }) as ToolResult;
+      this.pending=result.status==='pending'?result:null;
       if (!this.closed) this.notify(`Resultado del backend para la confirmación ${pending.confirmationId}: ${JSON.stringify(result)}. Comunica el resultado brevemente; no repitas la acción.`);
     } catch { if (!this.closed) this.notify('No se pudo confirmar la acción. No asumas éxito ni repitas una escritura sin comprobar su estado.'); }
     await this.refresh();

@@ -61,7 +61,7 @@ export function createToolRuntime(env: NodeJS.ProcessEnv = process.env, diagnost
 const invocation = z.object({ invocationId: z.string().min(1).max(128), toolId: z.string().max(80), input: z.unknown() }).strict();
 const cancellation = z.object({ confirmationId: z.string().uuid().optional() }).strict();
 const voiceIntent = z.object({ confirmationId: z.string().uuid(), utterance: z.string().min(1).max(2000) }).strict();
-const decision = z.object({ confirmationId: z.string().uuid(), approved: z.boolean() }).strict();
+const decision = z.object({ confirmationId: z.string().uuid(), approved: z.boolean(), editedContent:z.string().min(1).max(2000).optional() }).strict();
 async function body(req: IncomingMessage): Promise<unknown> {
   if (req.headers['content-type']?.split(';')[0] !== 'application/json') throw new Error();
   const chunks: Buffer[] = []; let bytes = 0;
@@ -104,12 +104,13 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
     if (path === '/api/tools/session' && req.method === 'DELETE') { const parsed=sessionCloseReasonSchema.safeParse(req.headers['x-atlas-session-close']);taskDiagnostics.event({stage:'TOOLS_SESSION_DELETE',closeReason:parsed.success?parsed.data:'UNKNOWN'});browserDiagnostics.lifecycle(session.executor, 'session_closed'); session.closed = true; session.executor.close(); void browser?.endSession(session.browserSessionId).catch(() => {}); sessions.delete(id!); send(200, { closed: true }); return true; }
     if (path === '/api/tools/activity' && req.method === 'GET') { const pending=session.executor.pendingState();const state=browser?.state(session.browserSessionId,!!pending);send(200, { activity: session.executor.telemetry.snapshot(), pending, ...(state ? { browser:state } : {}) }); return true; }
     if (req.method !== 'POST') { send(405, { error: 'Método no permitido.' }); return true; }
-    const contextualRead = path === '/api/tools/memory-context' || path === '/api/tools/memory-turn' || path === '/api/tools/browser-continuation' || path === '/api/tools/browser-cancel';
+    const contextualRead = path === '/api/tools/memory-context' || path === '/api/tools/memory-turn' || path === '/api/tools/browser-continuation' || path === '/api/tools/browser-cancel' || path==='/api/tools/browser-stall';
     if (session.busy && !contextualRead) { browserDiagnostics.lifecycle(session.executor, 'http_busy'); send(429, { error: 'Una herramienta sigue ejecutándose.' }); return true; }
     if (!contextualRead) session.busy = true;
     try {
       const input = await body(req);
       if(path==='/api/tools/browser-continuation'){const receipt=continuationReceiptSchema.parse(input);await browser?.inSession(session.browserSessionId,async()=>browser.acknowledge(receipt));send(200,{acknowledged:true});
+      } else if(path==='/api/tools/browser-stall'){z.object({}).strict().parse(input);await browser?.inSession(session.browserSessionId,async()=>browser.stallDraftProgress());send(200,{stalled:true});
       } else if(path==='/api/tools/browser-admit'){const p=z.object({admissionId:z.string().uuid(),userTurn:z.object({itemId:z.string().min(1).max(128),utterance:z.string().min(1).max(2000)}).strict().optional()}).strict().parse(input);if(session.executor.pendingState())throw new Error();await browser?.inSession(session.browserSessionId,()=>browser.admitGoal(p.admissionId,p.userTurn?.utterance));send(200,{admitted:true});
       } else if(path==='/api/tools/browser-cancel'){const p=z.object({itemId:z.string().min(1).max(128),utterance:z.string().max(120)}).strict().parse(input);const accepted=!!browser?.presentationEnabled&&!session.executor.pendingState()&&explicitBrowserCancellation(p.utterance)&&session.seenTurns.size<1000&&!session.seenTurns.has(p.itemId);if(accepted){session.seenTurns.add(p.itemId);await browser?.inSession(session.browserSessionId,async()=>browser.cancelFromUser());}send(200,{cancelled:accepted});
       } else if (path === '/api/tools/memory-context') {
@@ -220,7 +221,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
           send(200, { confirmationId: p.confirmationId, intent: boundIntent });
         }
       } else if (path === '/api/tools/decision') {
-        const p = decision.parse(input); trace({ event: 'server POST /decision', reason: p.approved ? 'approved' : 'rejected', pendingId: p.confirmationId }); const decide = () => session.executor.decide(p.confirmationId, p.approved); send(200, browser ? await browser.inSession(session.browserSessionId, decide) : await decide());
+        const p = decision.parse(input); trace({ event: 'server POST /decision', reason: p.approved ? 'approved' : 'rejected', pendingId: p.confirmationId }); const decide = () => session.executor.decide(p.confirmationId, p.approved,p.editedContent===undefined?undefined:{editedContent:p.editedContent}); send(200, browser ? await browser.inSession(session.browserSessionId, decide) : await decide());
       } else if (path === '/api/tools/cancel') {
         const p = cancellation.parse(input); const current = session.executor.pendingState();
         if (p.confirmationId && current?.confirmationId !== p.confirmationId) send(200, { cancelled: false });

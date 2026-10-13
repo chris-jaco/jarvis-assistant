@@ -11,7 +11,7 @@ const audio = element<HTMLAudioElement>('audio');
 const orb = new AtlasOrb(element('atlas-orb'), matchMedia('(prefers-reduced-motion: reduce)'));
 const levels = new AudioLevels(audio, (input, output) => orb.levels(input, output));
 const transcript = new Transcript(element('transcript'), element('transcript-scroll'));
-const confirmation = new ConfirmationDialog(element<HTMLDialogElement>('confirmation-dialog'), element('tool-confirmation'), element('confirmation-status'), element<HTMLButtonElement>('tool-approve'), element<HTMLButtonElement>('tool-reject'), (approved, id) => provider.confirmTool(approved, id));
+const confirmation = new ConfirmationDialog(element<HTMLDialogElement>('confirmation-dialog'), element('tool-confirmation'), element('confirmation-status'),element<HTMLTextAreaElement>('confirmation-content'), element<HTMLButtonElement>('tool-approve'), element<HTMLButtonElement>('tool-reject'), (approved, id,editedContent) => provider.confirmTool(approved, id,editedContent));
 let state: ConnectionState = 'disconnected'; let toolRunning = false; let statusMessage: string | undefined;
 function renderState(): void {
   const visual = presentationState(state, toolRunning); orb.update(visual); document.body.dataset.state = visual;

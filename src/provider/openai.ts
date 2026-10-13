@@ -188,8 +188,8 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       this.state('disconnected');
     }
   }
-  confirmTool(approved: boolean, confirmationId: string): void {
-    if (this.tools?.pending?.confirmationId === confirmationId) void this.tools.decide(approved);
+  confirmTool(approved: boolean, confirmationId: string,editedContent?:string): void {
+    if (this.tools?.pending?.confirmationId === confirmationId) void this.tools.decide(approved,editedContent);
   }
   interrupt(): void {
     try { this.session?.interrupt(); } catch { this.fail('No se pudo interrumpir la respuesta. Vuelve a conectar.','INTERRUPT_FAILURE'); }

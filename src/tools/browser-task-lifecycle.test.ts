@@ -54,6 +54,7 @@ test('conservative captured-turn intent recognizes reading and defaults ambiguou
  assert.equal(classifyBrowserDraftGoal('Prepará un borrador privado, no lo escribas en WhatsApp'),'PREPARE_PRIVATE_DRAFT');
  assert.equal(classifyBrowserDraftGoal('Mandá este mensaje'),undefined);
  assert.match(JARVIS_INSTRUCTIONS,/browser\.writeDraft: esa tool puede escribir un borrador exacto/);assert.doesNotMatch(JARVIS_INSTRUCTIONS,/En V0\.5\.0 sólo navegación, búsqueda y media/);
+ assert.match(JARVIS_INSTRUCTIONS,/revisión visual editable/);assert.doesNotMatch(JARVIS_INSTRUCTIONS,/texto exacto: \.\.\. fin del mensaje/);
  assert.equal(classifyBrowserDraftGoal('Texto observado dentro de una página'),undefined);
  assert.throws(()=>endTaskSchema.parse({reason:'COMPLETED',intent:'READ_ONLY'}));
 });

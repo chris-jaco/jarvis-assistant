@@ -6,12 +6,12 @@ import { AtlasOrb, orbEnergy, stateLabels, presentationState } from './orb.js';
 import { Transcript } from './transcript.js';
 import { ConfirmationDialog } from './confirmation-dialog.js';
 import { ASSISTANT_NAME, JARVIS_INSTRUCTIONS } from '../core/personality.js';
-const document = () => new JSDOM('<button id="before">Start</button><div id="orb"></div><div id="scroll"><ol id="transcript"></ol></div><dialog><p id="summary"></p><p id="status"></p><button id="yes">Yes</button><button id="no">No</button></dialog>').window.document as unknown as Document;
-export function dialogFixture(decide: (approved: boolean, id: string) => void) {
+const document = () => new JSDOM('<button id="before">Start</button><div id="orb"></div><div id="scroll"><ol id="transcript"></ol></div><dialog><p id="summary"></p><textarea id="content"></textarea><p id="status"></p><button id="yes">Yes</button><button id="no">No</button></dialog>').window.document as unknown as Document;
+export function dialogFixture(decide: (approved: boolean, id: string, editedContent?: string) => void) {
   const doc = document(); const dialog = doc.querySelector('dialog')!;
   dialog.showModal = () => { dialog.setAttribute('open', ''); }; dialog.close = () => { dialog.removeAttribute('open'); };
   const yes = doc.querySelector<HTMLButtonElement>('#yes')!; const no = doc.querySelector<HTMLButtonElement>('#no')!;
-  const ui = new ConfirmationDialog(dialog, doc.querySelector('#summary')!, doc.querySelector('#status')!, yes, no, decide);
+  const ui = new ConfirmationDialog(dialog, doc.querySelector('#summary')!, doc.querySelector('#status')!, doc.querySelector<HTMLTextAreaElement>('#content')!, yes, no, decide);
   return { doc, dialog, get yes() { return doc.querySelector<HTMLButtonElement>('#yes')!; }, get no() { return doc.querySelector<HTMLButtonElement>('#no')!; }, ui };
 }
 test('Atlas identity replaces public name while legacy backend configuration and private paths remain compatible', async () => {
@@ -52,6 +52,12 @@ test('dialog uses only frozen summary; confirms once, waits for backend, closes 
     f.yes.click(); f.yes.click(); assert.deepEqual(decisions, [[true, 'frozen']]); assert.equal(f.dialog.open, true);
     f.ui.update(null); assert.equal(f.dialog.open, false); assert.equal(f.doc.activeElement!.id, 'before'); f.yes.click(); assert.equal(decisions.length, 1);
   } finally { f.ui.dispose(); }
+});
+test('editable confirmation renders escaped literal content and returns only the user-approved edit',()=>{
+  const decisions:unknown[]=[];const f=dialogFixture((approved,id,edited)=>decisions.push([approved,id,edited]));try{
+    f.ui.update({confirmationId:'review',summary:'Review',expiresAt:Date.now()+60_000,review:{kind:'EDITABLE_CONTENT',content:'<img onerror="bad"> candidate',label:'Exact content',maxLength:40}});
+    const editor=f.doc.querySelector<HTMLTextAreaElement>('#content')!;assert.equal(editor.hidden,false);assert.equal(editor.value,'<img onerror="bad"> candidate');assert.equal(f.dialog.querySelectorAll('img').length,0);editor.value='corrected exact text';f.yes.click();assert.deepEqual(decisions,[[true,'review','corrected exact text']]);
+  }finally{f.ui.dispose();}
 });
 test('Cancel and Escape reject the current pending ID; expired and disposed dialogs cannot decide', () => {
   const decisions: unknown[] = []; const f = dialogFixture((approved, id) => decisions.push([approved, id]));

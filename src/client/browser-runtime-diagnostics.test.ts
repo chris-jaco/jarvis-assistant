@@ -51,6 +51,12 @@ test('draft precondition diagnostics expose only closed enums and no draft conte
  diagnostic.event({stage:'DRAFT_PRECONDITION',taskId,admissionId,outcome:'REJECTED',draftRejectReason:'PRIVATE_SENTINEL',text:'PRIVATE_SENTINEL'});
  assert.equal(rows.length,7);assert.ok(!JSON.stringify(rows).includes('PRIVATE_SENTINEL'));
 });
+test('deterministic draft workflow diagnostics expose phases and booleans but reject content and authority identifiers',()=>{
+ const {rows,diagnostic}=trace(),taskId=uuid(),admissionId=uuid();
+ for(const [stage,draftPhase] of [['CONTENT_CONFIRMATION_REQUIRED','CONTENT_PENDING_CONFIRMATION'],['CONTENT_AUTHORIZED','CONTENT_AUTHORIZED'],['DRAFT_FROZEN','DRAFT_FROZEN'],['WRITE_CONFIRMATION_REQUESTED','WRITE_CONFIRMATION_PENDING'],['WRITE_CONFIRMATION_ACCEPTED','WRITE_AUTHORIZED'],['WRITE_EXECUTION_STARTED','WRITE_EXECUTING'],['DRAFT_WRITTEN','DRAFT_WRITTEN'],['WRITE_BLOCKED','FAILED'],['TOOL_PROGRESS_STALLED','FAILED']] as const)diagnostic.event({stage,taskId,admissionId,draftPhase,...(stage==='TOOL_PROGRESS_STALLED'?{producedMessage:true,producedFunctionCall:false}:{})});
+ assert.equal(rows.length,9);for(const field of ['text','recipient','intentId','confirmationId','capability','token','dom'])diagnostic.event({stage:'DRAFT_FROZEN',taskId,admissionId,draftPhase:'DRAFT_FROZEN',[field]:'PRIVATE_SENTINEL'});
+ assert.equal(rows.length,9);assert.ok(!JSON.stringify(rows).includes('PRIVATE_SENTINEL'));
+});
 test('tool session DELETE carries a closed reason only while diagnostics remain opt-in',async()=>{
  const originalFetch=globalThis.fetch,originalDebug=console.debug;const rows:BrowserTaskTrace[]=[],reasons:string[]=[];
  console.debug=(prefix,...args)=>{if(prefix==='[ATLAS browser task]')rows.push(JSON.parse(String(args[0])));};
@@ -99,4 +105,12 @@ test('response request/created/output/done diagnostics contain booleans and opaq
  assert.ok(rows.some(r=>r.stage==='RESPONSE_REQUESTED'&&r.source==='SDK_OUTPUT'&&r.tokens?.includes(token)));assert.ok(rows.some(r=>r.stage==='RESPONSE_CREATED'&&r.responseId==='resp_safe'));
  const done=rows.find(r=>r.stage==='RESPONSE_DONE');assert.equal(done?.status,'completed');assert.equal(done?.producedMessage,true);assert.equal(done?.producedFunctionCall,true);assert.ok(done?.tokens?.includes(token));assert.ok(!JSON.stringify(rows).includes('PRIVATE_SENTINEL'));
  }finally{bridge.close();globalThis.fetch=originalFetch;console.debug=originalDebug;}
+});
+test('draft workflow allows one silent progress recovery then stalls structurally without repeating a tool',async()=>{
+ const originalFetch=globalThis.fetch;let stalls=0;const notifications:string[]=[];const taskId=uuid();
+ globalThis.fetch=async(path,init)=>{const route=String(path);if(route.endsWith('/session')&&init?.method!=='DELETE')return Response.json({browserTrace:true,browserTaskLifecycle:true,tools:[{id:'browser.status',description:'Fixture',inputSchema:{}}],timezone:'Europe/Madrid',now:new Date().toISOString()});if(route.endsWith('/invoke'))return Response.json({status:'success',data:{},browserExecutionState:'RUNNING'});if(route.endsWith('/activity'))return Response.json({activity:[],pending:null,browser:{taskId,workflow:null,ready:null,executionState:stalls?'FAILED':'RUNNING',taskActive:true,revision:stalls?2:1,draftGoal:'WRITE_DRAFT_TO_COMPOSER',draftPhase:stalls?'FAILED':'CONTENT_REQUIRED',manualSelection:null}});if(route.endsWith('/browser-stall')){stalls++;return Response.json({stalled:true});}if(route.endsWith('/browser-continuation'))return Response.json({acknowledged:true});if(route.endsWith('/session')&&init?.method==='DELETE')return Response.json({closed:true});throw new Error(`unexpected ${route}`);};
+ const bridge=new VoiceToolBridge(()=>{},message=>notifications.push(message));try{const config=await bridge.initialize();await config.tools[0]!.invoke(new RunContext(),JSON.stringify({inputJson:'{}'}));
+  const verbal=async(id:string)=>{await bridge.transportEvent({type:'response.created',response:{id}});await bridge.transportEvent({type:'response.output_item.added',response_id:id,item:{type:'message'}});await bridge.transportEvent({type:'response.done',response:{id,status:'completed',output:[{type:'message'}]}});};
+  await verbal('resp_stall_1');assert.equal(notifications.length,1);assert.equal(stalls,0);await verbal('resp_stall_2');await new Promise(resolve=>setImmediate(resolve));assert.equal(stalls,1);await verbal('resp_stall_3');await new Promise(resolve=>setImmediate(resolve));assert.equal(stalls,1);
+ }finally{bridge.close();globalThis.fetch=originalFetch;}
 });

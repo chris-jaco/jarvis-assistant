@@ -6,7 +6,7 @@ export class ConfirmationDialog {
   private submitting?: string;
   private expiry?: ReturnType<typeof setTimeout>;
   private restore?: HTMLElement;
-  constructor(private readonly dialog: HTMLDialogElement, private readonly summary: HTMLElement, private readonly status: HTMLElement, private approve: HTMLButtonElement, private reject: HTMLButtonElement, private readonly decide: (approved: boolean, id: string) => void) {
+  constructor(private readonly dialog: HTMLDialogElement, private readonly summary: HTMLElement, private readonly status: HTMLElement, private readonly editor:HTMLTextAreaElement, private approve: HTMLButtonElement, private reject: HTMLButtonElement, private readonly decide: (approved: boolean, id: string,editedContent?:string) => void) {
     approve.addEventListener('click', this.confirm); reject.addEventListener('click', this.cancel);
     dialog.addEventListener('cancel', this.escape);
   }
@@ -17,7 +17,7 @@ export class ConfirmationDialog {
     const pending = this.pending;
     if (!pending || this.submitting || pending.expiresAt <= Date.now()) return;
     this.submitting = pending.confirmationId; this.approve.disabled = this.reject.disabled = true;
-    this.status.textContent = 'Esperando el resultado…'; this.decide(approved, pending.confirmationId);
+    this.status.textContent = 'Esperando el resultado…'; this.decide(approved, pending.confirmationId,approved&&pending.review?this.editor.value:undefined);
   }
   private freshControls(): void {
     // A button belonging to an old dialog must not approve a later action, even
@@ -33,15 +33,16 @@ export class ConfirmationDialog {
     if (!pending) {
       this.pending = null; this.submitting = undefined; this.approve.disabled = this.reject.disabled = true;
       if (this.dialog.open) { this.dialog.close(); if (this.restore?.isConnected) this.restore.focus(); }
-      this.summary.textContent = this.status.textContent = ''; return;
+      this.summary.textContent = this.status.textContent = '';this.editor.value='';this.editor.hidden=true; return;
     }
     const changed = this.pending?.confirmationId !== pending.confirmationId;
     if (changed) { this.submitting = undefined; this.freshControls(); }
-    this.pending = { confirmationId: pending.confirmationId, summary: pending.summary, expiresAt: pending.expiresAt };
+    this.pending = structuredClone(pending);
     this.summary.textContent = pending.summary; // Frozen backend summary, text only.
+    this.editor.hidden=!pending.review;if(pending.review){this.editor.value=pending.review.content;this.editor.maxLength=pending.review.maxLength;this.editor.setAttribute('aria-label',pending.review.label);}
     const disabled = Boolean(this.submitting) || pending.expiresAt <= Date.now();
     this.approve.disabled = this.reject.disabled = disabled;
-    this.status.textContent = this.submitting ? 'Esperando el resultado…' : disabled ? 'Esta confirmación caducó.' : 'Podés responder por voz o elegir aquí.';
+    this.status.textContent = this.submitting ? 'Esperando el resultado…' : disabled ? 'Esta confirmación caducó.' : pending.review ? 'Revisá el texto y elegí confirmar o cancelar aquí.' : 'Podés responder por voz o elegir aquí.';
     if (!this.dialog.open) {
       this.restore = this.dialog.ownerDocument.activeElement as HTMLElement | undefined;
       this.dialog.showModal(); this.reject.focus();

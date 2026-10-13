@@ -1455,6 +1455,13 @@ bloqueados. No se cambiaron permisos MV3.
 
 ### V0.5.3.6B.2 — escritura controlada del borrador (sin envío)
 
+Para `WRITE_DRAFT_TO_COMPOSER`, `browser.prepareDraft` crea primero una revisión
+visual editable del contenido candidato. El texto se muestra literalmente en un
+`textarea` (nunca como HTML) y no se registra en diagnósticos. La aprobación visual
+congela exactamente la edición aprobada y el backend encadena, sin otra decisión
+libre del modelo, una confirmación WRITE separada. Rechazar, dejar caducar o cambiar
+task, admission, selección, documento, scope o epoch impide esa transición.
+
 `browser.writeDraft` acepta únicamente el `intentId` de un borrador congelado y
 requiere una confirmación independiente. El backend genera una capability efímera
 de un solo uso, la reserva en el journal antes del efecto y revalida task,
@@ -1473,3 +1480,6 @@ La admisión distingue conservadoramente `PREPARE_PRIVATE_DRAFT` de
 la selección manual, la continuación conserva ese objetivo: el primer caso termina
 en RAM; el segundo prepara el borrador y solicita la confirmación de escritura. El
 guard de cierre mantiene activa la tarea de escritura hasta obtener `DRAFT_WRITTEN`.
+Una respuesta verbal sin tool obtiene como máximo una recuperación interna; una
+segunda ausencia de progreso termina de forma explícita y emite sólo el diagnóstico
+sanitizado `TOOL_PROGRESS_STALLED` cuando `BROWSER_TRACE=true`.
