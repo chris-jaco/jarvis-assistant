@@ -1467,3 +1467,9 @@ respuesta posterior al posible efecto queda `UNKNOWN` y nunca se reintenta.
 Esto no habilita envíos: `browser.sendMessage` no está registrado,
 `sendSelectedMessage` continúa rechazado y Enter/click genéricos no pueden activar
 Send. `USER_SELECTED` sigue siendo una atestación humana, no identidad verificada.
+
+La admisión distingue conservadoramente `PREPARE_PRIVATE_DRAFT` de
+`WRITE_DRAFT_TO_COMPOSER` usando únicamente el turno confiable del usuario. Tras
+la selección manual, la continuación conserva ese objetivo: el primer caso termina
+en RAM; el segundo prepara el borrador y solicita la confirmación de escritura. El
+guard de cierre mantiene activa la tarea de escritura hasta obtener `DRAFT_WRITTEN`.

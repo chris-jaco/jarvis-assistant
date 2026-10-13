@@ -6,7 +6,7 @@ import { actionOutcomeSchema, outcomeInstruction } from '../browser/action-outco
 import { browserExecutionStateSchema } from '../browser/execution-state.js';
 import { z } from 'zod';
 import { uuid, replySchema } from '../browser/attached/protocol.js';
-const stateSchema = z.object({ taskId:uuid.optional(), continuation:continuationReceiptSchema.optional(), workflow: replySchema.nullable(), ready: uuid.nullable(), executionState: browserExecutionStateSchema.optional(), accessRevoked:z.boolean().optional(), actionOutcome:actionOutcomeSchema.nullable().optional(),accessCorrelation:uuid.nullable().optional(),revision:z.number().int().positive().optional(),taskActive:z.boolean().optional(), contextRecovery:z.object({status:z.enum(['READY','REQUIRED','RECOVERING','INCONCLUSIVE']),attempts:z.number().int().min(0).max(2),ready:uuid.nullable()}).strict().nullable().optional(),manualSelection:z.object({status:z.enum(['PENDING','SELECTED','CANCELLED','EXPIRED','INVALIDATED']),requestId:uuid}).strict().nullable().optional() }).strict();
+const stateSchema = z.object({ taskId:uuid.optional(), continuation:continuationReceiptSchema.optional(), workflow: replySchema.nullable(), ready: uuid.nullable(), executionState: browserExecutionStateSchema.optional(), accessRevoked:z.boolean().optional(), actionOutcome:actionOutcomeSchema.nullable().optional(),accessCorrelation:uuid.nullable().optional(),revision:z.number().int().positive().optional(),taskActive:z.boolean().optional(),draftGoal:z.enum(['PREPARE_PRIVATE_DRAFT','WRITE_DRAFT_TO_COMPOSER']).optional(), contextRecovery:z.object({status:z.enum(['READY','REQUIRED','RECOVERING','INCONCLUSIVE']),attempts:z.number().int().min(0).max(2),ready:uuid.nullable()}).strict().nullable().optional(),manualSelection:z.object({status:z.enum(['PENDING','SELECTED','CANCELLED','EXPIRED','INVALIDATED']),requestId:uuid}).strict().nullable().optional() }).strict();
 export class BrowserContinuation {
   private revision=0;
   private taskId?:string;
@@ -41,7 +41,9 @@ export class BrowserContinuation {
     try {
     const manual=this.latest?.manualSelection?.status;
     const manualInstruction=manual==='SELECTED'
-      ? ' La persona confirmó manualmente la conversación visible. Es evidencia USER_SELECTED, no identidad verificada. Continuá únicamente con el borrador privado; no escribas ni envíes en la página.'
+      ? this.latest?.draftGoal==='WRITE_DRAFT_TO_COMPOSER'
+        ? ' La persona confirmó manualmente la conversación visible. Es evidencia USER_SELECTED, no identidad verificada. La intención original exige dejar el borrador escrito: primero creá el borrador privado con el texto exacto del usuario y luego llamá browser.writeDraft con sólo su intentId para solicitar la confirmación independiente. No llames browser.endTask antes de resolver esa confirmación. Nunca envíes.'
+        : ' La persona confirmó manualmente la conversación visible. Es evidencia USER_SELECTED, no identidad verificada. Continuá únicamente con el borrador privado; no escribas ni envíes en la página.'
       : manual&&manual!=='PENDING'
         ? ` La selección manual terminó como ${manual}. No la reintentes ni prepares un borrador con esa selección; cerrá la tarea de forma segura.`
         : '';

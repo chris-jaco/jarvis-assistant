@@ -232,6 +232,15 @@ test('manual resolution continuation is silent, single-use and distinguishes sel
  assert.ok(rows.filter(row=>row.stage==='CONTINUATION'&&row.tokenId===ready).every(row=>row.tokenReason==='MANUAL_SELECTION_READY'));
 });
 
+test('manual continuation preserves private-only versus write-to-composer intent without exposing draft text',()=>{
+ for(const [draftGoal,expected,forbidden] of [['PREPARE_PRIVATE_DRAFT',/únicamente con el borrador privado/,/browser\.writeDraft/],['WRITE_DRAFT_TO_COMPOSER',/browser\.writeDraft/,/PRIVATE_SENTINEL/]] as const){
+  const taskId=randomUUID(),requestId=randomUUID(),ready=randomUUID(),messages:string[]=[];
+  const continuation=new BrowserContinuation(async()=>({}),message=>messages.push(message));
+  continuation.update({taskId,workflow:null,ready,continuation:{taskId,tokens:[ready]},executionState:'RUNNING',draftGoal,manualSelection:{status:'SELECTED',requestId}},false);
+  assert.equal(messages.length,1);assert.match(messages[0]!,expected);assert.doesNotMatch(messages[0]!,forbidden);assert.match(messages[0]!,/USER_SELECTED, no identidad verificada/);
+ }
+});
+
 test('WAITING_MANUAL resumes once with USER_SELECTED and a frozen draft survives task close without send authority',async()=>{
  const session=randomUUID(),connection=randomUUID(),epoch=randomUUID(),scopeId=randomUUID(),tabId=randomUUID(),documentId=randomUUID(),admissionId=randomUUID(),requestId=randomUUID(),selectionId=randomUUID(),ref=randomUUID();
  const tab={id:tabId,scopeId,title:'WhatsApp Web',url:'https://web.whatsapp.com/',active:true,expiresAt:Date.now()+120_000,state:'ACTIVE' as const};let listener:((connection:string,event:any)=>void)|undefined,selected=false,actions=0;const operations:string[]=[];

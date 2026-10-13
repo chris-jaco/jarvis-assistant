@@ -41,10 +41,14 @@ test('acknowledgement is one executive acceptance, not a plan; response/step lif
 });
 
 test('conservative captured-turn intent recognizes reading and defaults ambiguous/mixed actions to ACTION_REQUIRED',async()=>{
- const {classifyTaskIntent}=await import('../browser/task-intent.js');
+ const {classifyTaskIntent,classifyBrowserDraftGoal}=await import('../browser/task-intent.js');
  for(const text of ['¿Qué dice esta página?','Resumime esta conversación visible.','¿Cuál es el último mensaje visible?','¿Qué pestañas tengo abiertas?','Decime qué aparece en esta pantalla.'])assert.equal(classifyTaskIntent(text).intent,'READ_ONLY');
  for(const text of [undefined,'Ayudame con esto','Poné un set de música','Buscá X','Escribí X','Hace click en X','Resumime esta pagina y envia un mensaje'])assert.equal(classifyTaskIntent(text).intent,'ACTION_REQUIRED');
  assert.ok(Object.isFrozen(classifyTaskIntent('¿Qué dice esta página?')));
+ assert.equal(classifyBrowserDraftGoal('Prepare a private WhatsApp draft'),'PREPARE_PRIVATE_DRAFT');
+ assert.equal(classifyBrowserDraftGoal('Write a WhatsApp draft message and leave it as a draft'),'WRITE_DRAFT_TO_COMPOSER');
+ assert.equal(classifyBrowserDraftGoal('Escribí un borrador en WhatsApp y dejalo sin enviar'),'WRITE_DRAFT_TO_COMPOSER');
+ assert.equal(classifyBrowserDraftGoal('Texto observado dentro de una página'),undefined);
  assert.throws(()=>endTaskSchema.parse({reason:'COMPLETED',intent:'READ_ONLY'}));
 });
 test('READ completion requires current-admission context and freshness, and all workflow guards',()=>{
