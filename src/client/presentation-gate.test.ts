@@ -66,8 +66,9 @@ test('SDK internal response metadata separates notification from automatic user 
  const transport=Object.create(OpenAIRealtimeWebRTC.prototype) as InstanceType<typeof OpenAIRealtimeWebRTC>;transport.sendEvent=(event:any)=>{events.push(event);};
  // Exercise the SDK base serializer; live WebRTC owns its connected sequencer.
  transport.requestResponse=Object.getPrototypeOf(OpenAIRealtimeWebRTC.prototype).requestResponse;
- transport.sendMessage('internal fixture',{event_id:'atlas_internal_1_fixture',item:{id:'internal-item',type:'message',role:'user',content:[{type:'input_text',text:'internal fixture'}]}},{triggerResponse:false});transport.requestResponse({metadata:{atlas_presentation_source:'INTERNAL_BROWSER_CONTINUATION'}});
+ transport.sendMessage('internal fixture',{},{triggerResponse:false});transport.requestResponse({metadata:{atlas_presentation_source:'INTERNAL_BROWSER_CONTINUATION'}});
  assert.deepEqual(events.map(event=>event.type),['conversation.item.create','response.create']);assert.equal(events[1].response.metadata.atlas_presentation_source,'INTERNAL_BROWSER_CONTINUATION');
- assert.equal(events[0].event_id,'atlas_internal_1_fixture');assert.deepEqual(events[0].item,{id:'internal-item',type:'message',role:'user',content:[{type:'input_text',text:'internal fixture'}]});
+ assert.deepEqual(events[0].item,{type:'message',role:'user',content:[{type:'input_text',text:'internal fixture'}]});assert.equal('event_id' in events[0],false);assert.equal('id' in events[0].item,false);
  const {gate,mutes}=fixture();gate.update('RUNNING');gate.turn();gate.response('internal',events[1].response.metadata.atlas_presentation_source==='INTERNAL_BROWSER_CONTINUATION');gate.item('internal','hidden');gate.playback('internal');assert.equal(mutes.at(-1),true);gate.tool('internal');gate.response('user');gate.item('user','answer');gate.playback('user');assert.equal(mutes.at(-1),false);
 });
+test('canonical internal user item is hidden after the server assigns its id and reconnect cleanup removes pending state',()=>{const {gate}=fixture();gate.expectInternal();gate.createdUserItem('server-item',true);assert.equal(gate.userVisible('server-item'),false);assert.equal(gate.userVisible('voice-item'),true);gate.expectInternal();gate.close();gate.createdUserItem('later-item',true);assert.equal(gate.userVisible('later-item'),true);});

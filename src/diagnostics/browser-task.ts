@@ -18,19 +18,13 @@ function realtimeErrorCandidate(error:unknown):RealtimeErrorCandidate|undefined 
   }catch{return;}
 }
 export class RealtimeErrorCorrelation {
-  private readonly itemEvents=new Set<string>();
   constructor(private readonly generation:number) {}
-  conversationItemEventId():string {
-    const id=`atlas_internal_${this.generation}_${crypto.randomUUID()}`;
-    this.itemEvents.add(id);while(this.itemEvents.size>64)this.itemEvents.delete(this.itemEvents.values().next().value!);return id;
-  }
   facts(error:unknown):ReturnType<typeof realtimeErrorFacts> {
-    const candidate=realtimeErrorCandidate(error),linked=typeof candidate?.event_id==='string'?candidate.event_id:'';
-    const errorEventKind=this.itemEvents.has(linked)?'CONVERSATION_ITEM_CREATE':/^agents_js_response_create_[1-9]\d*$/.test(linked)?'RESPONSE_CREATE':'UNKNOWN';
-    if(errorEventKind==='CONVERSATION_ITEM_CREATE')this.itemEvents.delete(linked);
+    const candidate=realtimeErrorCandidate(error),linked=typeof candidate?.event_id==='string'?candidate.event_id:'',param=typeof candidate?.param==='string'?candidate.param:'';
+    const errorEventKind=/^item(?:\.|$)/.test(param)?'CONVERSATION_ITEM_CREATE':/^agents_js_response_create_[1-9]\d*$/.test(linked)||/^response(?:\.|$)/.test(param)?'RESPONSE_CREATE':'UNKNOWN';
     return realtimeErrorFacts(error,errorEventKind);
   }
-  clear():void {this.itemEvents.clear();}
+  clear():void {void this.generation;}
 }
 export function realtimeErrorFacts(error:unknown,errorEventKind:z.infer<typeof errorEventKindSchema>='UNKNOWN'):{errorType?:z.infer<typeof errorTypeSchema>;errorCode:z.infer<typeof errorCodeSchema>;errorEventKind:z.infer<typeof errorEventKindSchema>;errorParam:z.infer<typeof errorParamSchema>} {
   const candidate=realtimeErrorCandidate(error),type=errorTypeSchema.safeParse(candidate?.name??candidate?.type),code=errorCodeSchema.safeParse(candidate?.code),param=errorParamSchema.safeParse(candidate?.param);

@@ -20,6 +20,7 @@ export class PresentationGate {
   private responses = new Map<string, ResponseAdmission>();
   private items = new Map<string, { allowed: boolean }>();
   private internalItems = new Set<string>();
+  private pendingInternalItems = 0;
   constructor(private readonly muteOutput: (muted: boolean) => void,private readonly diagnostics=new BrowserTaskDiagnostics(),private readonly playbackInfo:()=>{visibility?:'visible'|'hidden'|'prerender';paused?:boolean;ended?:boolean}=()=>({})) { this.setMute(true,'INITIAL'); }
   private trace(raw:Partial<BrowserTaskTrace>):void {if(!this.diagnostics.enabled)return;let info={};try{info=this.playbackInfo();}catch{/* Instrumentation cannot interfere with playback. */}this.diagnostics.event({...raw,taskState:this.state,...info});}
   private setMute(muted:boolean,muteReason:BrowserTaskTrace['muteReason'],id=this.active):void {this.muteOutput(muted);this.trace({stage:'PRESENTATION',muted,muteReason,...(id&&/^resp_[A-Za-z0-9_-]{1,100}$/.test(id)?{responseId:id}:{})});}
@@ -28,6 +29,8 @@ export class PresentationGate {
     this.internalItems.add(id);
     while (this.internalItems.size > 1000) this.internalItems.delete(this.internalItems.values().next().value!);
   }
+  expectInternal(): void { this.pendingInternalItems++; }
+  createdUserItem(id:string,inputText:boolean):void {if(inputText&&this.pendingInternalItems>0){this.pendingInternalItems--;this.internal(id);}}
   userVisible(id: string): boolean { return !this.internalItems.has(id); }
   turn(confirmationActive = false): void {
     if (confirmationActive || ['WAITING_ACCESS','WAITING_MANUAL'].includes(this.state ?? '')) return;
@@ -83,5 +86,5 @@ export class PresentationGate {
     // execution starts independently of acknowledgement playback/completion.
     return false;
   }
-  close(): void { this.responses.clear(); this.items.clear(); this.internalItems.clear(); this.state = undefined; this.active = undefined; this.playing=undefined;this.userPermit=false; this.setMute(true,'CLOSE'); }
+  close(): void { this.responses.clear(); this.items.clear(); this.internalItems.clear(); this.pendingInternalItems=0;this.state = undefined; this.active = undefined; this.playing=undefined;this.userPermit=false; this.setMute(true,'CLOSE'); }
 }

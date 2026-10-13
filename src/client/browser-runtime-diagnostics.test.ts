@@ -18,15 +18,14 @@ test('Realtime error diagnostics accept only allowlisted facts and are disabled 
  diagnostic.enabled=false;diagnostic.event({stage:'TOOLS_SESSION_DELETE',closeReason:'REALTIME_ERROR'});assert.equal(rows.length,1);
  assert.ok(!JSON.stringify(rows).includes(privateMessage));
 });
-test('Realtime error correlation classifies only current opaque events and never exposes identifiers or payloads',()=>{
- const privateValue='PRIVATE_SENTINEL',first=new RealtimeErrorCorrelation(4),second=new RealtimeErrorCorrelation(5),itemEvent=first.conversationItemEventId();
+test('Realtime error correlation uses only allowlisted protocol facts and never exposes identifiers or payloads',()=>{
+ const privateValue='PRIVATE_SENTINEL',first=new RealtimeErrorCorrelation(4),second=new RealtimeErrorCorrelation(5);
  const wrap=(event_id:string,param:unknown='item.id')=>({type:'error',error:{type:'error',error:{type:'invalid_request_error',code:'invalid_value',event_id,param,message:privateValue,payload:privateValue}}});
- const item=first.facts(wrap(itemEvent));assert.deepEqual(item,{errorType:'invalid_request_error',errorCode:'invalid_value',errorEventKind:'CONVERSATION_ITEM_CREATE',errorParam:'item.id'});
+ const item=first.facts(wrap('unrelated'));assert.deepEqual(item,{errorType:'invalid_request_error',errorCode:'invalid_value',errorEventKind:'CONVERSATION_ITEM_CREATE',errorParam:'item.id'});
  const response=first.facts(wrap('agents_js_response_create_7','response.metadata'));assert.deepEqual(response,{errorType:'invalid_request_error',errorCode:'invalid_value',errorEventKind:'RESPONSE_CREATE',errorParam:'response.metadata'});
  assert.equal(first.facts(wrap('unrelated',privateValue)).errorEventKind,'UNKNOWN');assert.equal(first.facts(wrap('unrelated',privateValue)).errorParam,'UNKNOWN');
- assert.equal(second.facts(wrap(itemEvent)).errorEventKind,'UNKNOWN','another connection generation cannot claim the item event');
- const cleared=first.conversationItemEventId();first.clear();assert.equal(first.facts(wrap(cleared)).errorEventKind,'UNKNOWN');
- assert.ok(!JSON.stringify([item,response]).includes(itemEvent));assert.ok(!JSON.stringify([item,response]).includes(privateValue));
+ first.clear();assert.equal(second.facts(wrap('unrelated','type')).errorEventKind,'UNKNOWN');
+ assert.ok(!JSON.stringify([item,response]).includes(privateValue));
 });
 test('manual diagnostic schema admits a known waiting reason and rejects private payloads',()=>{
  const {rows,diagnostic}=trace(),taskId=uuid(),manualRequestId=uuid();
