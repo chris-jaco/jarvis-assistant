@@ -1,5 +1,6 @@
 import { conversationEvidenceSchema } from '../consequential/conversation-evidence.js';
 import { manualSelectionSchema } from '../consequential/manual-selection.js';
+import { effectCapabilitySchema } from '../consequential/contracts.js';
 import { semanticContextSchema } from '../consequential/semantic.js';
 import { observeTraceSchema } from '../../diagnostics/browser-observe.js';
 import { popupTraceSchema } from '../../diagnostics/popup.js';
@@ -27,6 +28,7 @@ export const argumentSchemas = {
   scroll: binding.extend({ direction: z.enum(['up', 'down']) }).strict(), back: binding, forward: binding, reload: binding,
   media: refBinding.extend({ action: z.enum(['play', 'pause']) }).strict(), activate: binding,
   sendSelectedMessage: binding.extend({documentId:uuid,selectionId:uuid,text:z.string().min(1).max(2000)}).strict(),
+  writeSelectedDraft: binding.extend({documentId:uuid,capability:effectCapabilitySchema,text:z.string().min(1).max(2000)}).strict(),
   endSession: empty, endTask: empty
 } as const;
 export type Operation = keyof typeof argumentSchemas;
@@ -47,8 +49,9 @@ export interface InteractionResult { actionOutcome?: import('../action-outcome.j
 const status = z.object({ available: z.boolean(), connected: z.boolean(), visible: z.literal(true), connections: z.array(uuid).max(10) }).strict();
 const ack = z.object({ completed: z.literal(true), paused: z.boolean().optional() }).strict();
 const sendReply=z.object({sendState:z.enum(['NOT_SENT','DISPATCHED_UNVERIFIED']),draftVisible:z.boolean()}).strict();
+const draftWriteReply=z.object({draftState:z.literal('WRITTEN_VERIFIED')}).strict();
 export const replySchema = z.discriminatedUnion('outcome', [
-  z.object({ outcome: z.literal('OK'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), data: z.union([status, tabSchema, z.array(tabSchema).max(20), observationSchema, ack,sendReply]) }).strict(),
+  z.object({ outcome: z.literal('OK'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), data: z.union([status, tabSchema, z.array(tabSchema).max(20), observationSchema, ack,sendReply,draftWriteReply]) }).strict(),
   z.object({ outcome: z.literal('ACCESS_PENDING'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), accessRequestId: uuid, expiresAt: z.number().int().positive(), origin: z.string().url().max(300).optional() }).strict(),
   z.object({ outcome: z.literal('REQUIRES_USER_INTERACTION'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), handoffId: uuid, reason: reasons }).strict(),
   z.object({ outcome: z.literal('ERROR'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), code: errors, conflict: conflictSchema.optional() }).strict().refine(reply => !reply.conflict || reply.code === 'STALE_REF')

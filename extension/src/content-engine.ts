@@ -9,6 +9,7 @@ import type { SearchControl } from './search-controls.js';
 import type { MediaControl } from './media-state.js';
 import type { BrowserCapability, FunctionalKind } from '../../src/browser/provider.js';
 import type { ManualSelection } from '../../src/browser/consequential/manual-selection.js';
+import { effectCapabilitySchema } from '../../src/browser/consequential/contracts.js';
 interface Access { scopeId: string; tabId: string; session: string; epoch: string; origin: string; expiresAt: number }
 interface Entry { node: HTMLElement; documentId: string; snapshotId: string; action: string; href?: string; fingerprint: string; form: HTMLFormElement | null; modal?: HTMLElement; search?: SearchControl; media?: MediaControl }
 interface SelectedConversation { evidence:ManualSelection;panel:HTMLElement;header:HTMLElement;composer:HTMLElement;observer:MutationObserver;changed:boolean }
@@ -122,6 +123,20 @@ export class ContentEngine {
       // V0.5.3.6A is READ-only for WhatsApp. No backend configuration or
       // protocol message can enable composer writes in this extension build.
       if (operation === 'sendSelectedMessage') return { outcome: 'ERROR', code: 'REJECTED' };
+      if(operation==='writeSelectedDraft'){
+        const capability=effectCapabilitySchema.parse(args.capability),selected=this.selection,evidence=this.selected(access);
+        if(!selected||!evidence||capability.phase!=='WRITE_DRAFT'||capability.assurance!=='USER_SELECTED'||capability.expiresAt<=this.now()||capability.backendSessionId!==access.session||capability.connectionEpoch!==access.epoch||capability.scopeId!==access.scopeId||capability.tabId!==access.tabId||capability.documentId!==this.documentId||capability.manualRequestId!==evidence.manualRequestId||capability.selectionId!==evidence.selectionId||capability.taskId!==evidence.taskId||capability.admissionId!==evidence.admissionId||args.documentId!==this.documentId)throw new Error('ACCESS_DENIED');
+        const text=String(args.text),bytes=new TextEncoder().encode(text),hash=[...new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))].map(x=>x.toString(16).padStart(2,'0')).join('');
+        if(hash!==capability.contentDigest)throw new Error('REJECTED');
+        const composer=selected.composer;if(!composer.isContentEditable||!this.visible(composer)||composer.matches('[aria-disabled="true"],[aria-readonly="true"]'))throw new Error('REJECTED');
+        selected.observer.disconnect();dispatched=true;
+        composer.focus();const range=this.win.document.createRange();range.selectNodeContents(composer);const selection=this.win.getSelection();selection?.removeAllRanges();selection?.addRange(range);
+        const inserted=this.win.document.execCommand?.('insertText',false,text)??false;if(!inserted)composer.textContent=text;
+        composer.dispatchEvent(new this.win.InputEvent('input',{bubbles:true,inputType:'insertText',data:text}));
+        if(composer.textContent!==text)return {outcome:'ERROR',code:'EXECUTION_UNKNOWN'};
+        selected.changed=false;selected.observer.observe(selected.header,{attributes:true,childList:true,subtree:true,characterData:true});selected.observer.observe(composer,{childList:true,subtree:true,characterData:true});
+        return {outcome:'OK',data:{draftState:'WRITTEN_VERIFIED'}};
+      }
       const challenge = this.challenge(); if (challenge) { this.refs.clear(); return { outcome: 'REQUIRES_USER_INTERACTION', handoffId: this.id(), reason: challenge }; }
       if (operation === 'observe') { const started = this.now(); const data = await this.observe(access, deadlineAt); return { outcome: 'OK', data, timings: { observationBuildMs: Math.min(30_000, Math.max(0, this.now() - started)) } }; }
       if (operation === 'scroll') { dispatched = true; this.win.scrollBy(0, args.direction === 'down' ? 600 : -600); this.refs.clear(); return { outcome: 'OK', data: { completed: true } }; }

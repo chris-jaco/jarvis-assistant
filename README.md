@@ -1452,3 +1452,18 @@ después de cerrar la preparación y revocar el grant operativo. No concede auto
 sobre WhatsApp. `browser.sendMessage` no está registrado, `sendSelectedMessage`
 falla cerrado en backend/extensión, y type/Enter/click sobre compositor/Send siguen
 bloqueados. No se cambiaron permisos MV3.
+
+### V0.5.3.6B.2 — escritura controlada del borrador (sin envío)
+
+`browser.writeDraft` acepta únicamente el `intentId` de un borrador congelado y
+requiere una confirmación independiente. El backend genera una capability efímera
+de un solo uso, la reserva en el journal antes del efecto y revalida task,
+admission, epoch, origin, scope, tab, document, selección manual, TTL y digest. La
+extensión vuelve a validar esos bindings y escribe solamente el texto congelado en
+el compositor seleccionado, sin eventos de teclado, submit ni click. El resultado
+es `DRAFT_WRITTEN` sólo tras comprobar localmente el texto exacto; una pérdida de
+respuesta posterior al posible efecto queda `UNKNOWN` y nunca se reintenta.
+
+Esto no habilita envíos: `browser.sendMessage` no está registrado,
+`sendSelectedMessage` continúa rechazado y Enter/click genéricos no pueden activar
+Send. `USER_SELECTED` sigue siendo una atestación humana, no identidad verificada.

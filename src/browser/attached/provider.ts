@@ -1,6 +1,8 @@
 import { assessConversationEvidence } from '../consequential/conversation-evidence.js';
 import { ConsequentialFoundation } from '../consequential/foundation.js';
 import { PrivateExecutionJournal } from '../consequential/journal.js';
+import { ConsequentialEffectAuthority } from '../consequential/effect-capability.js';
+import type { EffectCapability,FrozenIntent } from '../consequential/contracts.js';
 import { draftContextSchema } from '../consequential/semantic.js';
 import type { DraftContext } from '../consequential/semantic.js';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -25,6 +27,7 @@ import type { BrowserTransport } from './transport.js';
 const contextReadReasons: readonly string[] = ['UPSTREAM','TIMEOUT','OBSERVATION_REQUIRED','SNAPSHOT_EXPIRED','DOCUMENT_CHANGED','ELEMENT_CHANGED','SNAPSHOT_CONSUMED'];
 interface ContextRecovery { status: 'READY' | 'REQUIRED' | 'RECOVERING' | 'INCONCLUSIVE'; attempts: number; ready: string | null }
 type ManualResolution='SELECTED'|'CANCELLED'|'EXPIRED'|'INVALIDATED';
+interface Session { effects?:ConsequentialEffectAuthority; writeIntents?:Map<string,FrozenIntent>; writeCapabilities?:Map<string,EffectCapability>; writeConfirmations?:Map<string,string> }
 interface Session { consequentialUnverified?:boolean; consequentialUnknown?:boolean; userAccessRejected?:boolean; requestedIdentifiers?:string[]; drafts?:ConsequentialFoundation; privateDraft?:{intentId:string;admissionId:string;expiresAt:number}; manualWait?:{requestId:string;admissionId:string;scopeId:string;taskId:string;epoch:string;status:'PENDING'|ManualResolution}; observeRequestId?:string; intent?:TaskIntent; readAdmission?:string; inventory?:{admission:string;expires:number}; admission?:string; progress:Map<string,ActionRecord>; acknowledged:Set<string>; rejectionToken?:string; cancelled?:boolean; terminal?:boolean; contextRecovery?: ContextRecovery; accessCorrelation?:string; traceNext?:boolean; actionRecord?: ActionRecord; accessRevoked?: boolean; id: string; task: string; connection?: string; active?: string; tabs: Map<string, AuthorizedTab>; workflow?: Exclude<Reply, { outcome: 'OK' } | { outcome: 'ERROR' }>; ready?: string; observation?: { tabId: string; scopeId: string; documentId: string; snapshotId: string; refs: Set<string>; expires: number }; closed?: boolean; failures: number; uncertain?: boolean; invalidation?: BrowserConflictDetail['reason']; context: 'READY' | 'OBSERVATION_REQUIRED'; pendingStep?: string; pendingRecovery?: {signature:string;scopeId:string}; completed?: { key: string; result: unknown; record:ActionRecord }; knownRefs: Map<string, string>; lastObservation?: AttachedObservation; timings: BrowserTimings; tail: Promise<unknown>; closingTask?:boolean; deadline?: number }
 export class BrowserWorkflow extends Error { constructor(readonly reply: Exclude<Reply, { outcome: 'OK' }>) { super(reply.outcome); } }
 export class AttachedChromeProvider implements BrowserProvider {
@@ -89,14 +92,14 @@ export class AttachedChromeProvider implements BrowserProvider {
   }
   private async call(operation: Operation, args: Record<string, unknown>, signal: AbortSignal): Promise<Reply> {
     const session = this.session();if(session.traceNext&&session.accessCorrelation&&!['status','listAuthorizedTabs'].includes(operation)){session.traceNext=false;this.accessDiagnostics?.event(session.accessCorrelation,'next_task_tool','START');} const deadlineAt = Math.min(Date.now() + 17_000, session.deadline ?? Infinity);
-    if (['click','type','press','media','scroll','navigate','back','forward','reload','sendSelectedMessage'].includes(operation)) this.allowAction(session);
+    if (['click','type','press','media','scroll','navigate','back','forward','reload','sendSelectedMessage','writeSelectedDraft'].includes(operation)) this.allowAction(session);
     const connection = await this.connection(session, signal);
     if (signal.aborted || deadlineAt <= Date.now()) throw new ToolError('TIMEOUT');
     const request = parseRequest({ protocol: 'atlas.browser', version: 1, kind: 'request', requestId: randomUUID(), backendSessionId: session.id, taskId: session.task, connectionEpoch: this.transport.epoch, deadlineAt, operation, args, ...(this.diagnostics?.enabled?{observeTrace:true}:{}) });
     if(operation==='observe'&&this.diagnostics?.enabled)session.observeRequestId=request.requestId;
     let reply: Reply; const transportStarted = performance.now(); let rejectAbort!: (error: Error) => void;
     const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject; });
-    const dispatchedAction = ['click','type','press','media','scroll','navigate','back','forward','reload','sendSelectedMessage'].includes(operation);
+    const dispatchedAction = ['click','type','press','media','scroll','navigate','back','forward','reload','sendSelectedMessage','writeSelectedDraft'].includes(operation);
     const abortedAfterDispatch = () => { if (dispatchedAction) session.uncertain = true; rejectAbort(new ToolError(dispatchedAction ? 'EXECUTION_UNKNOWN' : 'TIMEOUT')); };
     signal.addEventListener('abort', abortedAfterDispatch, { once: true });
     try { const waiting = this.transport.request(connection, request, signal); if (signal.aborted) abortedAfterDispatch(); reply = replySchema.parse(await Promise.race([waiting, aborted])); }
@@ -219,6 +222,33 @@ export class AttachedChromeProvider implements BrowserProvider {
     if(this.operationalAccess().status!=='READY')return session.drafts.reviewStoredDraft(intentId);
     try{const epoch=this.transport.epoch;const data=await this.observeWithResume(signal);signal.throwIfAborted();if(epoch!==this.transport.epoch)throw new ToolError('REJECTED');return session.drafts.reviewDraft(intentId,this.draftContext(data));}
     catch(error){session.drafts.invalidateDrafts();throw error;}
+  }
+  async prepareWriteDraft(intentId:string,signal:AbortSignal):Promise<{intentId:string;summary:string}> {
+    const session=this.session(),review=await this.reviewDraft(intentId,signal) as {status:string;intent?:FrozenIntent;selectionAssurance?:string};
+    if(review.status!=='FROZEN'||!review.intent||review.selectionAssurance!=='USER_SELECTED')throw new ToolError('REJECTED');
+    session.effects??=new ConsequentialEffectAuthority(this.sendJournal);session.writeIntents??=new Map();session.writeCapabilities??=new Map();session.writeConfirmations??=new Map();
+    if(!session.effects.has(intentId))session.effects.freezeIntent(review.intent);
+    session.effects.requestConfirmation(intentId,'WRITE_DRAFT');session.writeIntents.set(intentId,review.intent);
+    return {intentId,summary:`¿Confirmás escribir el borrador exacto en la conversación seleccionada? Esto no lo envía.\n\n${review.intent.content.text}`};
+  }
+  pendingWriteDraft(intentId:string,confirmationId:string):void {const s=this.session();if(!s.effects?.has(intentId))throw new ToolError('REJECTED');s.writeConfirmations!.set(intentId,confirmationId);}
+  decideWriteDraft(intentId:string,confirmationId:string,approved:boolean):void {
+    const s=this.session(),intent=s.writeIntents?.get(intentId),wait=s.manualWait;
+    if(!intent||!wait||wait.status!=='SELECTED'||s.writeConfirmations?.get(intentId)!==confirmationId)throw new ToolError('REJECTED');
+    s.writeConfirmations.delete(intentId);if(!approved){s.effects!.invalidate(intentId);return;}
+    const capability=s.effects!.authorize(intentId,'WRITE_DRAFT',confirmationId,{manualRequestId:wait.requestId,selectionId:intent.recipient.evidenceId});s.writeCapabilities!.set(intentId,capability);
+  }
+  invalidateWriteDraft(intentId:string):void {const s=this.session();s.writeConfirmations?.delete(intentId);if(s.effects?.has(intentId))s.effects.invalidate(intentId);}
+  async executeWriteDraft(intentId:string,signal:AbortSignal):Promise<unknown> {
+    const s=this.session(),authority=s.effects,capability=s.writeCapabilities?.get(intentId),intent=s.writeIntents?.get(intentId);
+    if(!authority||!capability||!intent)throw new ToolError('REJECTED');
+    const reviewed=await this.reviewDraft(intentId,signal) as {status:string;intent?:FrozenIntent};
+    if(reviewed.status!=='FROZEN'||reviewed.intent?.content.text!==intent.content.text)throw new ToolError('REJECTED');
+    await authority.reserve(capability);authority.begin(capability.executionId);
+    let reply:Reply;try{reply=await this.call('writeSelectedDraft',{scopeId:capability.scopeId,tabId:capability.tabId,documentId:capability.documentId,capability,text:intent.content.text},signal);}
+    catch(error){await authority.finish(capability.executionId,'UNKNOWN');throw new ToolError('EXECUTION_UNKNOWN');}
+    if(reply.outcome==='OK'&&(reply.data as {draftState?:string}).draftState==='WRITTEN_VERIFIED'){await authority.finish(capability.executionId,'SUCCESS');return {status:'DRAFT_WRITTEN',intentId};}
+    await authority.finish(capability.executionId,'UNKNOWN');throw new ToolError('EXECUTION_UNKNOWN');
   }
   async resume(handoffId: string, signal: AbortSignal): Promise<Reply> {
     const session = this.session(); if (session.workflow?.outcome !== 'REQUIRES_USER_INTERACTION' || session.workflow.handoffId !== handoffId) throw new ToolError('REJECTED');

@@ -56,6 +56,7 @@ export class ConsequentialEffectAuthority {
  invalidate(intentId:string):void {const entry=this.entry(intentId);if(['SUCCESS','FAILURE','UNKNOWN','EXPIRED','INVALIDATED'].includes(entry.state))return;entry.state='INVALIDATED';if(entry.capability)this.capabilities.get(entry.capability.nonce)!.state='INVALIDATED';}
  state(intentId:string):EffectState {const entry=this.entry(intentId);if(entry.intent.expiresAt<=this.now()&&!['SUCCESS','FAILURE','UNKNOWN','EXPIRED','INVALIDATED'].includes(entry.state)){entry.state='EXPIRED';if(entry.capability)this.capabilities.get(entry.capability.nonce)!.state='INVALIDATED';}return effectStateSchema.parse(entry.state);}
  recover():Promise<JournalRow[]> {this.capabilities.clear();for(const entry of this.entries.values())if(!['SUCCESS','FAILURE','UNKNOWN'].includes(entry.state))entry.state='INVALIDATED';return this.journal.recover();}
+ has(intentId:string):boolean{return this.entries.has(intentId);}
  private live(entry:Entry):void {if(this.state(entry.intent.intentId)==='EXPIRED')throw new ToolError('EXPIRED');if(['FAILURE','UNKNOWN','INVALIDATED','SUCCESS'].includes(entry.state))throw new ToolError(entry.state==='UNKNOWN'?'EXECUTION_UNKNOWN':'REJECTED');}
  private entry(intentId:string):Entry {const entry=this.entries.get(intentId);if(!entry)throw new ToolError('REJECTED');return entry;}
  private execution(executionId:string):Entry {const entry=[...this.entries.values()].find(row=>row.capability?.executionId===executionId);if(!entry)throw new ToolError('REJECTED');return entry;}

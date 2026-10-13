@@ -29,10 +29,11 @@ export class ExtensionController {
   private cancelled = new Set<string>(); private ended = new Set<string>(); private endedTasks = new Set<string>(); private tail: Promise<unknown> = Promise.resolve();
   private retiredScopes=new Map<string,'REVOKED'|'EXPIRED'>();
   private approving = false; private activeTasks = new Set<string>();private manualSelecting=new Set<string>();private resolvedManual=new Set<string>();
+  private usedEffectNonces=new Set<string>();
   constructor(private readonly surface: Surface, private readonly emit: (event: unknown) => void, private readonly now = Date.now, private readonly id = () => crypto.randomUUID(), private readonly sites?: Pick<SiteAuthorization, 'allows' | 'allowAlways'>, private readonly diagnostics?:PopupDiagnostics, private readonly pause = (ms:number):Promise<void> => new Promise(resolve => setTimeout(resolve,ms))) {}
   async reset(raw?: unknown): Promise<void> {
     this.epoch = raw === undefined ? undefined : helloSchema.parse(raw).connectionEpoch;
-    this.retiredScopes.clear();
+    this.retiredScopes.clear();this.usedEffectNonces.clear();
     const old = [...this.grants.values()]; this.grants.clear(); this.tickets.clear(); this.results.clear(); this.cancelled.clear(); this.ended.clear(); this.endedTasks.clear(); this.activeTasks.clear();this.manualSelecting.clear();this.resolvedManual.clear();
     await Promise.all(old.map(grant => this.surface.invalidate(grant.chromeId).catch(() => {})));
   }
@@ -272,6 +273,11 @@ export class ExtensionController {
       const pending:ManualSelectionRequest={id:this.id(),admissionId,documentId,expiresAt:Math.min(grant.expiresAt,this.now()+5*60_000),trace:request.observeTrace===true};
       grant.manualSelected=false;grant.manualRequest=pending;
       return {outcome:'REQUIRES_USER_INTERACTION',handoffId:pending.id,reason:'CONVERSATION_SELECTION'};
+    }
+    if(request.operation==='writeSelectedDraft'){
+      const capability=(args as any).capability;
+      if(!grant.manualSelected||capability.phase!=='WRITE_DRAFT'||capability.assurance!=='USER_SELECTED'||capability.backendSessionId!==request.backendSessionId||capability.taskId!==request.taskId||capability.connectionEpoch!==this.epoch||capability.origin!==grant.origin||capability.scopeId!==grant.scopeId||capability.tabId!==grant.tabId||capability.documentId!==args.documentId||capability.expiresAt<=this.now()||this.usedEffectNonces.has(capability.nonce))throw new Error('ACCESS_DENIED');
+      this.usedEffectNonces.add(capability.nonce);
     }
     if (grant.handoff && !(request.operation === 'observe' && args.resumeHandoffId === grant.handoff.id)) return { outcome: 'REQUIRES_USER_INTERACTION', handoffId: grant.handoff.id, reason: grant.handoff.reason };
     if (request.operation === 'activate') { this.check(request); await this.surface.activate(grant.chromeId); return { outcome: 'OK', data: this.dto(grant) }; }

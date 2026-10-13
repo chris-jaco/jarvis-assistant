@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash,randomUUID } from 'node:crypto';
 import { JSDOM } from 'jsdom';
 import { ContentEngine } from '../../extension/src/content-engine.js';
 import { ExtensionController } from '../../extension/src/controller.js';
@@ -100,6 +100,20 @@ test('direct content command never writes or clicks Send for absent, false, inva
    const first=await f.engine.run('sendSelectedMessage',{...args,sendEnabled:configured},Date.now()+5000,{session:f.access.session,epoch:f.access.epoch});
    assert.equal(first.outcome,'ERROR');assert.equal(composer.textContent,'');assert.equal(clicks,0);assert.equal(writes,0);
   }
+ }finally{f.close();}
+});
+
+test('one-use WRITE_DRAFT capability writes the exact frozen text and never activates Send',async()=>{
+ const f=fixture(source.replace('<button>Send</button>','<button aria-label="Send">Send</button>'));try{
+  const composer=f.win.document.querySelector<HTMLElement>('[contenteditable]')!,button=f.win.document.querySelector('button')!;let clicks=0;button.addEventListener('click',()=>clicks++);
+  Object.defineProperty(composer,'isContentEditable',{value:true});
+  Object.defineProperty(f.win.document,'execCommand',{value:(_command:string,_ui:boolean,text:string)=>{composer.textContent=text;return true;}});
+  assert.equal(f.select(),true);const observed=await f.engine.run('observe',{scopeId:f.access.scopeId,tabId:f.access.tabId},Date.now()+5000,{session:f.access.session,epoch:f.access.epoch});
+  assert.equal(observed.outcome,'OK');if(observed.outcome!=='OK'||!('manualSelection'in observed.data)||!observed.data.manualSelection)throw new Error();
+  const text='Exact frozen draft',m=observed.data.manualSelection,now=Date.now(),capability={intentId:randomUUID(),executionId:randomUUID(),confirmationId:randomUUID(),phase:'WRITE_DRAFT',assurance:'USER_SELECTED',backendSessionId:f.access.session,taskId:f.taskId,admissionId:f.admissionId,connectionEpoch:f.access.epoch,origin:f.access.origin,scopeId:f.access.scopeId,tabId:f.access.tabId,documentId:observed.data.documentId,manualRequestId:m.manualRequestId,selectionId:m.selectionId,contentDigest:createHash('sha256').update(text).digest('hex'),issuedAt:now,expiresAt:now+10_000,nonce:randomUUID()};
+  const result=await f.engine.run('writeSelectedDraft',{scopeId:f.access.scopeId,tabId:f.access.tabId,documentId:observed.data.documentId,capability,text},Date.now()+5000,{session:f.access.session,epoch:f.access.epoch});
+  assert.deepEqual(result,{outcome:'OK',data:{draftState:'WRITTEN_VERIFIED'}});assert.equal(composer.textContent,text);assert.equal(clicks,0);
+  const enter=await f.engine.run('press',{scopeId:f.access.scopeId,tabId:f.access.tabId,documentId:observed.data.documentId,snapshotId:observed.data.snapshotId,ref:randomUUID(),key:'Enter'},Date.now()+5000,{session:f.access.session,epoch:f.access.epoch});assert.notEqual(enter.outcome,'OK');assert.equal(clicks,0);
  }finally{f.close();}
 });
 
@@ -236,6 +250,7 @@ test('WAITING_MANUAL resumes once with USER_SELECTED and a frozen draft survives
   provider.acknowledge(provider.state(session).continuation!);
   evidenceRequestId=randomUUID();await assert.rejects(provider.prepareDraft({recipientHint:'Conversación seleccionada',text:'Texto privado'},new AbortController().signal),error=>error instanceof Error);evidenceRequestId=requestId;
   const draft:any=await provider.prepareDraft({recipientHint:'Conversación seleccionada',text:'Texto privado'},new AbortController().signal);assert.equal(draft.status,'FROZEN');assert.equal(draft.selectionAssurance,'USER_SELECTED');assert.equal(draft.intent.recipient.uniqueness,'USER_SELECTED');assert.equal(draft.confirmationEnabled,false);assert.equal(draft.executionEnabled,false);
+  const write=adapter.tools().find(tool=>tool.id==='browser.writeDraft')!;assert.ok(write);assert.equal(write.confirm,true);assert.equal(write.schema.safeParse({intentId:draft.intent.intentId}).success,true);assert.equal(write.schema.safeParse({intentId:draft.intent.intentId,text:'mutable',nonce:randomUUID()}).success,false);
   const closed:any=await provider.endTask(new AbortController().signal,{reason:'COMPLETED'});assert.equal(closed.outcome,'END_TASK_ACCEPTED');
   const reviewed:any=await provider.reviewDraft(draft.intent.intentId,new AbortController().signal);assert.equal(reviewed.status,'FROZEN');assert.equal(reviewed.contextStatus,'NOT_REVALIDATED');assert.equal(reviewed.confirmationEnabled,false);assert.equal(reviewed.executionEnabled,false);
   assert.equal(adapter.tools().some(tool=>tool.id==='browser.sendMessage'),false);assert.equal(operations.includes('sendSelectedMessage'),false);
