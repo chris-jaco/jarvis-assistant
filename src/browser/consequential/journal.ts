@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { TokenFileSecurity } from '../../tools/adapters/token-security.js';
 import { ToolError } from '../../tools/types.js';
-const rowSchema=z.object({intentId:z.string().uuid(),executionId:z.string().uuid(),state:z.enum(['RESERVED','SUCCESS','FAILURE','UNKNOWN']),updatedAt:z.number().int().positive()}).strict();
+const rowSchema=z.object({intentId:z.string().uuid(),executionId:z.string().uuid(),phase:z.enum(['WRITE_DRAFT','SEND_MESSAGE']).optional(),state:z.enum(['RESERVED','SUCCESS','FAILURE','UNKNOWN']),updatedAt:z.number().int().positive()}).strict();
 const fileSchema=z.object({version:z.literal(1),entries:z.array(rowSchema).max(10_000)}).strict();
 export type JournalRow=z.infer<typeof rowSchema>;
 // Only opaque IDs/state/time. Never payload, recipient, origin, credentials or approval.
@@ -20,7 +20,7 @@ export class PrivateExecutionJournal {
  if(this.security.platform!=='win32'){const dir=await open(dirname(this.path),constants.O_RDONLY);try{await dir.sync();}finally{await dir.close();}}
  }finally{await h?.close();await unlink(temporary).catch(e=>{if((e as NodeJS.ErrnoException).code!=='ENOENT')throw e;});}}
  private transaction<T>(work:(rows:JournalRow[])=>Promise<T>):Promise<T>{const result=this.tail.catch(()=>{}).then(async()=>{if(this.failed)throw new ToolError('UNCONFIGURED');let lock;const lockPath=this.path+'.lock';try{await this.directory();lock=await open(lockPath,'wx',0o600);await this.security.validate(lockPath,await lock.stat());return await work(await this.read());}catch{this.failed=true;throw new ToolError('UNCONFIGURED');}finally{await lock?.close();if(lock)await unlink(lockPath);}});this.tail=result;return result;}
- reserve(row:JournalRow):Promise<void>{return this.transaction(async rows=>{rowSchema.parse(row);if(rows.some(x=>x.executionId===row.executionId||x.intentId===row.intentId)||rows.length>=10_000)throw new ToolError('REJECTED');await this.write([...rows,row]);});}
+ reserve(row:JournalRow):Promise<void>{return this.transaction(async rows=>{rowSchema.parse(row);if(rows.some(x=>x.executionId===row.executionId||x.intentId===row.intentId&&(x.phase??'LEGACY')===(row.phase??'LEGACY'))||rows.length>=10_000)throw new ToolError('REJECTED');await this.write([...rows,row]);});}
  finish(executionId:string,state:'SUCCESS'|'FAILURE'|'UNKNOWN',now:number):Promise<void>{return this.transaction(async rows=>{const row=rows.find(x=>x.executionId===executionId);if(!row||row.state!=='RESERVED')throw new ToolError('REJECTED');row.state=state;row.updatedAt=now;await this.write(rows);});}
  recover():Promise<JournalRow[]>{return this.transaction(async rows=>{let changed=false;for(const row of rows)if(row.state==='RESERVED'){row.state='UNKNOWN';changed=true;}if(changed)await this.write(rows);return structuredClone(rows);});}
 }

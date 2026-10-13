@@ -8,6 +8,13 @@ export const candidateSchema=bindingSchema.extend({recipient:recipientSchema,con
 export const intentSchema=candidateSchema.extend({intentId:uuid,kind:z.literal('SEND_MESSAGE'),createdAt:z.number().int().positive(),expiresAt:z.number().int().positive(),summary:z.string().min(1).max(4000)}).strict().refine(x=>x.expiresAt>x.createdAt&&x.expiresAt-x.createdAt<=60_000);
 export const authorizationSchema=z.object({intentId:uuid,confirmationId:uuid,executionId:uuid,backendSessionId:uuid,bindingDigest:z.string().regex(/^[a-f0-9]{64}$/),deadlineAt:z.number().int().positive()}).strict();
 export const stateSchema=z.enum(['RESOLVING','FROZEN','WAITING_CONFIRMATION','REVALIDATING','DISPATCH_RESERVED','EXECUTING','VERIFYING','SUCCESS','FAILURE','UNKNOWN','CANCELLED','REJECTED','EXPIRED','INVALIDATED']);
+export const effectPhaseSchema=z.enum(['WRITE_DRAFT','SEND_MESSAGE']);
+export const effectStateSchema=z.enum(['DRAFT_FROZEN','WAITING_WRITE_CONFIRMATION','WRITE_REVALIDATING','WRITE_RESERVED','WRITING','DRAFT_WRITTEN','WAITING_SEND_CONFIRMATION','SEND_REVALIDATING','SEND_RESERVED','SENDING','VERIFYING','SUCCESS','FAILURE','UNKNOWN','CANCELLED','REJECTED','EXPIRED','INVALIDATED']);
+export const effectCapabilitySchema=z.object({
+ intentId:uuid,executionId:uuid,confirmationId:uuid,phase:effectPhaseSchema,assurance:z.literal('USER_SELECTED'),
+ backendSessionId:uuid,taskId:uuid,admissionId:uuid,connectionEpoch:uuid,origin,scopeId:uuid,tabId:uuid,documentId:uuid,
+ manualRequestId:uuid,selectionId:uuid,contentDigest:z.string().regex(/^[a-f0-9]{64}$/),issuedAt:z.number().int().positive(),expiresAt:z.number().int().positive(),nonce:uuid
+}).strict().refine(x=>x.expiresAt>x.issuedAt&&x.expiresAt-x.issuedAt<=60_000);
 export const resultSchema=z.object({intentId:uuid,executionId:uuid.optional(),simulationOnly:z.literal(true),execution:z.enum(['NOT_EXECUTED','ACKNOWLEDGED','UNKNOWN']),verification:z.enum(['VERIFIED','FAILED','INCONCLUSIVE']),outcome:z.enum(['CONFIRMED_SUCCESS','CONFIRMED_FAILURE','EXECUTION_UNKNOWN']),reason:z.enum(['SIMULATED_EFFECT','SIMULATED_FAILURE','PRECONDITION_CHANGED','ACCESS_REVOKED','CANCELLED','EXPIRED','TIMEOUT','DISPATCH_UNCERTAIN','JOURNAL_UNAVAILABLE']),evidence:z.enum(['SIMULATED_MESSAGE_ACCEPTED']).optional()}).strict().superRefine((x,ctx)=>{
  if(x.outcome==='CONFIRMED_SUCCESS'&&(x.execution!=='ACKNOWLEDGED'||x.verification!=='VERIFIED'||!x.evidence))ctx.addIssue({code:'custom',message:'Success requires evidence'});
  if(x.outcome==='CONFIRMED_FAILURE'&&x.execution!=='NOT_EXECUTED')ctx.addIssue({code:'custom',message:'Uncertain dispatch is not failure'});
@@ -23,6 +30,9 @@ type DeepReadonly<T>={readonly [K in keyof T]:T[K] extends object?DeepReadonly<T
 export type FrozenIntent=DeepReadonly<z.infer<typeof intentSchema>>;
 export type Authorization=z.infer<typeof authorizationSchema>;
 export type ActionState=z.infer<typeof stateSchema>;
+export type EffectPhase=z.infer<typeof effectPhaseSchema>;
+export type EffectState=z.infer<typeof effectStateSchema>;
+export type EffectCapability=Readonly<z.infer<typeof effectCapabilitySchema>>;
 export type ConsequentialResult=z.infer<typeof resultSchema>;
 export type ManualSendResult=z.infer<typeof manualSendResultSchema>;
 export interface TrustedContext { candidate:Candidate; chromePermission:boolean; siteAuthorized:boolean; grantValid:boolean; grantExpiresAt:number; }
