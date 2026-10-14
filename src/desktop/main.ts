@@ -20,8 +20,7 @@ const supervisor = new BackendSupervisor({
   spawn: (_executable, args, options) => utilityProcess.fork(args[0]!, [], { cwd: options.cwd, env: options.env, stdio: 'pipe', serviceName: 'Atlas Core' }) as unknown as import('./backend-supervisor.js').BackendProcess,
   onUnexpectedExit: () => {
     if (closing) return;
-    void dialog.showMessageBox({ type: 'error', title: 'Atlas Core se detuvo', message: 'Atlas Core se cerró inesperadamente. Cerrá y volvé a abrir Atlas.' });
-    void shutdown();
+    void shutdown({ type: 'error', title: 'Atlas Core se detuvo', message: 'Atlas Core se cerró inesperadamente. Atlas se cerrará de forma segura; volvé a abrirlo para continuar.' });
   }
 });
 
@@ -34,10 +33,11 @@ async function requestRendererCleanup(): Promise<void> {
   rendererShutdownReady = undefined;
 }
 
-async function shutdown(): Promise<void> {
+async function shutdown(message?: Electron.MessageBoxOptions): Promise<void> {
   if (closing) return; closing = true;
   await requestRendererCleanup(); cleanupIpc?.(); cleanupIpc = undefined;
   await supervisor.stop();
+  if (message) await dialog.showMessageBox(message);
   if (window && !window.isDestroyed()) window.destroy(); window = undefined;
   app.quit();
 }
