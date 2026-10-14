@@ -56,13 +56,13 @@ test('cleanup result validator cannot describe incomplete cleanup as completed',
 });
 
 function providerFixture(closeResult:{closed:boolean;pendingConfirmationCancelled:boolean;execution:'IDLE'|'UNKNOWN'}|Error){
-  const observations:{microphones:(unknown|null)[];states:string[];tools:number}={microphones:[],states:[],tools:0};
+  const observations:{microphones:(unknown|null)[];states:string[];transcripts:unknown[][];tools:number}={microphones:[],states:[],transcripts:[],tools:0};
   let trackState='live';let stops=0,sessionCloses=0,audioPauses=0,coreCloses=0;let release!:(value:{closed:boolean;pendingConfirmationCancelled:boolean;execution:'IDLE'|'UNKNOWN'})=>void;
   const coreGate=new Promise<{closed:boolean;pendingConfirmationCancelled:boolean;execution:'IDLE'|'UNKNOWN'}>((resolve,reject)=>{release=value=>closeResult instanceof Error?reject(closeResult):resolve(value);});
   const core={request:async(operation:string)=>{assert.equal(operation,'session.close');coreCloses++;return coreGate;}} as unknown as CoreTransport;
   const bridge=new VoiceToolBridge(()=>{},()=>{},undefined,undefined,undefined,core);
   const audio={pause:()=>{audioPauses++;},srcObject:{} as unknown,muted:false,paused:false,ended:false} as unknown as HTMLAudioElement;
-  const provider=new OpenAIVoiceProvider({state:state=>observations.states.push(state),transcript:()=>{},microphone:stream=>observations.microphones.push(stream),tools:()=>{observations.tools++;}},audio,{core});
+  const provider=new OpenAIVoiceProvider({state:state=>observations.states.push(state),transcript:entries=>observations.transcripts.push(entries),microphone:stream=>observations.microphones.push(stream),tools:()=>{observations.tools++;}},audio,{core});
   const track={get readyState(){return trackState;},stop:()=>{stops++;trackState='ended';}};
   const internal=provider as unknown as {tools:VoiceToolBridge;session:{close():void};stream:{getTracks():typeof track[]}};
   internal.tools=bridge;internal.session={close:()=>{sessionCloses++;}};internal.stream={getTracks:()=>[track]};
@@ -73,9 +73,17 @@ test('provider releases microphone, WebRTC and audio before awaiting authoritati
   const result={closed:true,pendingConfirmationCancelled:true,execution:'IDLE'} as const;const f=providerFixture(result);
   const pending=f.provider.prepareForBackground('HIDE');
   assert.deepEqual(f.counts(),{stops:1,sessionCloses:1,audioPauses:1,coreCloses:1});assert.equal(f.observations.microphones.at(-1),null);assert.equal(f.observations.states.at(-1),'disconnected');
+  assert.deepEqual(f.observations.transcripts,[[]]);
   // A restore cannot reconnect while authoritative cleanup is pending.
   await f.provider.connect();assert.deepEqual(f.counts(),{stops:1,sessionCloses:1,audioPauses:1,coreCloses:1});
   f.release();assert.deepEqual(await pending,{status:'COMPLETED',local:{microphoneReleased:true,realtimeClosed:true,audioStopped:true},core:{state:'CLOSED',pendingConfirmationCancelled:true,execution:'IDLE'}});
+});
+
+test('background cleanup discards only conversational UI/session state, not persistent-memory authority',async()=>{
+  const result={closed:true,pendingConfirmationCancelled:false,execution:'IDLE'} as const;const f=providerFixture(result);
+  const internal=f.provider as unknown as {tools?:unknown;session?:unknown;stream?:unknown;memory?:unknown};
+  const pending=f.provider.prepareForBackground('HIDE');assert.deepEqual(f.observations.transcripts,[[]]);assert.equal(internal.tools,undefined);assert.equal(internal.session,undefined);assert.equal(internal.stream,undefined);
+  f.release();assert.equal((await pending).status,'COMPLETED');
 });
 
 test('unknown execution fails cleanup without retrying Core or the sensitive action',async()=>{

@@ -1,8 +1,12 @@
-import { app, BrowserWindow, dialog, ipcMain, session, utilityProcess } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, session, utilityProcess } from 'electron';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BackendSupervisor } from './backend-supervisor.js';
 import { registerDesktopIpc } from './ipc.js';
+import type { DesktopIpcController } from './ipc.js';
+import { DesktopCleanupProtocol } from './cleanup-protocol.js';
+import { DesktopLifecycleRuntime } from './lifecycle-runtime.js';
+import { desktopApplicationMenu, registerDesktopWindowControls } from './window-controls.js';
 import { audioPermissionAllowed, sameApplicationLocation, secureWindowOptions } from './window-policy.js';
 import { acquireSingleInstance, focusExistingWindow } from './lifecycle.js';
 
@@ -11,31 +15,24 @@ const projectRoot = resolve(here, '../../..');
 const serverEntry = resolve(projectRoot, 'dist/server/server/index.js');
 const preload = resolve(projectRoot, 'dist/desktop-preload/preload.cjs');
 let window: BrowserWindow | undefined;
-let cleanupIpc: (() => void) | undefined;
+let cleanupIpc: DesktopIpcController | undefined;
+let cleanupProtocol: DesktopCleanupProtocol | undefined;
+let lifecycle: DesktopLifecycleRuntime | undefined;
 let closing = false;
-let rendererShutdownReady: (() => void) | undefined;
 
 const supervisor = new BackendSupervisor({
   executable: process.execPath, serverEntry, cwd: projectRoot, runtime: 'utility',
   spawn: (_executable, args, options) => utilityProcess.fork(args[0]!, [], { cwd: options.cwd, env: options.env, stdio: 'pipe', serviceName: 'Atlas Core' }) as unknown as import('./backend-supervisor.js').BackendProcess,
   onUnexpectedExit: () => {
     if (closing) return;
-    void shutdown({ type: 'error', title: 'Atlas Core se detuvo', message: 'Atlas Core se cerró inesperadamente. Atlas se cerrará de forma segura; volvé a abrirlo para continuar.' });
+    if(lifecycle)void lifecycle.coreCrash();
+    else void startupShutdown({ type: 'error', title: 'Atlas Core se detuvo', message: 'Atlas Core se cerró inesperadamente. Atlas se cerrará de forma segura; volvé a abrirlo para continuar.' });
   }
 });
 
-async function requestRendererCleanup(): Promise<void> {
-  const current = window; if (!current || current.isDestroyed()) return;
-  await Promise.race([
-    new Promise<void>(resolveReady => { rendererShutdownReady = resolveReady; current.webContents.send('atlas:shutdown'); }),
-    new Promise<void>(resolveTimeout => setTimeout(resolveTimeout, 750))
-  ]);
-  rendererShutdownReady = undefined;
-}
-
-async function shutdown(message?: Electron.MessageBoxOptions): Promise<void> {
+async function startupShutdown(message?: Electron.MessageBoxOptions): Promise<void> {
   if (closing) return; closing = true;
-  await requestRendererCleanup(); cleanupIpc?.(); cleanupIpc = undefined;
+  cleanupProtocol?.dispose();cleanupProtocol=undefined;cleanupIpc?.dispose();cleanupIpc=undefined;
   await supervisor.stop();
   if (message) await dialog.showMessageBox(message);
   if (window && !window.isDestroyed()) window.destroy(); window = undefined;
@@ -47,7 +44,17 @@ async function start(): Promise<void> {
   const applicationOrigin = new URL(endpoint.baseUrl).origin;
   const browserWindow = new BrowserWindow(secureWindowOptions(preload)); window = browserWindow;
   cleanupIpc = registerDesktopIpc(ipcMain, supervisor.backendClient(), senderId => browserWindow.webContents.id === senderId && !browserWindow.isDestroyed());
-  ipcMain.on('atlas:shutdown-ready', event => { if (event.sender.id === browserWindow.webContents.id) rendererShutdownReady?.(); });
+  cleanupProtocol=new DesktopCleanupProtocol(ipcMain,browserWindow.webContents,senderId=>browserWindow.webContents.id===senderId&&!browserWindow.isDestroyed());
+  lifecycle=new DesktopLifecycleRuntime({
+    cleanup:cleanupProtocol,ipc:cleanupIpc,
+    hideWindow:()=>{if(!browserWindow.isDestroyed())browserWindow.hide();},
+    restoreWindow:()=>focusExistingWindow(browserWindow.isDestroyed()?undefined:browserWindow),
+    destroyWindow:()=>{closing=true;if(!browserWindow.isDestroyed())browserWindow.destroy();window=undefined;},
+    stopCore:()=>supervisor.stop(),
+    showHideFailure:()=>dialog.showMessageBox(browserWindow,{type:'error',title:'Atlas sigue abierto',message:'Atlas no pudo ocultarse de forma segura. La ventana seguirá visible y la voz permanecerá desconectada.'}).then(()=>undefined),
+    showCoreCrash:()=>dialog.showMessageBox(browserWindow,{type:'error',title:'Atlas Core se detuvo',message:'Atlas Core se cerró inesperadamente. Atlas se cerrará de forma segura; volvé a abrirlo para continuar.'}).then(()=>undefined),
+    quitApplication:()=>{closing=true;app.quit();}
+  });
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
     const mediaTypes = 'mediaTypes' in details ? details.mediaTypes : undefined;
     callback(webContents.id === browserWindow.webContents.id && audioPermissionAllowed(permission, details.requestingUrl, mediaTypes, applicationOrigin));
@@ -56,19 +63,20 @@ async function start(): Promise<void> {
     !!webContents && webContents.id === browserWindow.webContents.id && audioPermissionAllowed(permission, requestingOrigin, details.mediaType ? [details.mediaType] : undefined, applicationOrigin));
   browserWindow.webContents.on('will-navigate', (event, url) => { if (!sameApplicationLocation(url, applicationOrigin)) event.preventDefault(); });
   browserWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  browserWindow.once('ready-to-show', () => browserWindow.show());
-  browserWindow.on('close', event => { if (!closing) { event.preventDefault(); void shutdown(); } });
+  browserWindow.once('ready-to-show', () => {lifecycle?.ready();browserWindow.show();});
+  registerDesktopWindowControls(browserWindow,{hide:()=>closing?false:lifecycle?.hide()??false,quit:()=>lifecycle?.quit()});
+  Menu.setApplicationMenu(Menu.buildFromTemplate(desktopApplicationMenu({hide:()=>lifecycle?.hide(),quit:()=>lifecycle?.quit()})));
   await browserWindow.loadURL(endpoint.baseUrl);
 }
 
 if (!acquireSingleInstance(app)) { /* quit requested by helper */ }
 else {
-  app.on('second-instance', () => focusExistingWindow(window));
-  app.on('window-all-closed', () => { void shutdown(); });
-  app.on('before-quit', event => { if (!closing) { event.preventDefault(); void shutdown(); } });
+  app.on('second-instance', () => {if(!lifecycle?.restore())focusExistingWindow(window);});
+  app.on('window-all-closed', () => { if(!closing)void lifecycle?.quit(); });
+  app.on('before-quit', event => { if (!closing) { event.preventDefault(); void lifecycle?.quit(); } });
   app.whenReady().then(start).catch(error => {
     console.error('ATLAS_DESKTOP_START_FAILED');
     dialog.showErrorBox('Atlas no pudo iniciar', error instanceof Error && error.message.startsWith('DESKTOP_') ? error.message : 'No se pudo iniciar Atlas Desktop.');
-    void shutdown();
+    void startupShutdown();
   });
 }

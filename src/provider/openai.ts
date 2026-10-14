@@ -203,6 +203,9 @@ export class OpenAIVoiceProvider implements VoiceProvider {
     this.memory?.close();this.memory=undefined;
     this.tools=undefined;
     this.observer.tools?.([],null);
+    // A closed desktop conversation must disappear with the Realtime/Core
+    // sessions. Persistent memory remains backend-owned and is not erased.
+    this.observer.transcript([]);
     this.abort?.abort();this.abort=undefined;
     const session=this.session;this.session=undefined;
     let realtimeClosed=true;

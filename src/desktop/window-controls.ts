@@ -1,0 +1,41 @@
+import type { MenuItemConstructorOptions } from 'electron';
+
+export interface DesktopKeyboardInput {
+  type:string;
+  key:string;
+  control:boolean;
+  alt:boolean;
+  shift:boolean;
+  meta:boolean;
+  isAutoRepeat:boolean;
+}
+
+export interface DesktopWindowControlsTarget {
+  on(event:'close',listener:(event:{preventDefault():void})=>void):unknown;
+  removeListener(event:'close',listener:(event:{preventDefault():void})=>void):unknown;
+  webContents:{
+    on(event:'before-input-event',listener:(event:{preventDefault():void},input:DesktopKeyboardInput)=>void):unknown;
+    removeListener(event:'before-input-event',listener:(event:{preventDefault():void},input:DesktopKeyboardInput)=>void):unknown;
+  };
+}
+
+export interface DesktopWindowActions { hide():unknown; quit():unknown }
+
+export function windowsLocalQuit(input:DesktopKeyboardInput):boolean{
+  return input.type==='keyDown'&&input.key.toLowerCase()==='q'&&input.control&&!input.alt&&!input.shift&&!input.meta&&!input.isAutoRepeat;
+}
+
+export function desktopApplicationMenu(actions:DesktopWindowActions):MenuItemConstructorOptions[]{
+  return [{label:'Atlas',submenu:[{label:'Salir de Atlas',accelerator:'CommandOrControl+Q',click:()=>{void actions.quit();}}]}];
+}
+
+/** Window-local controls only. Minimize deliberately retains Electron defaults. */
+export function registerDesktopWindowControls(target:DesktopWindowControlsTarget,actions:DesktopWindowActions,platform:NodeJS.Platform=process.platform):()=>void{
+  const close=(event:{preventDefault():void})=>{const handled=actions.hide();if(handled!==false)event.preventDefault();};
+  const input=(event:{preventDefault():void},value:DesktopKeyboardInput)=>{
+    if(platform==='win32'&&windowsLocalQuit(value)){event.preventDefault();void actions.quit();}
+  };
+  target.on('close',close);
+  target.webContents.on('before-input-event',input);
+  return ()=>{target.removeListener('close',close);target.webContents.removeListener('before-input-event',input);};
+}
