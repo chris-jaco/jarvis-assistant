@@ -31,7 +31,7 @@ export interface CoreSessionConfiguration {
 
 export interface CoreOperationMap {
   'session.create': { input: Record<string, never>; output: CoreSessionConfiguration };
-  'session.close': { input: { reason: SessionCloseReason }; output: { closed: boolean } };
+  'session.close': { input: { reason: SessionCloseReason }; output: { closed: boolean; pendingConfirmationCancelled: boolean; execution: 'IDLE' | 'UNKNOWN' } };
   'activity.get': { input: undefined; output: { activity: ToolActivity[]; pending: PendingConfirmation | null; browser?: unknown } };
   'tool.invoke': { input: { invocationId: string; toolId: string; input: unknown }; output: ToolResult };
   'browser.admit': {

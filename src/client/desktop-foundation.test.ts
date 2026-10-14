@@ -141,6 +141,28 @@ test('desktop IPC accepts only allowlisted operations from the trusted renderer'
   cleanup(); assert.equal(handlers.size, 0); assert.equal(listeners.size, 0);
 });
 
+test('desktop IPC can abort requests without disposing handlers, then dispose independently', async () => {
+  const handlers = new Map<string, Function>(); const listeners = new Map<string, Function>(); let aborted = false;
+  const ipc = { handle: (name: string, fn: Function) => { handlers.set(name, fn); }, on: (name: string, fn: Function) => { listeners.set(name, fn); }, removeHandler: (name: string) => { handlers.delete(name); }, removeAllListeners: (name: string) => { listeners.delete(name); } };
+  const client = { request: async (_operation: string,_input:unknown,_options:unknown,signal:AbortSignal) => new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>{aborted=true;reject(signal.reason);},{once:true})), realtimeToken: async () => 'ek_fixture' } as unknown as DesktopBackendClient;
+  const controller=registerDesktopIpc(ipc as any,client,()=>true);const request=handlers.get('atlas:core-request')!;
+  const pending=request({sender:{id:1}},'00000000-0000-4000-8000-000000000003','activity.get',undefined,{});
+  controller.abortPending('BACKGROUND');await assert.rejects(pending);assert.equal(aborted,true);assert.equal(handlers.has('atlas:core-request'),true);
+  controller.dispose();assert.equal(handlers.size,0);assert.equal(listeners.size,0);
+});
+
+test('aborting ordinary desktop IPC work does not abort the authoritative cleanup request itself',async()=>{
+  const handlers=new Map<string,Function>();const listeners=new Map<string,Function>();const releases=new Map<string,()=>void>();const aborted:string[]=[];
+  const ipc={handle:(name:string,fn:Function)=>handlers.set(name,fn),on:(name:string,fn:Function)=>listeners.set(name,fn),removeHandler:(name:string)=>{handlers.delete(name);},removeAllListeners:(name:string)=>{listeners.delete(name);}};
+  const client={request:async(operation:string,_input:unknown,_options:unknown,signal:AbortSignal)=>new Promise(resolve=>{signal.addEventListener('abort',()=>{aborted.push(operation);resolve({data:{}});},{once:true});releases.set(operation,()=>resolve({data:{closed:true,pendingConfirmationCancelled:false,execution:'IDLE'}}));}),realtimeToken:async()=>''} as unknown as DesktopBackendClient;
+  const controller=registerDesktopIpc(ipc as any,client,()=>true);const request=handlers.get('atlas:core-request')!;
+  const ordinary=request({sender:{id:1}},'00000000-0000-4000-8000-000000000004','activity.get',undefined,{});
+  const cleanup=request({sender:{id:1}},'00000000-0000-4000-8000-000000000005','session.close',{reason:'PAGEHIDE'},{});
+  controller.abortPending();await ordinary;assert.deepEqual(aborted,['activity.get']);
+  releases.get('session.close')!();assert.deepEqual((await cleanup).data,{closed:true,pendingConfirmationCancelled:false,execution:'IDLE'});
+  controller.dispose();
+});
+
 test('desktop transport preserves correlation, timeout metadata and cancellation without retries', async () => {
   const calls: unknown[][] = []; const cancelled: string[] = [];
   const bridge = {

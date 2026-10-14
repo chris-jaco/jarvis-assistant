@@ -1,4 +1,5 @@
 import type { CoreOperation, CoreOperationMap } from '../provider/core-transport.js';
+import type { DesktopCleanupRequest, DesktopCleanupResult } from './cleanup-protocol.js';
 
 export interface DesktopRequestOptions { timeoutMs?: number; browserSequence?: number }
 export interface DesktopCoreReply<K extends CoreOperation = CoreOperation> {
@@ -11,7 +12,12 @@ export interface AtlasDesktopApi {
     cancel(requestId: string): void;
   };
   realtime: { token(): Promise<string> };
-  lifecycle: { onShutdown(listener: () => void): () => void; ready(): void };
+  lifecycle: {
+    onShutdown(listener: () => void): () => void;
+    ready(): void;
+    onCleanup(listener: (request: DesktopCleanupRequest) => void): () => void;
+    completeCleanup(result: DesktopCleanupResult): void;
+  };
 }
 
 declare global { interface Window { atlasDesktop?: AtlasDesktopApi } }

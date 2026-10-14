@@ -10,6 +10,7 @@ import { WebCoreTransport } from './core-transport.js';
 import type { CoreTransport } from './core-transport.js';
 import { RealtimeTokenError, WebRealtimeTokenProvider } from './realtime-token.js';
 import type { RealtimeTokenProvider } from './realtime-token.js';
+import type { DesktopCleanupReason, DesktopRendererCleanupReport } from '../desktop/cleanup-protocol.js';
 
 class ClientError extends Error {}
 export class OpenAIVoiceProvider implements VoiceProvider {
@@ -24,6 +25,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
   private generation = 0;
   private realtimeCorrelation?:RealtimeErrorCorrelation;
   private active = false;
+  private backgroundCleanup?:Promise<DesktopRendererCleanupReport>;
   readonly metrics = new SessionMetrics();
   private readonly core: CoreTransport;
   private readonly tokenProvider: RealtimeTokenProvider;
@@ -33,6 +35,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
   }
 
   async connect(): Promise<void> {
+    if(this.backgroundCleanup)return;
     this.disconnect('RECONNECT');
     const generation = ++this.generation;
     const current = () => generation === this.generation;
@@ -188,6 +191,45 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       this.audio.srcObject = null;
       this.state('disconnected');
     }
+  }
+  prepareForBackground(reason:DesktopCleanupReason):Promise<DesktopRendererCleanupReport>{
+    if(this.backgroundCleanup)return this.backgroundCleanup;
+    const tools=this.tools;
+    const closeReason:SessionCloseReason=reason==='HIDE'?'PAGEHIDE':reason==='QUIT'?'USER_DISCONNECT':'UNKNOWN';
+    ++this.generation;
+    this.active=false;
+    this.realtimeCorrelation?.clear();this.realtimeCorrelation=undefined;
+    this.presentation?.close();this.presentation=undefined;
+    this.memory?.close();this.memory=undefined;
+    this.tools=undefined;
+    this.observer.tools?.([],null);
+    this.abort?.abort();this.abort=undefined;
+    const session=this.session;this.session=undefined;
+    let realtimeClosed=true;
+    try{session?.close();}catch{realtimeClosed=false;}
+    this.observer.microphone?.(null);
+    const tracks=this.stream?.getTracks()??[];
+    for(const track of tracks){try{track.stop();}catch{/* Continue releasing remaining local resources. */}}
+    this.stream=undefined;
+    let audioStopped=true;
+    try{this.audio.pause();this.audio.srcObject=null;}catch{audioStopped=false;}
+    this.state('disconnected');
+    const microphoneReleased=tracks.every(track=>track.readyState==='ended');
+    const operation=(async():Promise<DesktopRendererCleanupReport>=>{
+      const local={microphoneReleased,realtimeClosed,audioStopped};
+      const localFailed=!microphoneReleased||!realtimeClosed||!audioStopped;
+      if(!tools)return localFailed?{status:'FAILED',local,core:{state:'NOT_OPEN',pendingConfirmationCancelled:false,execution:'IDLE'},failureReason:'LOCAL_CLEANUP_FAILED'}:{status:'COMPLETED',local,core:{state:'NOT_OPEN',pendingConfirmationCancelled:false,execution:'IDLE'}};
+      try{
+        const result=await tools.closeAndWait(closeReason);
+        if(!result.closed)return {status:'FAILED',local,core:{state:'FAILED',pendingConfirmationCancelled:result.pendingConfirmationCancelled,execution:result.execution},failureReason:'CORE_SESSION_CLOSE_FAILED'};
+        if(result.execution==='UNKNOWN')return {status:'FAILED',local,core:{state:'CLOSED',pendingConfirmationCancelled:result.pendingConfirmationCancelled,execution:'UNKNOWN'},failureReason:'EXECUTION_UNKNOWN'};
+        if(localFailed)return {status:'FAILED',local,core:{state:'CLOSED',pendingConfirmationCancelled:result.pendingConfirmationCancelled,execution:'IDLE'},failureReason:'LOCAL_CLEANUP_FAILED'};
+        return {status:'COMPLETED',local,core:{state:'CLOSED',pendingConfirmationCancelled:result.pendingConfirmationCancelled,execution:'IDLE'}};
+      }catch{return {status:'FAILED',local,core:{state:'FAILED',pendingConfirmationCancelled:false,execution:'UNKNOWN'},failureReason:'CORE_SESSION_CLOSE_FAILED'};}
+    })();
+    const wrapped=operation.finally(()=>{this.backgroundCleanup=undefined;});
+    this.backgroundCleanup=wrapped;
+    return wrapped;
   }
   confirmTool(approved: boolean, confirmationId: string,editedContent?:string): void {
     if (this.tools?.pending?.confirmationId === confirmationId) void this.tools.decide(approved,editedContent);

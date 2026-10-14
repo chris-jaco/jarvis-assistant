@@ -42,6 +42,13 @@ window.addEventListener('pagehide', () => { provider.disconnect('PAGEHIDE'); lev
 window.atlasDesktop?.lifecycle.onShutdown(() => {
   provider.disconnect('PAGEHIDE'); levels.stop(); confirmation.dispose(); orb.dispose(); window.atlasDesktop?.lifecycle.ready();
 });
+window.atlasDesktop?.lifecycle.onCleanup(request => {
+  void provider.prepareForBackground(request.reason).then(result => {
+    levels.stop();
+    confirmation.update(null);
+    window.atlasDesktop?.lifecycle.completeCleanup({requestId:request.requestId,...result});
+  });
+});
 // pagehide may place the page in the back/forward cache. Reload only when restored,
 // so disposed listeners cannot leave a revived page with a partially active UI.
 window.addEventListener('pageshow', event => { if (event.persisted) window.location.reload(); });

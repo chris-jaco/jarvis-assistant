@@ -23,10 +23,26 @@ async function fixture(intent: ConfirmationIntent = 'affirmative') {
   const session = await fetch(url + 'session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   const cookie = session.headers.get('set-cookie')!.split(';')[0]!;
   const post = (route: string, body: unknown, headers: Record<string, string> = {}) => fetch(url + route, { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+  const deleteSession = () => fetch(url + 'session', { method: 'DELETE', headers: { Cookie: cookie, 'X-Atlas-Session-Close': 'PAGEHIDE' } });
   const pending = await (await post('invoke', { invocationId: 'one', toolId: 'test.send', input: { body: 'frozen' } })).json() as { confirmationId: string };
-  return { pending, post, start, release, expire: () => { now += 60_001; }, executions: () => executions, classifications: () => classifications,
+  return { pending, post, deleteSession, start, release, expire: () => { now += 60_001; }, executions: () => executions, classifications: () => classifications,
     close: async () => { release(); runtime.close(); await new Promise<void>(resolve => server.close(() => resolve())); } };
 }
+
+test('authoritative session cleanup reports cancellation of a pending confirmation',async()=>{
+  const f=await fixture();try{
+    assert.deepEqual(await (await f.deleteSession()).json(),{closed:true,pendingConfirmationCancelled:true,execution:'IDLE'});
+    assert.equal(f.executions(),0);
+  }finally{await f.close();}
+});
+
+test('session cleanup during an in-flight operation reports UNKNOWN and never retries it',async()=>{
+  const f=await fixture();try{
+    const classification=f.post('intent',{confirmationId:f.pending.confirmationId,utterance:'Perfecto, te confirmo el envío.'});await f.start;
+    assert.deepEqual(await (await f.deleteSession()).json(),{closed:true,pendingConfirmationCancelled:true,execution:'UNKNOWN'});
+    f.release();await classification;assert.equal(f.executions(),0);assert.equal(f.classifications(),1);
+  }finally{await f.close();}
+});
 
 test('HTTP semantic intent is bound to session and frozen ID; competing tools are blocked; classification cannot execute', async () => {
   const f = await fixture(); try {

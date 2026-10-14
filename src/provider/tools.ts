@@ -23,6 +23,7 @@ export class VoiceToolBridge {
   pending: PendingConfirmation | null = null;
   get confirmationActive(): boolean { return Boolean(this.pending || this.decisionInFlight || this.intentInFlight); }
   private readonly taskDiagnostics=new BrowserTaskDiagnostics();
+  private closeOperation?:Promise<import('./core-transport.js').CoreOperationMap['session.close']['output']>;
   private responseTrace=new Map<string,{producedMessage:boolean;producedFunctionCall:boolean;tokens:string[]}>();
   private requestedTraceTokens:string[]=[];
   private traceSchedule(){return {toolInFlight:this.browserInvocations>0||this.sdkPending.size>0,sdkAwaitingResponse:this.sdkAwaitingResponse,sdkPendingCalls:this.sdkPending.size,sdkAnnouncedCalls:this.sdkAnnounced.size,sdkActiveResponses:this.sdkResponses.size,activeInvocations:this.browserInvocations};}
@@ -330,5 +331,11 @@ export class VoiceToolBridge {
       if (data.browser) {const state=browserExecutionStateSchema.safeParse((data.browser as {executionState?:unknown}).executionState);if(state.success&&this.browserInvocations===0)this.present(data.browser);this.browserContinuation.update(data.browser, this.confirmationActive,this.browserBusy());}
     } catch { /* Polling never breaks voice playback. Tool requests report failures. */ }
   }
-  close(reason:SessionCloseReason='UNKNOWN'): void { this.diagnostic('bridge.close', 'session_closed');this.taskDiagnostics.event({stage:'TOOLS_SESSION_DELETE',closeReason:reason,taskState:this.lastBrowserState}); this.closed = true; this.admission.clear(); this.browserContinuation.close(); this.sdkPending.clear();this.sdkCommitted.clear();this.sdkToolNames.clear();this.sdkAnnounced.clear();this.sdkResponses.clear();this.sdkAwaitingResponse=false;this.browserUserTurns.clear();this.responseTrace.clear();this.requestedTraceTokens=[];this.observedResponses.clear();this.deliveredConfirmations.clear();this.visibleConfirmations.clear();this.announcedStates.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void this.core.request('session.close', {reason}).catch(() => undefined); }
+  close(reason:SessionCloseReason='UNKNOWN'): void { void this.closeAndWait(reason).catch(() => undefined); }
+  closeAndWait(reason:SessionCloseReason='UNKNOWN'):Promise<import('./core-transport.js').CoreOperationMap['session.close']['output']>{
+    if(this.closeOperation)return this.closeOperation;
+    this.diagnostic('bridge.close', 'session_closed');this.taskDiagnostics.event({stage:'TOOLS_SESSION_DELETE',closeReason:reason,taskState:this.lastBrowserState}); this.closed = true; this.admission.clear(); this.browserContinuation.close(); this.sdkPending.clear();this.sdkCommitted.clear();this.sdkToolNames.clear();this.sdkAnnounced.clear();this.sdkResponses.clear();this.sdkAwaitingResponse=false;this.browserUserTurns.clear();this.responseTrace.clear();this.requestedTraceTokens=[];this.observedResponses.clear();this.deliveredConfirmations.clear();this.visibleConfirmations.clear();this.announcedStates.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear();
+    this.closeOperation=this.core.request('session.close',{reason});
+    return this.closeOperation;
+  }
 }
