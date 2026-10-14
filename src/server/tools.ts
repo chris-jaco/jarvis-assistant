@@ -62,6 +62,7 @@ const invocation = z.object({ invocationId: z.string().min(1).max(128), toolId: 
 const cancellation = z.object({ confirmationId: z.string().uuid().optional() }).strict();
 const voiceIntent = z.object({ confirmationId: z.string().uuid(), utterance: z.string().min(1).max(2000) }).strict();
 const decision = z.object({ confirmationId: z.string().uuid(), approved: z.boolean(), editedContent:z.string().min(1).max(2000).optional() }).strict();
+const confirmationVisible=z.object({confirmationId:z.string().uuid(),visible:z.boolean()}).strict();
 async function body(req: IncomingMessage): Promise<unknown> {
   if (req.headers['content-type']?.split(';')[0] !== 'application/json') throw new Error();
   const chunks: Buffer[] = []; let bytes = 0;
@@ -76,7 +77,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
   const taskDiagnostics=new BrowserTaskDiagnostics();taskDiagnostics.enabled=browserDiagnostics.enabled;
   const { registry, timezone, memory, browser } = dependencies.runtime ?? createToolRuntime(env, memoryDiagnostics, browserDiagnostics);
   const classifier = dependencies.classifier ?? new ConfirmationIntentClassifier(env.OPENAI_API_KEY);
-  const sessions = new Map<string, { browserSessionId: string; executor: ToolExecutor; expiresAt: number; busy: boolean; seenTurns: Set<string>; workingIds: string[]; memoryGeneration: number; lastMemorySequence: number; spellingEvidence: string; jobs: Set<Promise<void>>; closed: boolean }>();
+  const sessions = new Map<string, { browserSessionId: string; executor: ToolExecutor; expiresAt: number; busy: boolean; seenTurns: Set<string>; workingIds: string[]; memoryGeneration: number; lastMemorySequence: number; spellingEvidence: string; jobs: Set<Promise<void>>; closed: boolean; confirmationTrace?:{kind:'CONTENT'|'WRITE';expiresAt:number} }>();
   const lifetime = 30 * 60_000;
   const cleanup = () => { for (const [id, session] of sessions) if (session.expiresAt <= Date.now()) { browserDiagnostics.lifecycle(session.executor, 'session_expired'); session.closed = true; session.executor.close(); void browser?.endSession(session.browserSessionId).catch(() => {}); sessions.delete(id); } };
   const timer = setInterval(cleanup, 60_000); timer.unref();
@@ -102,14 +103,15 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
     const session = id ? sessions.get(id) : undefined;
     if (!session) { send(401, { error: 'Sesión de herramientas caducada. Reconecta.' }); return true; }
     if (path === '/api/tools/session' && req.method === 'DELETE') { const parsed=sessionCloseReasonSchema.safeParse(req.headers['x-atlas-session-close']);taskDiagnostics.event({stage:'TOOLS_SESSION_DELETE',closeReason:parsed.success?parsed.data:'UNKNOWN'});browserDiagnostics.lifecycle(session.executor, 'session_closed'); session.closed = true; session.executor.close(); void browser?.endSession(session.browserSessionId).catch(() => {}); sessions.delete(id!); send(200, { closed: true }); return true; }
-    if (path === '/api/tools/activity' && req.method === 'GET') { const pending=session.executor.pendingState();const state=browser?.state(session.browserSessionId,!!pending);send(200, { activity: session.executor.telemetry.snapshot(), pending, ...(state ? { browser:state } : {}) }); return true; }
+    if (path === '/api/tools/activity' && req.method === 'GET') { const pending=session.executor.pendingState();if(!pending&&session.confirmationTrace&&session.confirmationTrace.expiresAt<=Date.now()){taskDiagnostics.event({stage:'CONFIRMATION_EXPIRED',confirmationPhase:session.confirmationTrace.kind});session.confirmationTrace=undefined;}const state=browser?.state(session.browserSessionId,!!pending);send(200, { activity: session.executor.telemetry.snapshot(), pending, ...(state ? { browser:state } : {}) }); return true; }
     if (req.method !== 'POST') { send(405, { error: 'Método no permitido.' }); return true; }
-    const contextualRead = path === '/api/tools/memory-context' || path === '/api/tools/memory-turn' || path === '/api/tools/browser-continuation' || path === '/api/tools/browser-cancel' || path==='/api/tools/browser-stall';
+    const contextualRead = path === '/api/tools/memory-context' || path === '/api/tools/memory-turn' || path === '/api/tools/browser-continuation' || path === '/api/tools/browser-cancel' || path==='/api/tools/browser-stall'||path==='/api/tools/confirmation-visible';
     if (session.busy && !contextualRead) { browserDiagnostics.lifecycle(session.executor, 'http_busy'); send(429, { error: 'Una herramienta sigue ejecutándose.' }); return true; }
     if (!contextualRead) session.busy = true;
     try {
       const input = await body(req);
       if(path==='/api/tools/browser-continuation'){const receipt=continuationReceiptSchema.parse(input);await browser?.inSession(session.browserSessionId,async()=>browser.acknowledge(receipt));send(200,{acknowledged:true});
+      } else if(path==='/api/tools/confirmation-visible'){const p=confirmationVisible.parse(input),pending=session.executor.pendingState(),acknowledged=pending?.confirmationId===p.confirmationId&&!!pending.confirmationKind,kind=acknowledged?pending.confirmationKind:undefined;if(acknowledged&&!p.visible){session.executor.invalidate();session.confirmationTrace=undefined;taskDiagnostics.event({stage:'CONFIRMATION_REJECTED',confirmationPhase:kind});}send(200,{acknowledged,kind});
       } else if(path==='/api/tools/browser-stall'){z.object({}).strict().parse(input);await browser?.inSession(session.browserSessionId,async()=>browser.stallDraftProgress());send(200,{stalled:true});
       } else if(path==='/api/tools/browser-admit'){const p=z.object({admissionId:z.string().uuid(),userTurn:z.object({itemId:z.string().min(1).max(128),utterance:z.string().min(1).max(2000)}).strict().optional(),transcriptPending:z.literal(true).optional(),late:z.literal(true).optional()}).strict().refine(value=>!(value.userTurn&&value.transcriptPending)&&(!value.late||!!value.userTurn)).parse(input);if(session.executor.pendingState())throw new Error();await browser?.inSession(session.browserSessionId,()=>browser.admitGoal(p.admissionId,p.userTurn?.utterance,undefined,p.transcriptPending===true,p.late===true));send(200,{admitted:true});
       } else if(path==='/api/tools/browser-cancel'){const p=z.object({itemId:z.string().min(1).max(128),utterance:z.string().max(120)}).strict().parse(input);const accepted=!!browser?.presentationEnabled&&!session.executor.pendingState()&&explicitBrowserCancellation(p.utterance)&&session.seenTurns.size<1000&&!session.seenTurns.has(p.itemId);if(accepted){session.seenTurns.add(p.itemId);await browser?.inSession(session.browserSessionId,async()=>browser.cancelFromUser());}send(200,{cancelled:accepted});
@@ -187,6 +189,7 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
         };
         const priorActionId=browser?.state(session.browserSessionId,!!session.executor.pendingState())?.actionOutcome?.actionId;
         const result = browserCall ? await browserDiagnostics.inCall(session.executor, browserCall, run) : await run();
+        if(result.status==='pending'&&result.confirmationKind){session.confirmationTrace={kind:result.confirmationKind,expiresAt:result.expiresAt};taskDiagnostics.event({stage:'CONFIRMATION_CREATED',confirmationPhase:result.confirmationKind});}
         if (browserCall) await browserDiagnostics.inCall(session.executor, browserCall, async () => { browserDiagnostics.event('http_result', result.status === 'error' ? browserCode(result.category) : 'OK', performance.now() - started); });
         if (p.toolId.startsWith('memory.') && result.status === 'error') {
           const capability = registry.resolve(p.toolId)?.capability;
@@ -221,11 +224,11 @@ export function createToolsHandler(env: NodeJS.ProcessEnv = process.env, diagnos
           send(200, { confirmationId: p.confirmationId, intent: boundIntent });
         }
       } else if (path === '/api/tools/decision') {
-        const p = decision.parse(input); trace({ event: 'server POST /decision', reason: p.approved ? 'approved' : 'rejected', pendingId: p.confirmationId }); const decide = () => session.executor.decide(p.confirmationId, p.approved,p.editedContent===undefined?undefined:{editedContent:p.editedContent}); send(200, browser ? await browser.inSession(session.browserSessionId, decide) : await decide());
+        const p = decision.parse(input),current=session.executor.pendingState(),kind=current?.confirmationId===p.confirmationId?current.confirmationKind:undefined; trace({ event: 'server POST /decision', reason: p.approved ? 'approved' : 'rejected', pendingId: p.confirmationId }); const decide = () => session.executor.decide(p.confirmationId, p.approved,p.editedContent===undefined?undefined:{editedContent:p.editedContent});const result=browser ? await browser.inSession(session.browserSessionId, decide) : await decide();if(kind){taskDiagnostics.event({stage:p.approved?'CONFIRMATION_APPROVED':'CONFIRMATION_REJECTED',confirmationPhase:kind});session.confirmationTrace=undefined;}if(result.status==='pending'&&result.confirmationKind){session.confirmationTrace={kind:result.confirmationKind,expiresAt:result.expiresAt};taskDiagnostics.event({stage:'CONFIRMATION_CREATED',confirmationPhase:result.confirmationKind});}send(200,result);
       } else if (path === '/api/tools/cancel') {
         const p = cancellation.parse(input); const current = session.executor.pendingState();
         if (p.confirmationId && current?.confirmationId !== p.confirmationId) send(200, { cancelled: false });
-        else { trace({ event: 'server POST /cancel', reason: 'request', pendingId: p.confirmationId }); session.executor.invalidate(); send(200, { cancelled: true }); }
+        else { const kind=current?.confirmationKind;trace({ event: 'server POST /cancel', reason: 'request', pendingId: p.confirmationId }); session.executor.invalidate();if(kind){taskDiagnostics.event({stage:'CONFIRMATION_REJECTED',confirmationPhase:kind});session.confirmationTrace=undefined;}send(200, { cancelled: true }); }
       }
       else send(404, { error: 'Ruta desconocida.' });
     } catch { send(400, { error: 'Solicitud inválida.' }); }

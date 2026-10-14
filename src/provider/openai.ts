@@ -191,6 +191,9 @@ export class OpenAIVoiceProvider implements VoiceProvider {
   confirmTool(approved: boolean, confirmationId: string,editedContent?:string): void {
     if (this.tools?.pending?.confirmationId === confirmationId) void this.tools.decide(approved,editedContent);
   }
+  confirmationPresented(confirmationId:string,visible:boolean):void {
+    if(this.tools?.pending?.confirmationId===confirmationId)void this.tools.confirmationPresented(confirmationId,visible);
+  }
   interrupt(): void {
     try { this.session?.interrupt(); } catch { this.fail('No se pudo interrumpir la respuesta. Vuelve a conectar.','INTERRUPT_FAILURE'); }
   }

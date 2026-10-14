@@ -82,11 +82,12 @@ export class ToolExecutor {
       if (row.confirmationRequired) {
         this.invalidate('rejected');
         const view=tool.confirmationView?.(input);
-        const pending = { id: randomUUID(), tool, input, expiresAt: this.now() + this.confirmationMs, pendingAt: this.now(), row, ...(view?{review:view}:{}) };
+        const confirmationTtl=tool.confirmationTtlMs??this.confirmationMs;
+        const pending = { id: randomUUID(), tool, input, expiresAt: this.now() + confirmationTtl, pendingAt: this.now(), row, ...(view?{review:view}:{}) };
         this.trace({ event: 'executor.prepare', reason: 'prepared', pendingId: pending.id });
         tool.confirmationLifecycle?.pending(input, pending.id, pending.expiresAt);
         this.pending = pending; row.status = 'pending';
-        return { status: 'pending', confirmationId: pending.id, summary: tool.summarize?.(input) ?? `¿Confirmas ${tool.name}?`, expiresAt: pending.expiresAt, ...(view?{review:view}:{}) };
+        return { status: 'pending', confirmationId: pending.id, summary: tool.summarize?.(input) ?? `¿Confirmas ${tool.name}?`, expiresAt: pending.expiresAt, ...(tool.confirmationKind?{confirmationKind:tool.confirmationKind}:{}), ...(view?{review:view}:{}) };
       }
       return await this.run(tool, input, row);
     } catch (error) { return this.finishError(row, error); }
@@ -94,7 +95,7 @@ export class ToolExecutor {
   pendingState() {
     if (this.pending && this.pending.expiresAt <= this.now()) this.invalidate('expired');
     const p = this.pending;
-    return p ? { confirmationId: p.id, summary: p.tool.summarize?.(p.input) ?? p.tool.name, expiresAt: p.expiresAt, ...(p.review?{review:p.review}:{}) } : null;
+    return p ? { confirmationId: p.id, summary: p.tool.summarize?.(p.input) ?? p.tool.name, expiresAt: p.expiresAt, ...(p.tool.confirmationKind?{confirmationKind:p.tool.confirmationKind}:{}), ...(p.review?{review:p.review}:{}) } : null;
   }
   pendingToolId(): string | undefined { return this.pending?.tool.id; }
   async decide(id: string, approved: boolean, decision?:{editedContent?:string}): Promise<ToolResult> {

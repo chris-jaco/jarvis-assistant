@@ -12,7 +12,7 @@ import type { ManualSelection } from '../../src/browser/consequential/manual-sel
 import { effectCapabilitySchema } from '../../src/browser/consequential/contracts.js';
 interface Access { scopeId: string; tabId: string; session: string; epoch: string; origin: string; expiresAt: number }
 interface Entry { node: HTMLElement; documentId: string; snapshotId: string; action: string; href?: string; fingerprint: string; form: HTMLFormElement | null; modal?: HTMLElement; search?: SearchControl; media?: MediaControl }
-interface SelectedConversation { evidence:ManualSelection;panel:HTMLElement;header:HTMLElement;composer:HTMLElement;observer:MutationObserver;changed:boolean }
+interface SelectedConversation { evidence:ManualSelection;panel:HTMLElement;header:HTMLElement;composer:HTMLElement;observer:MutationObserver }
 export class ContentEngine {
   private mediaState: MediaState;
   private semanticAdapters = new SemanticAdapterRegistry(() => this.id());
@@ -44,9 +44,14 @@ export class ContentEngine {
   private selected(access:Access):ManualSelection|undefined {
     const selected=this.selection;
     if(!selected)return;
-    if(selected.observer.takeRecords().length)selected.changed=true;
     const {panel,header,composer,evidence}=selected;
-    if(selected.changed||evidence.expiresAt<=this.now()||evidence.scopeId!==access.scopeId||evidence.tabId!==access.tabId||evidence.epoch!==access.epoch||evidence.documentId!==this.documentId||this.win.location.href!==this.documentUrl||!panel.isConnected||!header.isConnected||!composer.isConnected||!panel.contains(header)||!panel.contains(composer)||!this.visible(panel)||!this.visible(header)||!this.visible(composer)||composer.matches(':disabled,[readonly],[aria-disabled="true"],[aria-readonly="true"]')) {this.clearSelection();return;}
+    // WhatsApp mutates presence/status text and hydrates descendants while the
+    // selected conversation remains the same. Revalidate the exact structural
+    // nodes instead of treating every subtree mutation as an identity change.
+    // A replacement is never remapped: any different panel/header/composer
+    // invalidates the user selection and requires a new explicit gesture.
+    const current=this.semanticAdapters.select(access.origin)?.select(this.win.document,el=>this.visible(el));
+    if(evidence.expiresAt<=this.now()||evidence.scopeId!==access.scopeId||evidence.tabId!==access.tabId||evidence.epoch!==access.epoch||evidence.documentId!==this.documentId||this.win.location.href!==this.documentUrl||!current||current.panel!==panel||current.header!==header||current.composer!==composer||!panel.isConnected||!header.isConnected||!composer.isConnected||!panel.contains(header)||!panel.contains(composer)||!this.visible(panel)||!this.visible(header)||!this.visible(composer)||composer.matches(':disabled,[readonly],[aria-disabled="true"],[aria-readonly="true"]')) {this.clearSelection();return;}
     return evidence;
   }
   // Called exclusively by the extension popup path, after an actual user click.
@@ -63,9 +68,11 @@ export class ContentEngine {
     this.clearSelection();
     if(this.terminalManualRequests.has(manualRequestId))return false;
     const evidence:ManualSelection={selectionId:this.id(),manualRequestId,admissionId,taskId,scopeId:current.scopeId,tabId:current.tabId,documentId:this.documentId,epoch:current.epoch,expiresAt:Math.min(current.expiresAt,this.now()+5*60_000),assurance:'USER_SELECTED'};
-    const selected:SelectedConversation={evidence,...nodes,observer:new this.win.MutationObserver(()=>{selected.changed=true;}),changed:false};
-    selected.observer.observe(nodes.header,{attributes:true,childList:true,subtree:true,characterData:true});
-    selected.observer.observe(nodes.composer,{childList:true,subtree:true,characterData:true});
+    const selected:SelectedConversation={evidence,...nodes,observer:new this.win.MutationObserver(()=>{})};
+    // Retain an observer only as a bounded lifecycle handle. Validation above
+    // is synchronous and identity based, so harmless descendant mutations do
+    // not revoke authority and node replacement still fails closed.
+    selected.observer.observe(nodes.panel,{childList:true,subtree:true});
     this.selection=selected;
     return true;
   }
@@ -134,7 +141,7 @@ export class ContentEngine {
         const inserted=this.win.document.execCommand?.('insertText',false,text)??false;if(!inserted)composer.textContent=text;
         composer.dispatchEvent(new this.win.InputEvent('input',{bubbles:true,inputType:'insertText',data:text}));
         if(composer.textContent!==text)return {outcome:'ERROR',code:'EXECUTION_UNKNOWN'};
-        selected.changed=false;selected.observer.observe(selected.header,{attributes:true,childList:true,subtree:true,characterData:true});selected.observer.observe(composer,{childList:true,subtree:true,characterData:true});
+        selected.observer.observe(selected.panel,{childList:true,subtree:true});
         return {outcome:'OK',data:{draftState:'WRITTEN_VERIFIED'}};
       }
       const challenge = this.challenge(); if (challenge) { this.refs.clear(); return { outcome: 'REQUIRES_USER_INTERACTION', handoffId: this.id(), reason: challenge }; }

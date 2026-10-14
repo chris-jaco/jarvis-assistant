@@ -4,7 +4,7 @@ export type Permission = 'READ' | 'WRITE' | 'SENSITIVE';
 export type Transport = 'hosted' | 'mcp' | 'api' | 'function' | 'local';
 export interface ToolDefinition {
   id: string; name: string; description: string; integration: string; capability: string;
-  permission: Permission; confirm?: boolean; confirmWhen?(prepared: unknown): boolean; schema: z.ZodType; timeoutMs?: number;
+  permission: Permission; confirm?: boolean; confirmWhen?(prepared: unknown): boolean; schema: z.ZodType; timeoutMs?: number; confirmationTtlMs?: number; confirmationKind?:'CONTENT'|'WRITE';
   confirmationView?(input: unknown): { kind:'EDITABLE_CONTENT'; content:string; label:string; maxLength:number }|undefined;
   confirmationLifecycle?: { pending(input: unknown, id: string, expiresAt: number): void; decided(input: unknown, id: string, approved: boolean, decision?:{editedContent?:string}): void; invalidated(input: unknown, reason: 'rejected' | 'expired'): void };
   followup?(data: unknown): { toolId:string; input:unknown }|undefined;
@@ -16,4 +16,4 @@ export interface ToolAdapter { integration: string; transport: Transport; tools(
 export type ErrorCategory = 'INVALID_INPUT' | 'UNCONFIGURED' | 'UPSTREAM' | 'TIMEOUT' | 'AMBIGUOUS' | 'CONFLICT' | 'EXPIRED' | 'REJECTED' | 'LIMIT' | 'EXECUTION_UNKNOWN';
 export type BrowserRecovery = BrowserConflictDetail & { remainingRecoveries: number; recoverable: boolean };
 export class ToolError extends Error { constructor(readonly category: ErrorCategory, readonly browserRecovery?: BrowserRecovery, readonly browserObservation?: ObservationResult, readonly browserTimings?: BrowserTimings) { super(category); } }
-export type ToolResult = { status: 'success'; data: unknown } | { status: 'error'; category: ErrorCategory; message: string; browserRecovery?: BrowserRecovery; browserObservation?: ObservationResult } | { status: 'pending'; confirmationId: string; summary: string; expiresAt: number; review?:{kind:'EDITABLE_CONTENT';content:string;label:string;maxLength:number} };
+export type ToolResult = { status: 'success'; data: unknown } | { status: 'error'; category: ErrorCategory; message: string; browserRecovery?: BrowserRecovery; browserObservation?: ObservationResult } | { status: 'pending'; confirmationId: string; summary: string; expiresAt: number; confirmationKind?:'CONTENT'|'WRITE'; review?:{kind:'EDITABLE_CONTENT';content:string;label:string;maxLength:number} };

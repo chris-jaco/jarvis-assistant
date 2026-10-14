@@ -6,7 +6,7 @@ export class ConfirmationDialog {
   private submitting?: string;
   private expiry?: ReturnType<typeof setTimeout>;
   private restore?: HTMLElement;
-  constructor(private readonly dialog: HTMLDialogElement, private readonly summary: HTMLElement, private readonly status: HTMLElement, private readonly editor:HTMLTextAreaElement, private approve: HTMLButtonElement, private reject: HTMLButtonElement, private readonly decide: (approved: boolean, id: string,editedContent?:string) => void) {
+  constructor(private readonly dialog: HTMLDialogElement, private readonly summary: HTMLElement, private readonly status: HTMLElement, private readonly editor:HTMLTextAreaElement, private approve: HTMLButtonElement, private reject: HTMLButtonElement, private readonly decide: (approved: boolean, id: string,editedContent?:string) => void,private readonly presented:(id:string,visible:boolean)=>void=()=>{}) {
     approve.addEventListener('click', this.confirm); reject.addEventListener('click', this.cancel);
     dialog.addEventListener('cancel', this.escape);
   }
@@ -45,8 +45,11 @@ export class ConfirmationDialog {
     this.status.textContent = this.submitting ? 'Esperando el resultado…' : disabled ? 'Esta confirmación caducó.' : pending.review ? 'Revisá el texto y elegí confirmar o cancelar aquí.' : 'Podés responder por voz o elegir aquí.';
     if (!this.dialog.open) {
       this.restore = this.dialog.ownerDocument.activeElement as HTMLElement | undefined;
-      this.dialog.showModal(); this.reject.focus();
+      try{this.dialog.showModal();this.reject.focus();}catch{this.approve.disabled=this.reject.disabled=true;this.status.textContent='No se pudo abrir esta confirmación.';this.presented(pending.confirmationId,false);return;}
     } else if (changed) this.reject.focus();
+    // Creation/delivery is not presentation. Acknowledge only after the exact
+    // pending confirmation owns an actually open dialog.
+    if(changed&&this.dialog.open&&this.pending?.confirmationId===pending.confirmationId)this.presented(pending.confirmationId,true);
     this.expiry = setTimeout(() => { if (this.pending?.confirmationId === pending.confirmationId) { this.approve.disabled = this.reject.disabled = true; this.status.textContent = 'Esta confirmación caducó.'; } }, Math.max(0, pending.expiresAt - Date.now()));
   }
   dispose(): void { this.update(null); this.approve.removeEventListener('click', this.confirm); this.reject.removeEventListener('click', this.cancel); this.dialog.removeEventListener('cancel', this.escape); }

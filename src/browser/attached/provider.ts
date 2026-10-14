@@ -218,12 +218,11 @@ export class AttachedChromeProvider implements BrowserProvider {
     return data;
   }
   private draftContext(data:AttachedObservation):DraftContext {
-    const session=this.session(),tab=session.tabs.get(session.active??'');
-    if(data.conversationEvidence&&!data.manualSelection)this.rejectDraft('MANUAL_SELECTION_MISSING');
+    const session=this.session(),tab=session.tabs.get(session.active??''),wait=session.manualWait;
+    if(data.conversationEvidence&&!data.manualSelection)this.rejectDraft(wait?.status==='SELECTED'?'OTHER_PRECONDITION':'MANUAL_SELECTION_MISSING');
     // Successful extension observe attests all three existing permission layers.
     // Bind that evidence to this exact backend admission and operational scope.
     const origin=new URL(data.url).origin;
-    const wait=session.manualWait;
     if(session.uncertain)this.rejectDraft('EXECUTION_UNCERTAIN');
     if(session.cancelled)this.rejectDraft('TASK_CANCELLED');
     if(session.workflow)this.rejectDraft('WORKFLOW_PENDING');
@@ -259,7 +258,10 @@ export class AttachedChromeProvider implements BrowserProvider {
     const context=this.draftContext(data);if(!context.manualSelection)this.rejectDraft('MANUAL_SELECTION_MISSING');
     const authorized=session.authorizedDraft;
     const text=authorized&&authorized.admissionId===session.admission?authorized.text:request.text;
-    const review:ContentReview={id:randomUUID(),request:{...request,text},bindingDigest:this.contentBinding(context),expiresAt:Math.min(Date.now()+60_000,context.grantExpiresAt,context.manualSelection.expiresAt),status:'PENDING'};
+    // Human review may legitimately take around a minute. Keep the window
+    // bounded by both the operational grant and the manual selection, while
+    // avoiding a race with the generic 60-second confirmation default.
+    const review:ContentReview={id:randomUUID(),request:{...request,text},bindingDigest:this.contentBinding(context),expiresAt:Math.min(Date.now()+120_000,context.grantExpiresAt,context.manualSelection.expiresAt),status:'PENDING'};
     session.contentReviews??=new Map();for(const existing of session.contentReviews.values())if(existing.status==='PENDING')existing.status='INVALIDATED';session.contentReviews.set(review.id,review);session.draftPhase='CONTENT_PENDING_CONFIRMATION';
     this.traceTask({stage:'CONTENT_CONFIRMATION_REQUIRED',taskId:session.task,admissionId:session.admission,draftPhase:session.draftPhase});
     return {mode:'CONTENT_REVIEW',reviewId:review.id,content:text,maxLength:2000};

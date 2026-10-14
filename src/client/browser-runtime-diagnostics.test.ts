@@ -57,6 +57,10 @@ test('deterministic draft workflow diagnostics expose phases and booleans but re
  assert.equal(rows.length,9);for(const field of ['text','recipient','intentId','confirmationId','capability','token','dom'])diagnostic.event({stage:'DRAFT_FROZEN',taskId,admissionId,draftPhase:'DRAFT_FROZEN',[field]:'PRIVATE_SENTINEL'});
  assert.equal(rows.length,9);assert.ok(!JSON.stringify(rows).includes('PRIVATE_SENTINEL'));
 });
+test('confirmation presentation lifecycle diagnostics expose only phase enums',()=>{
+ const {rows,diagnostic}=trace();for(const stage of ['CONFIRMATION_CREATED','CONFIRMATION_DELIVERED','CONFIRMATION_VISIBLE','CONFIRMATION_APPROVED','CONFIRMATION_REJECTED','CONFIRMATION_EXPIRED'] as const)diagnostic.event({stage,confirmationPhase:'CONTENT'});assert.equal(rows.length,6);
+ diagnostic.event({stage:'CONFIRMATION_VISIBLE',confirmationPhase:'PRIVATE_SENTINEL',confirmationId:'PRIVATE_SENTINEL',content:'PRIVATE_SENTINEL'});assert.equal(rows.length,6);assert.ok(!JSON.stringify(rows).includes('PRIVATE_SENTINEL'));
+});
 test('tool session DELETE carries a closed reason only while diagnostics remain opt-in',async()=>{
  const originalFetch=globalThis.fetch,originalDebug=console.debug;const rows:BrowserTaskTrace[]=[],reasons:string[]=[];
  console.debug=(prefix,...args)=>{if(prefix==='[ATLAS browser task]')rows.push(JSON.parse(String(args[0])));};

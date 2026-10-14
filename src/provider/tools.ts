@@ -16,7 +16,7 @@ import { intentSchema } from '../tools/confirmation-intent.js';
 import type { ToolResult } from '../tools/types.js';
 import type { ToolActivity } from '../tools/telemetry.js';
 setSensitiveDataLoggingEnabled(false);
-export interface PendingConfirmation { confirmationId: string; summary: string; expiresAt: number; review?:{kind:'EDITABLE_CONTENT';content:string;label:string;maxLength:number} }
+export interface PendingConfirmation { confirmationId: string; summary: string; expiresAt: number; confirmationKind?:'CONTENT'|'WRITE'; review?:{kind:'EDITABLE_CONTENT';content:string;label:string;maxLength:number} }
 interface Descriptor { permission?:'READ'|'WRITE'|'SENSITIVE'; id: string; description: string; inputSchema: unknown }
 export async function toolRequest(path: string, data?: unknown, method = 'POST', browserRequest?: { sequence: number; response(call: string): void }, closeReason?:SessionCloseReason): Promise<unknown> {
   const response = await fetch(`/api/tools/${path}`, { method, headers: { 'Content-Type': 'application/json', ...(browserRequest ? { 'X-Atlas-Browser-Request': String(browserRequest.sequence) } : {}),...(path==='session'&&method==='DELETE'&&closeReason?{'X-Atlas-Session-Close':closeReason}:{}) },
@@ -69,7 +69,8 @@ export class VoiceToolBridge {
   private lifecycleEnabled=false;private admission=new BrowserTaskAdmission();private admissionInFlight?:Promise<void>;private lastBrowserState?:BrowserExecutionState;
   private presentationRevision=0;private browserInvocations=0;
   private draftPhase?:string;private draftNoProgress=0;
-  private present(raw:unknown):void {const parsed=z.object({executionState:browserExecutionStateSchema,revision:z.number().int().positive().optional(),taskActive:z.boolean().optional(),draftPhase:z.string().optional()}).passthrough().safeParse(raw);if(!parsed.success)return;const state=parsed.data;if(state.revision!==undefined){if(state.revision<=this.presentationRevision)return;this.presentationRevision=state.revision;}if(state.draftPhase!==this.draftPhase){this.draftPhase=state.draftPhase;this.draftNoProgress=0;}if(state.taskActive!==false||state.executionState==='WAITING_CONFIRMATION')this.presentation?.state(state.executionState);this.lastBrowserState=state.executionState;}
+  private deliveredConfirmations=new Set<string>();private visibleConfirmations=new Set<string>();private announcedStates=new Set<string>();
+  private present(raw:unknown):void {const parsed=z.object({taskId:z.string().uuid().optional(),executionState:browserExecutionStateSchema,revision:z.number().int().positive().optional(),taskActive:z.boolean().optional(),draftPhase:z.string().optional(),manualSelection:z.object({status:z.string(),requestId:z.string().uuid()}).nullable().optional()}).passthrough().safeParse(raw);if(!parsed.success)return;const state=parsed.data;if(state.revision!==undefined){if(state.revision<=this.presentationRevision)return;this.presentationRevision=state.revision;}if(state.draftPhase!==this.draftPhase){this.draftPhase=state.draftPhase;this.draftNoProgress=0;}if(state.taskActive!==false||state.executionState==='WAITING_CONFIRMATION')this.presentation?.state(state.executionState);this.lastBrowserState=state.executionState;const notice=`${state.taskId??'task'}:manual`;if(state.executionState==='WAITING_MANUAL'&&state.manualSelection?.status==='PENDING'&&!this.announcedStates.has(notice)){this.announcedStates.add(notice);this.notify('Necesito que confirmes la conversación desde la extensión de Chrome.');}}
   private armed = false;
   private decisionInFlight = false;
   private intentRevision = 0;
@@ -247,7 +248,7 @@ export class VoiceToolBridge {
     // A new turn supersedes an unresolved semantic decision. Old classification
     // must not execute while the user is already correcting or changing intent.
     if (this.intentInFlight && !this.captured.has(itemId)) ++this.intentRevision;
-    if (!this.captured.has(itemId) && this.pending && this.pending.expiresAt > Date.now()) this.captured.set(itemId, { id: this.pending.confirmationId, approvable: this.armed&&!this.pending.review });
+    if (!this.captured.has(itemId) && this.pending && this.pending.expiresAt > Date.now()) this.captured.set(itemId, { id: this.pending.confirmationId, approvable: this.armed&&!this.pending.review&&!this.pending.confirmationKind });
     const capture = this.captured.get(itemId);
     this.diagnostic('speech.capture', capture ? 'captured' : 'not_captured', { itemId, capturedId: capture?.id, capturedApprovable: capture?.approvable });
   }
@@ -314,10 +315,15 @@ export class VoiceToolBridge {
     this.pending = null; this.armed = false; this.promptPlayback = undefined; this.captured.clear();
     try { const result = await toolRequest('decision', { confirmationId: pending.confirmationId, approved,...(editedContent===undefined?{}:{editedContent}) }) as ToolResult;
       this.pending=result.status==='pending'?result:null;
-      if (!this.closed) this.notify(`Resultado del backend para la confirmación ${pending.confirmationId}: ${JSON.stringify(result)}. Comunica el resultado brevemente; no repitas la acción.`);
+      if(!this.closed){const draftConfirmation=!!pending.review||['CONTENT_PENDING_CONFIRMATION','WRITE_CONFIRMATION_PENDING'].includes(this.draftPhase??'');if(draftConfirmation&&(!approved||result.status==='error'&&result.category==='REJECTED'))this.notify('Cancelado. No escribí ningún mensaje.');else if(result.status==='success'&&(result.data as {status?:unknown})?.status==='DRAFT_WRITTEN')this.notify('Listo, dejé el mensaje escrito en WhatsApp sin enviarlo.');else if(result.status!=='pending'&&!draftConfirmation)this.notify(`Resultado del backend para la confirmación ${pending.confirmationId}: ${JSON.stringify(result)}. Comunica el resultado brevemente; no repitas la acción.`);}
     } catch { if (!this.closed) this.notify('No se pudo confirmar la acción. No asumas éxito ni repitas una escritura sin comprobar su estado.'); }
     await this.refresh();
     this.decisionInFlight = false;
+  }
+  async confirmationPresented(confirmationId:string,visible:boolean):Promise<void>{
+    if(this.closed||this.pending?.confirmationId!==confirmationId||this.visibleConfirmations.has(confirmationId))return;
+    try{const result=await toolRequest('confirmation-visible',{confirmationId,visible}) as {acknowledged?:unknown;kind?:unknown};if(result.acknowledged!==true||this.pending?.confirmationId!==confirmationId)return;if(!visible){this.pending=null;this.notify('No pude abrir la confirmación en Atlas. No escribí nada.');await this.refresh();return;}this.visibleConfirmations.add(confirmationId);this.taskDiagnostics.event({stage:'CONFIRMATION_VISIBLE',...this.browserContinuation.traceContext(),confirmationPhase:result.kind==='CONTENT'?'CONTENT':'WRITE'});if(result.kind==='CONTENT')this.notify('Ya tengo el borrador. Te dejé la confirmación abierta en Atlas para que revises el texto.');else if(result.kind==='WRITE')this.notify('Texto confirmado. Ahora necesito tu autorización para escribirlo en WhatsApp.');}
+    catch{if(!this.closed)this.notify('No pude abrir la confirmación en Atlas. No escribí nada.');}
   }
   private async refresh(): Promise<void> {
     if (this.closed) return;
@@ -325,9 +331,10 @@ export class VoiceToolBridge {
     try { const data = await toolRequest('activity', undefined, 'GET') as { activity: ToolActivity[]; pending: PendingConfirmation | null; browser?: unknown };
       if (this.closed) return;
       if (this.pending && this.pending.confirmationId === expectedId && (!data.pending || data.pending.confirmationId !== this.pending.confirmationId)) { this.diagnostic('activity.refresh', 'backend_pending_missing_or_changed'); this.pending = null; this.armed = false; }
+      if(data.pending&&!this.deliveredConfirmations.has(data.pending.confirmationId)){this.deliveredConfirmations.add(data.pending.confirmationId);if(data.pending.confirmationKind)this.taskDiagnostics.event({stage:'CONFIRMATION_DELIVERED',...this.browserContinuation.traceContext(),confirmationPhase:data.pending.confirmationKind});}
       this.activity(data.activity, this.pending);
       if (data.browser) {const state=browserExecutionStateSchema.safeParse((data.browser as {executionState?:unknown}).executionState);if(state.success&&this.browserInvocations===0)this.present(data.browser);this.browserContinuation.update(data.browser, this.confirmationActive,this.browserBusy());}
     } catch { /* Polling never breaks voice playback. Tool requests report failures. */ }
   }
-  close(reason:SessionCloseReason='UNKNOWN'): void { this.diagnostic('bridge.close', 'session_closed');this.taskDiagnostics.event({stage:'TOOLS_SESSION_DELETE',closeReason:reason,taskState:this.lastBrowserState}); this.closed = true; this.admission.clear(); this.browserContinuation.close(); this.sdkPending.clear();this.sdkCommitted.clear();this.sdkToolNames.clear();this.sdkAnnounced.clear();this.sdkResponses.clear();this.sdkAwaitingResponse=false;this.browserUserTurns.clear();this.responseTrace.clear();this.requestedTraceTokens=[];this.observedResponses.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE',undefined,reason).catch(() => undefined); }
+  close(reason:SessionCloseReason='UNKNOWN'): void { this.diagnostic('bridge.close', 'session_closed');this.taskDiagnostics.event({stage:'TOOLS_SESSION_DELETE',closeReason:reason,taskState:this.lastBrowserState}); this.closed = true; this.admission.clear(); this.browserContinuation.close(); this.sdkPending.clear();this.sdkCommitted.clear();this.sdkToolNames.clear();this.sdkAnnounced.clear();this.sdkResponses.clear();this.sdkAwaitingResponse=false;this.browserUserTurns.clear();this.responseTrace.clear();this.requestedTraceTokens=[];this.observedResponses.clear();this.deliveredConfirmations.clear();this.visibleConfirmations.clear();this.announcedStates.clear(); clearInterval(this.polling); this.pending = null; this.captured.clear(); void toolRequest('session', undefined, 'DELETE',undefined,reason).catch(() => undefined); }
 }

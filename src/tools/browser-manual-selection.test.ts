@@ -37,9 +37,13 @@ test('a popup selection binds only the current conversation and does not assert 
   assert.equal(observed.data.conversationEvidence?.identity,'NOT_VERIFIED');
   assert.equal(JSON.stringify(observed.data).includes('PERSONAL_NAME'),false);
   f.win.document.querySelector('header')!.textContent='OTHER_PERSON';
+  const harmless=await f.engine.run('observe',{scopeId:f.access.scopeId,tabId:f.access.tabId},Date.now()+5000,{session:f.access.session,epoch:f.access.epoch});
+  assert.equal(harmless.outcome,'OK');if(harmless.outcome!=='OK'||!('manualSelection'in harmless.data))throw new Error();
+  assert.equal(harmless.data.manualSelection?.selectionId,observed.data.manualSelection?.selectionId,'descendant hydration/status mutations do not replace the selected structural context');
+  const oldHeader=f.win.document.querySelector('header')!,replacement=oldHeader.cloneNode(true);oldHeader.replaceWith(replacement);
   const changed=await f.engine.run('observe',{scopeId:f.access.scopeId,tabId:f.access.tabId},Date.now()+5000,{session:f.access.session,epoch:f.access.epoch});
   assert.equal(changed.outcome,'OK');if(changed.outcome!=='OK'||!('elements'in changed.data))throw new Error();
-  assert.equal(changed.data.manualSelection,undefined);
+  assert.equal(changed.data.manualSelection,undefined,'node replacement is a material change and never remaps authority');
  }finally{f.close();}
 });
 

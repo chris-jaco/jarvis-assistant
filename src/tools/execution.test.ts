@@ -16,6 +16,12 @@ test('tool latency separates preparation, confirmation wait and execution withou
   } finally { executor.close(); }
 });
 
+test('a scoped visual confirmation TTL survives deliberate 45-60 second review without changing the global default',async()=>{
+  let now=1000;const registry=new ToolRegistry();let executions=0;
+  registry.register({id:'test.visual',name:'Visual',description:'Visual',integration:'test',capability:'write',permission:'WRITE',confirm:true,confirmationKind:'WRITE',confirmationTtlMs:120_000,schema:z.object({}),execute:async()=>{executions++;return {};}});
+  const executor=new ToolExecutor(registry,()=>now);try{const pending=await executor.invoke('visual','test.visual',{});assert.equal(pending.status,'pending');if(pending.status!=='pending')throw new Error();assert.equal(pending.confirmationKind,'WRITE');now+=60_000;assert.equal((await executor.decide(pending.confirmationId,true)).status,'success');assert.equal(executions,1);}finally{executor.close();}
+});
+
 test('editable content review freezes the approved edit and deterministically creates a separate write confirmation', async () => {
   const registry=new ToolRegistry();const executed:string[]=[];let contentDecision:string|undefined;
   registry.register({id:'test.prepare',name:'Prepare',description:'Prepare',integration:'test',capability:'prepare',permission:'WRITE',confirm:false,confirmWhen:()=>true,schema:z.object({candidate:z.string()}),prepare:async input=>input,confirmationView:input=>({kind:'EDITABLE_CONTENT',content:(input as {candidate:string}).candidate,label:'Exact content',maxLength:20}),confirmationLifecycle:{pending:()=>{},decided:(_input,_id,approved,decision)=>{if(approved)contentDecision=decision?.editedContent;},invalidated:()=>{}},execute:async()=>({intentId:'internal'}),followup:()=>({toolId:'test.write',input:{intentId:'internal'}})});
