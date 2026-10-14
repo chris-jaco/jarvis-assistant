@@ -4,6 +4,8 @@ import { AtlasOrb, stateLabels, presentationState } from './orb.js';
 import { AudioLevels } from './audio-levels.js';
 import { Transcript } from './transcript.js';
 import { ConfirmationDialog } from './confirmation-dialog.js';
+import { DesktopCoreTransport, DesktopRealtimeTokenProvider } from '../provider/desktop-transport.js';
+import type {} from '../desktop/api.js';
 import './style.css';
 function element<T extends HTMLElement>(id: string): T { const value = document.getElementById(id); if (!value) throw new Error(`Missing UI element: ${id}`); return value as T; }
 const toggle = element<HTMLButtonElement>('session-toggle'); const interrupt = element<HTMLButtonElement>('interrupt'); const play = element<HTMLButtonElement>('play');
@@ -18,6 +20,7 @@ function renderState(): void {
   element('state').textContent = stateLabels[visual];
   element('message').textContent = statusMessage ?? ({ disconnected: 'Tocá el orb para conversar.', connecting: 'Preparando la conversación…', connected: 'Podés hablar cuando quieras.', listening: 'Te escucho.', thinking: '', speaking: 'Podés interrumpirme hablando.', error: 'Tocá el orb para volver a conectar.' })[visual];
 }
+const desktopDependencies = window.atlasDesktop ? { core: new DesktopCoreTransport(), tokenProvider: new DesktopRealtimeTokenProvider() } : undefined;
 const provider = new OpenAIVoiceProvider({
   state(next, message) {
     state = next; statusMessage = message; renderState();
@@ -30,12 +33,15 @@ const provider = new OpenAIVoiceProvider({
     toolRunning = rows.some(row => row.status === 'running'); renderState(); confirmation.update(pending);
   },
   transcript(entries) { transcript.update(entries); }
-}, audio);
+}, audio, desktopDependencies);
 function renderMetrics(): void { const { connectionMs, detectedTurns, interruptions } = provider.metrics; element('metrics').textContent = `Conexión: ${connectionMs === null ? '—' : `${connectionMs} ms`} · Turnos: ${detectedTurns} · Interrupciones: ${interruptions}`; }
 toggle.addEventListener('click', () => { if (state === 'disconnected' || state === 'error') { void provider.connect(); if ((state as ConnectionState) === 'connecting') levels.prepare(); } else provider.disconnect(); });
 interrupt.addEventListener('click', () => provider.interrupt());
 play.addEventListener('click', () => { levels.resume(); void audio.play().then(() => { play.hidden = true; }).catch(() => { element('message').textContent = 'Revisá los permisos de reproducción del navegador.'; }); });
 window.addEventListener('pagehide', () => { provider.disconnect('PAGEHIDE'); levels.stop(); confirmation.dispose(); orb.dispose(); });
+window.atlasDesktop?.lifecycle.onShutdown(() => {
+  provider.disconnect('PAGEHIDE'); levels.stop(); confirmation.dispose(); orb.dispose(); window.atlasDesktop?.lifecycle.ready();
+});
 // pagehide may place the page in the back/forward cache. Reload only when restored,
 // so disposed listeners cannot leave a revived page with a partially active UI.
 window.addEventListener('pageshow', event => { if (event.persisted) window.location.reload(); });

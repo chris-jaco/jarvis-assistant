@@ -39,6 +39,7 @@ Atlas es un asistente personal de IA, principalmente por voz, con memoria contex
 | V0.5.3.6B.2 | PARTIAL / DEFERRED | Controlled Draft Writing | Confirmaciones CONTENT/WRITE alcanzadas; escritura en compositor no verificada y diferida |
 | V0.6.0 | Completada | Architecture Readiness | Auditoría completada, Electron elegido y GO condicional por hitos |
 | V0.6.1 — Hito 0 | Completada | Architecture Foundation | CoreTransport tipado, transporte web compatible, token Realtime inyectable y ADRs; validación local completa |
+| V0.6.1 — Hito 1 | Implementado; acceptance pendiente | Electron Vertical Slice | Renderer aislado, Core supervisado, canal local autenticado y voz reutilizada; pendiente Windows 11 real |
 
 **Acceptance V0.5.3.6A:** 665 tests: 662 PASS, 3 SKIP, 0 FAIL. Typecheck y builds OK. Commit publicado en rama de desarrollo; no merge a `main` ni tag/release de 6A.
 
@@ -86,7 +87,7 @@ Atlas es un asistente personal de IA, principalmente por voz, con memoria contex
 
 #### Fases propuestas
 0. **V0.6.1 — Architecture Foundation:** introducir `CoreTransport` y proveedores inyectables conservando las rutas HTTP, cookies, errores, cancelación, polling, Realtime/WebRTC y comportamiento web existentes. Sin Electron ni cambios funcionales de Browser Control.
-1. **Electron vertical slice:** shell mínimo con renderer aislado y backend Node supervisado; health, arranque/cierre y single-instance sin migrar todavía toda la UX.
+1. **Electron vertical slice — IMPLEMENTADO / ACCEPTANCE PENDIENTE:** shell mínimo con renderer aislado, backend Node supervisado, health autenticado, cierre acotado y single-instance. Requiere validar voz/micrófono/WebRTC y cleanup en Windows 11 real antes de completarlo.
 2. **Desktop lifecycle y canal local:** autenticación del canal, ownership de procesos, recuperación y actualización sin restaurar autoridad operativa.
 3. **Confirmaciones y orb-first UX:** permisos, estados RUNNING/WAITING/terminales, confirmaciones y errores accionables con transcript opcional.
 4. **Tray, audio y wake word:** tray/autostart opt-in, ownership exclusivo del micrófono, wake word local, barge-in y señalización inequívoca de privacidad.

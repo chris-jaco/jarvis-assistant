@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist/desktop-build",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"]
+  },
+  "include": [
+    "src/desktop/**/*.ts",
+    "src/provider/core-transport.ts",
+    "src/server/desktop-auth.ts"
+  ],
+  "exclude": ["src/desktop/preload.ts"]
+}

@@ -1,6 +1,6 @@
 # ADR-0061 — Backend Node supervisado
 
-- Estado: Aceptada; implementación diferida a V0.6.1 Hito 1
+- Estado: Implementada en V0.6.1 Hito 1; aceptación Windows pendiente
 
 Electron Main será propietario de un único proceso hijo Atlas Core. Lo iniciará, esperará readiness, observará health y realizará shutdown cooperativo con un plazo acotado. Sólo podrá terminar el PID hijo que creó; nunca buscará ni matará procesos Node ajenos.
 

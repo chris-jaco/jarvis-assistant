@@ -1,5 +1,9 @@
 # Atlas V0.5.2 — Browser Control sobre Chrome adjunto
 
+## Atlas Desktop (V0.6.1 Hito 1)
+
+El vertical slice Electron se ejecuta con `npm run desktop:dev`. Reutiliza Atlas Core y la UI actuales, mantiene WebRTC/audio en el renderer aislado y supervisa un backend Node autenticado en loopback. La aceptación Windows 11 todavía está pendiente; arquitectura, seguridad, lifecycle y procedimiento están en [docs/DESKTOP.md](docs/DESKTOP.md).
+
 Asistente personal por voz: TypeScript strict, Node HTTP nativo, interfaz sin framework, OpenAI Realtime y WebRTC. V0.5.2 incorpora Browser Control sobre Chrome habitual mediante extensión MV3 y Native Messaging, autorización persistente por origen, grants por tarea, Search/Media y recuperación de contexto con snapshots/ref validados. Conserva voz, herramientas, Gmail y memoria de las versiones anteriores.
 
 Implementación completada y acceptance real aprobado en Windows/Chrome sobre `05f5db5603a0b7e18c6e6c364210130e19e36ff7`: «Atlas, poné un set de Guy J en YouTube que dure más de tres horas» encontró y reprodujo un video de 4 h 26 min en un único turno, sin reintentos conversacionales. La verificación final de reproducción puede seguir siendo inconclusa; una acción ejecutada no se convierte en fallida por esa incertidumbre ni se repite para comprobarla. El tag y la publicación de la release son pasos separados.

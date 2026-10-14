@@ -65,7 +65,7 @@ export interface CoreTransport {
   request<K extends CoreOperation>(operation: K, input: CoreOperationMap[K]['input'], options?: CoreRequestOptions): Promise<CoreOperationMap[K]['output']>;
 }
 
-const routes: Record<CoreOperation, { path: string; method: 'GET' | 'POST' | 'DELETE' }> = {
+export const coreHttpRoutes: Readonly<Record<CoreOperation, { path: string; method: 'GET' | 'POST' | 'DELETE' }>> = {
   'session.create': { path: 'session', method: 'POST' },
   'session.close': { path: 'session', method: 'DELETE' },
   'activity.get': { path: 'activity', method: 'GET' },
@@ -95,7 +95,7 @@ export class WebCoreTransport implements CoreTransport {
   }
 
   async request<K extends CoreOperation>(operation: K, input: CoreOperationMap[K]['input'], options: CoreRequestOptions = {}): Promise<CoreOperationMap[K]['output']> {
-    const route = routes[operation];
+    const route = coreHttpRoutes[operation];
     const browserRequest = options.browserRequest;
     const closeReason = operation === 'session.close' ? (input as CoreOperationMap['session.close']['input']).reason : undefined;
     const response = await this.fetcher(`/api/tools/${route.path}`, {

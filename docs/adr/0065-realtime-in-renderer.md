@@ -1,6 +1,6 @@
 # ADR-0065 — Realtime permanece en renderer
 
-- Estado: Aceptada para V0.6
+- Estado: Implementada en el vertical slice; aceptación acústica/Windows pendiente
 
 OpenAI Realtime, WebRTC, captura de micrófono, playback y Web Audio permanecen inicialmente en el cliente/renderer. Esto conserva el flujo validado y evita introducir un pipeline de audio nativo simultáneamente al shell desktop.
 
