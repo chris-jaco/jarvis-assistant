@@ -29,6 +29,7 @@ test('attached provider exposes private drafts but no send tool or dispatch',asy
  let dispatches=0,selected=false;let listener:((connection:string,event:any)=>void)|undefined;const operations:string[]=[];
  const transport:BrowserTransport={epoch,connections:()=>[connection],subscribe:next=>{listener=next;return()=>{listener=undefined;}},close:()=>{},request:async(_connection,request):Promise<Reply>=>{
   operations.push(request.operation);
+  if(request.operation==='requestOriginAccess'){listener?.(connection,{protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:epoch,backendSessionId:session,event:'accessGranted',tab});return {outcome:'OK',data:tab};}
   if(request.operation==='listAuthorizedTabs')return {outcome:'OK',data:[tab]};
   if(request.operation==='observe')return {outcome:'OK',data:{tabId,scopeId,documentId,snapshotId:randomUUID(),expiresAt:Date.now()+15_000,url:tab.url,title:tab.title,elements:[],truncated:false,conversationEvidence:{provenance:{adapter:'whatsapp',version:1},state:'INSUFFICIENT_EVIDENCE',reason:'STRUCTURE_ONLY',conversationKind:'NOT_VERIFIED',truncated:false,activePanelCandidate:true,header:true,composer:true,composerEnabled:true,contactCandidates:0,contactPanel:'NOT_VERIFIED',phoneEvidence:'NOT_VERIFIED',contactAssociation:'NOT_VERIFIED',identity:'NOT_VERIFIED',phoneMatch:'NOT_VERIFIED',handles:{conversation:randomUUID(),header:randomUUID(),composer:randomUUID()},binding:{tabId,scopeId,documentId,epoch},trust:'UNTRUSTED_PAGE_EVIDENCE'},...(selected?{manualSelection:{selectionId,manualRequestId,admissionId,taskId:request.taskId,scopeId,tabId,documentId,epoch,expiresAt:selectionExpiresAt,assurance:'USER_SELECTED' as const}}:{})}};
   if(request.operation==='requestManualSelection')return {outcome:'REQUIRES_USER_INTERACTION',handoffId:manualRequestId,reason:'CONVERSATION_SELECTION'};
@@ -40,7 +41,7 @@ test('attached provider exposes private drafts but no send tool or dispatch',asy
  try{
   await adapter.inSession(session,async()=>{await adapter.admitGoal(admissionId,'Write a WhatsApp draft message and leave it as a draft');
    assert.deepEqual(await provider.prepareDraft({recipientHint:'Sofía',text:'Exact message'},new AbortController().signal),{status:'TEXT_CONFIRMATION_REQUIRED',draftOnly:true,format:'Decí: texto exacto: <mensaje> fin del mensaje'});
-   await provider.listTabs(new AbortController().signal);await provider.requestManualSelection(new AbortController().signal);
+   await provider.requestTabAccess({target:{kind:'current'},purpose:'Use the selected conversation',lifetime:'task'},new AbortController().signal);await provider.requestManualSelection(new AbortController().signal);
    assert.equal(await provider.admitGoal(randomUUID(),'The exact message is Exact message end message.'),false);
    selected=true;listener?.(connection,{protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:epoch,backendSessionId:session,event:'manualSelectionResolved',scopeId,manualRequestId,manualStatus:'SELECTED',taskId:provider.state(session).taskId,admissionId});provider.acknowledge(provider.state(session).continuation!);
    assert.equal(await provider.admitGoal(randomUUID(),'Да'),false);assert.equal(provider.state(session).manualSelection?.status,'SELECTED');
@@ -56,6 +57,7 @@ test('attached provider exposes private drafts but no send tool or dispatch',asy
    await assert.rejects(provider.prepareDraft({recipientHint:'Sofía',text:'Exact message'},new AbortController().signal),(error:any)=>error.category==='REJECTED');
   });
   assert.deepEqual(operations.filter(x=>x==='sendSelectedMessage'),[]);
+  assert.equal(operations.filter(x=>x==='requestOriginAccess').length,1);
   assert.equal((await journal.recover()).filter(row=>row.phase==='WRITE_DRAFT').length,1);
  }finally{executor.close();await provider.close();await rm(dir,{recursive:true,force:true});}
 });

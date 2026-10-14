@@ -2,7 +2,7 @@ import { resolveActiveTab, resolvePopupActiveTab, activeTabErrors } from './acti
 import { PopupDiagnostics } from '../../src/diagnostics/popup.js';
 const accessDiagnostics=new PopupDiagnostics(undefined,true);
 void chrome.storage.local.get('atlasPopupDiagnostics').then(value=>{accessDiagnostics.enabled=value.atlasPopupDiagnostics===true;}).catch(()=>{accessDiagnostics.enabled=false;});
-import { SiteAuthorization } from './site-authorization.js';
+import { SiteAuthorization, hostPattern } from './site-authorization.js';
 import { chromeSiteEnvironment } from './site-storage.js';
 import { popupSender } from './senders.js';
 import { ExtensionController } from './controller.js';
@@ -16,6 +16,7 @@ const controller = new ExtensionController({
   observeAuthorization:async grant=>{const tab=await chrome.tabs.get(grant.chromeId);if(!tab.url)throw new Error();const origin=new URL(tab.url).origin;return {...await sites.diagnosticStatus(origin),sameOrigin:origin===grant.origin};},
   tab: async id => { const tab = await chrome.tabs.get(id); return { id, windowId:tab.windowId, url: tab.url ?? '', title: tab.title, status: tab.status, pendingUrl: tab.pendingUrl }; },
   current: () => resolveActiveTab(() => chrome.tabs.query({ active: true })),
+  eligible: async origin => (await chrome.tabs.query({url:[hostPattern(origin)]})).flatMap(tab => tab.id !== undefined && Number.isInteger(tab.windowId) && tab.url && new URL(tab.url).origin === origin ? [{id:tab.id,windowId:tab.windowId,url:tab.url,title:tab.title??''}] : []),
   create: async url => { const tab = await chrome.tabs.create({ url, active: true }); if (tab.id === undefined) throw new Error('UNSUPPORTED'); return {id:tab.id,windowId:tab.windowId}; },
   activate: async id => { await chrome.tabs.update(id, { active: true }); },
   navigate: async (id, url) => { await chrome.tabs.update(id, { url, active: true }); },
@@ -70,6 +71,7 @@ const popupRequest = z.discriminatedUnion('action', [
   z.object({ correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action: z.literal('approve'), id: z.string().uuid(), origin: z.string().url().max(300), always: z.boolean() }).strict(),
   z.object({ correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action: z.literal('revokeSite'), origin: z.string().url().max(300) }).strict(),
   z.object({correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action:z.literal('selectConversation'),id:z.string().uuid()}).strict(),
+  z.object({correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action:z.literal('selectAccessTab'),id:z.string().uuid(),candidateId:z.string().uuid()}).strict(),
   ...['revoke','renew','deny','cancelManualSelection'].map(action => z.object({ correlationId:z.string().uuid().optional(),windowId:z.number().int().nonnegative(),action: z.literal(action), id: z.string().uuid() }).strict())
 ] as unknown as [z.ZodObject, z.ZodObject, ...z.ZodObject[]]);
 chrome.runtime.onMessage.addListener((raw, sender, send) => {
@@ -79,6 +81,7 @@ chrome.runtime.onMessage.addListener((raw, sender, send) => {
     const message = popupRequest.parse(raw);const correlationId=(message as {correlationId?:string}).correlationId;const started=performance.now();if(correlationId)accessDiagnostics.event(correlationId,'worker_handler_entered','START');
     const current=await resolvePopupActiveTab((message as {windowId:number}).windowId,windowId=>chrome.tabs.query({active:true,windowId}));
     if (message.action === 'approve') await controller.approve(message.id as string, (message as {origin:string}).origin, (message as {always:boolean}).always,correlationId,current);
+    if(message.action==='selectAccessTab')await controller.selectAccessTab(message.id as string,(message as {candidateId:string}).candidateId);
     const selectionApplied=message.action==='selectConversation' ? await controller.selectConversation(message.id as string,current) : false;
     if(message.action==='selectConversation'&&!selectionApplied)throw new Error('REJECTED');
     if(message.action==='cancelManualSelection')controller.cancelManualSelection(message.id as string);

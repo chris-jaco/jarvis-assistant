@@ -4,7 +4,7 @@ export const browserToolIds = ['browser.status', 'browser.tabs', 'browser.open',
 export type BrowserToolId = typeof browserToolIds[number];
 export function isBrowserTool(id: string): id is BrowserToolId { return (browserToolIds as readonly string[]).includes(id); }
 export type BrowserStage = 'http_received' | 'http_result' | 'http_busy' | 'session_closed' | 'session_replaced' | 'session_expired' | 'adapter' | 'execution_abort' | 'provider_state' | 'provider_initialization' | 'initialization_wait' | 'profile_security' | 'browser_launch' | 'context_ready' | 'startup_page' | 'tab_creation' | 'navigation' | 'tab_metadata' | 'observe' | 'action' | 'provider_result' | 'executor_result' | 'realtime_received' | 'realtime_result';
-export type BrowserCode = 'RUNNING' | 'OK' | 'TIMEOUT' | 'UNCONFIGURED' | 'CONFLICT' | 'REJECTED' | 'UPSTREAM' | 'INVALID_INPUT' | 'BUSY' | 'CLOSED' | 'EXECUTION_UNKNOWN';
+export type BrowserCode = 'RUNNING' | 'OK' | 'TIMEOUT' | 'UNCONFIGURED' | 'AMBIGUOUS' | 'CONFLICT' | 'REJECTED' | 'UPSTREAM' | 'INVALID_INPUT' | 'BUSY' | 'CLOSED' | 'EXECUTION_UNKNOWN';
 export interface BrowserDiagnostic {
   stage: BrowserStage; code: BrowserCode; elapsedMs: number;
   call?: string; clientRequest?: number; tool?: BrowserToolId; duplicate?: boolean;
@@ -22,5 +22,5 @@ export function browserTracer(enabled: boolean, sink: BrowserDiagnosticSink = en
   } catch { /* Diagnostics cannot affect execution. */ } } : () => {};
 }
 export function browserCode(category: unknown): BrowserCode {
-  return typeof category === 'string' && ['TIMEOUT', 'UNCONFIGURED', 'CONFLICT', 'REJECTED', 'UPSTREAM', 'INVALID_INPUT', 'EXECUTION_UNKNOWN'].includes(category) ? category as BrowserCode : 'UPSTREAM';
+  return typeof category === 'string' && ['TIMEOUT', 'UNCONFIGURED', 'AMBIGUOUS', 'CONFLICT', 'REJECTED', 'UPSTREAM', 'INVALID_INPUT', 'EXECUTION_UNKNOWN'].includes(category) ? category as BrowserCode : 'UPSTREAM';
 }

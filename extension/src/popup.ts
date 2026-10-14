@@ -24,7 +24,10 @@ async function command(action: string, fields: Record<string,unknown> = {}, corr
     for (const request of reply.pending) {
       const row = document.createElement('div'); const text = document.createElement('p');
       text.textContent = `Atlas quiere acceder a ${request.origin ?? 'la pestaña solicitada'}: ${request.purpose}. ${request.lifetime === 'session' ? 'Esta sesión (30 min)' : 'Esta tarea (15 min)'}. No autoriza acciones sensibles.`; row.append(text);
-      if (request.tabSelected && request.origin) {
+      if(Array.isArray(request.candidates)&&request.candidates.length>1){
+        const hint=document.createElement('p');hint.textContent='Hay varias pestañas elegibles. Elegí una para esta tarea:';row.append(hint);
+        for(const candidate of request.candidates)button(row,`${candidate.title||'Pestaña'} · ventana ${candidate.windowId}`,()=>command('selectAccessTab',{id:request.id,candidateId:candidate.id}));
+      } else if (request.tabSelected && request.origin) {
         button(row, 'Permitir esta vez', () => {const correlation=crypto.randomUUID();accessDiagnostics.event(correlation,'authorization_click','START');accessDiagnostics.event(correlation,'permission_result','NOT_APPLICABLE');return command('approve', {id:request.id,origin:request.origin,always:false},correlation);});
         if (request.origin.startsWith('https://')) button(row, 'Permitir siempre este sitio', () => {
           // Call directly from the click, before any await/message, to preserve

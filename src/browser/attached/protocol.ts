@@ -18,8 +18,12 @@ export const binding = z.object({ scopeId: uuid, tabId: uuid }).strict();
 export const refBinding = binding.extend({ documentId: uuid, snapshotId: uuid, ref: uuid }).strict();
 const url = z.string().url().max(2000);
 export const accessArgs = z.object({ target: z.discriminatedUnion('kind', [z.object({ kind: z.literal('current') }).strict(), z.object({ kind: z.literal('new'), url }).strict()]), purpose: z.string().min(1).max(160), lifetime: z.enum(['task', 'session']).default('task') }).strict();
+const exactOrigin = z.string().url().max(300).refine(value => { try { const parsed = new URL(value); return parsed.origin === value && parsed.protocol === 'https:'; } catch { return false; } });
+// Additive V1 operation. Existing requestTabAccess wire semantics remain intact;
+// only backend-frozen application origins may use this operation.
+export const originAccessArgs = z.object({ origin: exactOrigin, purpose: z.string().min(1).max(160), lifetime: z.enum(['task','session']).default('task') }).strict();
 export const argumentSchemas = {
-  status: empty, listAuthorizedTabs: empty, requestTabAccess: accessArgs,
+  status: empty, listAuthorizedTabs: empty, requestTabAccess: accessArgs, requestOriginAccess: originAccessArgs,
   requestManualSelection: binding.extend({documentId:uuid,admissionId:uuid}).strict(),
   revokeTabAccess: z.object({ scopeId: uuid }).strict(), openTab: z.object({ accessRequestId: uuid }).strict(),
   navigate: binding.extend({ url }).strict(), observe: binding.extend({ resumeHandoffId: uuid.optional() }).strict(),
@@ -52,7 +56,7 @@ const sendReply=z.object({sendState:z.enum(['NOT_SENT','DISPATCHED_UNVERIFIED'])
 const draftWriteReply=z.object({draftState:z.literal('WRITTEN_VERIFIED')}).strict();
 export const replySchema = z.discriminatedUnion('outcome', [
   z.object({ outcome: z.literal('OK'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), data: z.union([status, tabSchema, z.array(tabSchema).max(20), observationSchema, ack,sendReply,draftWriteReply]) }).strict(),
-  z.object({ outcome: z.literal('ACCESS_PENDING'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), accessRequestId: uuid, expiresAt: z.number().int().positive(), origin: z.string().url().max(300).optional() }).strict(),
+  z.object({ outcome: z.literal('ACCESS_PENDING'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), accessRequestId: uuid, expiresAt: z.number().int().positive(), origin: z.string().url().max(300).optional(), selectionRequired:z.boolean().optional() }).strict(),
   z.object({ outcome: z.literal('REQUIRES_USER_INTERACTION'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), handoffId: uuid, reason: reasons }).strict(),
   z.object({ outcome: z.literal('ERROR'), observeTrace:z.array(observeTraceSchema).max(12).optional(), timings: timingSchema.optional(), code: errors, conflict: conflictSchema.optional() }).strict().refine(reply => !reply.conflict || reply.code === 'STALE_REF')
 ]);

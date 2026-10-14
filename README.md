@@ -1483,3 +1483,18 @@ guard de cierre mantiene activa la tarea de escritura hasta obtener `DRAFT_WRITT
 Una respuesta verbal sin tool obtiene como máximo una recuperación interna; una
 segunda ausencia de progreso termina de forma explícita y emite sólo el diagnóstico
 sanitizado `TOOL_PROGRESS_STALLED` cuando `BROWSER_TRACE=true`.
+
+### Resolución de pestañas por origen para borradores
+
+La admisión confiable congela la aplicación y su origen exacto; el modelo no puede
+elegir un `windowId`, un ID de pestaña ni cambiar ese origen. Si el permiso de
+Chrome y la política persistente están en `ALLOW`, una única pestaña elegible se
+vincula al grant de la tarea aunque no esté activa. Si hay varias, el popup
+empaquetado muestra una selección única y revalida pestaña, ventana, origen, task y
+epoch antes de crear el grant. Un cambio de foco por sí solo no invalida la
+conversación seleccionada; navegación, cambio de documento, revocación,
+reconexión o cambio material de conversación sí lo hacen.
+
+Esto es una operación aditiva de `atlas.browser/1`; las operaciones existentes no
+cambian de forma. Backend y extensión deben actualizarse juntos. No añade permisos
+MV3, no enumera pestañas sin host permission y no habilita Send.

@@ -11,6 +11,7 @@ export interface Surface {
   observeAuthorization?(grant:Grant):Promise<Pick<ObserveTrace,'chromePermission'|'persistentPolicy'|'sameOrigin'>>;
   tab?(id: number): Promise<{ id: number; windowId?:number; url?: string; title?: string; status?: string; pendingUrl?: string }>;
   current(): Promise<{ id: number; windowId?:number; url: string; title: string }>;
+  eligible?(origin:string):Promise<ResolvedActiveTab[]>;
   create(url: string): Promise<number|{id:number;windowId:number}>;
   activate(tab: number): Promise<void>;
   navigate(tab: number, url: string): Promise<void>;
@@ -22,7 +23,8 @@ export interface Surface {
 }
 interface ManualSelectionRequest {id:string;admissionId:string;documentId:string;expiresAt:number;trace:boolean}
 export interface Grant { scopeId: string; tabId: string; chromeId: number; windowId?:number; origin: string; session: string; task: string; expiresAt: number; lifetime: 'task' | 'session'; title: string; url: string; handoff?: { id: string; reason: Extract<Reply, { outcome: 'REQUIRES_USER_INTERACTION' }>['reason'] }; manualRequest?:ManualSelectionRequest; manualSelected?:boolean; suspended?: boolean; persistent?: boolean }
-interface Ticket { id: string; request: Request; expiresAt: number; chromeId?: number; origin?: string; priorScope?: string; tabId?: string }
+interface TicketCandidate { id:string; tab:ResolvedActiveTab }
+interface Ticket { id: string; request: Request; expiresAt: number; chromeId?: number; origin?: string; priorScope?: string; tabId?: string; candidates?:TicketCandidate[] }
 export class ExtensionController {
   epoch?: string; readonly grants = new Map<string, Grant>(); readonly tickets = new Map<string, Ticket>();
   private results = new Map<string, { signature: string; result: Promise<Reply>; session: string }>();
@@ -93,7 +95,7 @@ export class ExtensionController {
   }
   private cleanup(): void { for (const grant of [...this.grants.values()]) {if(grant.manualRequest&&grant.manualRequest.expiresAt<=this.now())this.resolveManual(grant,'EXPIRED');if (grant.expiresAt <= this.now()) void this.revoke(grant.scopeId);} for (const [id, ticket] of this.tickets) if (ticket.expiresAt <= this.now() || this.ended.has(ticket.request.backendSessionId)) this.tickets.delete(id); }
   expire(): void { this.cleanup(); }
-  pending(): { id: string; purpose: string; lifetime: string; origin?: string; tabSelected?: boolean }[] { this.cleanup(); return [...this.tickets.values()].map(ticket => ({ id: ticket.id, purpose: privateText(String(ticket.request.args.purpose), 160), lifetime: String(ticket.request.args.lifetime), ...(ticket.origin ? { origin: ticket.origin } : {}) })); }
+  pending(): { id: string; purpose: string; lifetime: string; origin?: string; tabSelected?: boolean; candidates?:{id:string;title:string;url:string;windowId:number}[] }[] { this.cleanup(); return [...this.tickets.values()].map(ticket => ({ id: ticket.id, purpose: privateText(String(ticket.request.args.purpose), 160), lifetime: String(ticket.request.args.lifetime), ...(ticket.origin ? { origin: ticket.origin } : {}), ...(ticket.candidates ? { candidates:ticket.candidates.map(candidate=>({id:candidate.id,title:privateText(candidate.tab.title),url:displayUrl(candidate.tab.url),windowId:candidate.tab.windowId})) } : {}) })); }
   authorized(): AuthorizedTab[] { this.cleanup(); return [...this.grants.values()].map(grant => this.dto(grant)); }
   async selectConversation(scopeId:string,popupTab?:ResolvedActiveTab):Promise<boolean> {
     this.cleanup();const grant=this.grants.get(scopeId),epoch=this.epoch,pending=grant?.manualRequest;
@@ -116,10 +118,21 @@ export class ExtensionController {
     this.approving = true;
     try { await this.approveOnce(ticketId, expectedOrigin, always,correlationId,popupTab); } finally { this.approving = false; }
   }
+  async selectAccessTab(ticketId:string,candidateId:string):Promise<void> {
+    if(this.approving)throw new Error('REJECTED');this.approving=true;
+    try {
+      this.cleanup();const ticket=this.tickets.get(ticketId),candidate=ticket?.candidates?.find(row=>row.id===candidateId);
+      if(!ticket||!candidate||!ticket.origin||!this.epoch||ticket.expiresAt<=this.now()||this.endedTasks.has(ticket.request.backendSessionId+':'+ticket.request.taskId))throw new Error('EXPIRED');
+      const current=await this.surface.tab?.(candidate.tab.id);
+      if(!current||current.windowId!==candidate.tab.windowId||!current.url||siteOrigin(current.url)!==ticket.origin||!await this.sites?.allows(ticket.origin))throw new Error('ACCESS_DENIED');
+      const grant=await this.persistentGrant(ticket.request,{id:current.id,windowId:current.windowId,url:current.url,title:current.title??''});
+      if(!grant)throw new Error('ACCESS_DENIED');this.tickets.delete(ticketId);
+    } finally {this.approving=false;}
+  }
   private async approveOnce(ticketId: string, expectedOrigin?: string, always = false, correlationId?:string,popupTab?:ResolvedActiveTab): Promise<void> {
     this.cleanup(); const ticket = this.tickets.get(ticketId); if (!ticket || !this.epoch || this.ended.has(ticket.request.backendSessionId) || this.endedTasks.has(ticket.request.backendSessionId + ':' + ticket.request.taskId)) throw new Error('EXPIRED');
     const epoch = this.epoch; const selected = popupTab??await this.surface.current();
-    const target = ticket.request.args.target as { kind: string; url?: string };
+    const target = 'target' in ticket.request.args ? ticket.request.args.target as { kind: string; url?: string } : {kind:'current'};
     if (ticket.chromeId !== undefined && ticket.chromeId !== selected.id || expectedOrigin && siteOrigin(selected.url) !== expectedOrigin || ticket.origin && siteOrigin(selected.url) !== ticket.origin || target.kind === 'new' && ticket.chromeId === undefined) throw new Error('ACCESS_DENIED');
     navigationUrl(selected.url);
     if (this.grants.size >= 20 || [...this.grants.values()].some(grant => grant.chromeId === selected.id && grant.scopeId !== ticket.priorScope)) throw new Error('REJECTED');
@@ -152,6 +165,7 @@ export class ExtensionController {
   async preparePending(popupTab?:ResolvedActiveTab): Promise<ReturnType<ExtensionController['pending']>> {
     this.cleanup(); const selected = popupTab??await this.surface.current();
     return [...this.tickets.values()].map(ticket => {
+      if(ticket.candidates)return {id:ticket.id,purpose:privateText(String(ticket.request.args.purpose),160),lifetime:String(ticket.request.args.lifetime),origin:ticket.origin,tabSelected:false,candidates:ticket.candidates.map(candidate=>({id:candidate.id,title:privateText(candidate.tab.title),url:displayUrl(candidate.tab.url),windowId:candidate.tab.windowId}))};
       const tabSelected = !!selected?.url && (ticket.chromeId === undefined || ticket.chromeId === selected.id);
       if (tabSelected) { ticket.chromeId = selected!.id; ticket.origin = siteOrigin(selected!.url); }
       return { id: ticket.id, purpose: privateText(String(ticket.request.args.purpose),160), lifetime: String(ticket.request.args.lifetime), origin: ticket.origin, tabSelected };
@@ -168,13 +182,13 @@ export class ExtensionController {
     }
     await Promise.all([...this.grants.values()].filter(grant => grant.origin === origin).map(grant => this.revoke(grant.scopeId)));
   }
-  private ticket(request: Request, chromeId?: number, origin?: string, priorScope?: string): Reply {
+  private ticket(request: Request, chromeId?: number, origin?: string, priorScope?: string, candidates?:ResolvedActiveTab[]): Reply {
     const previous = [...this.tickets.values()].find(ticket => ticket.priorScope && ticket.priorScope === priorScope);
     if (previous) return { outcome: 'ACCESS_PENDING', accessRequestId: previous.id, expiresAt: previous.expiresAt, ...(previous.origin ? { origin: previous.origin } : {}) };
     if (this.tickets.size >= 20) throw new Error('REJECTED');
     const id = this.id(); const expiresAt = this.now() + 15 * 60_000;
-    this.tickets.set(id,{id,request,expiresAt,chromeId,origin,priorScope,tabId:priorScope ? this.grants.get(priorScope)?.tabId : undefined});
-    return { outcome: 'ACCESS_PENDING', accessRequestId: id, expiresAt, ...(origin ? { origin } : {}) };
+    this.tickets.set(id,{id,request,expiresAt,chromeId,origin,priorScope,tabId:priorScope ? this.grants.get(priorScope)?.tabId : undefined,...(candidates?{candidates:candidates.map(tab=>({id:this.id(),tab}))}:{})});
+    return { outcome: 'ACCESS_PENDING', accessRequestId: id, expiresAt, ...(origin ? { origin } : {}), ...(candidates ? {selectionRequired:true} : {}) };
   }
   private async persistentGrant(request: Request, selected: {id:number;windowId?:number;url:string;title:string}, previous?: Grant): Promise<Grant | undefined> {
     const origin = siteOrigin(selected.url);
@@ -208,7 +222,7 @@ export class ExtensionController {
   async documentChanged(chromeId: number): Promise<void> {
     for (const grant of this.grants.values()) if (grant.chromeId === chromeId) {if(grant.manualRequest)this.resolveManual(grant,'INVALIDATED');grant.manualSelected=false; await this.surface.invalidate(chromeId, true).catch(() => {}); if (this.epoch) this.emit({ protocol: 'atlas.browser', version: 1, kind: 'event', connectionEpoch: this.epoch, backendSessionId: grant.session, event: 'documentChanged', scopeId: grant.scopeId }); }
   }
-  async activeTabChanged(chromeId:number,windowId:number):Promise<void>{for(const grant of this.grants.values())if((grant.windowId===undefined||grant.windowId===windowId)&&grant.chromeId!==chromeId&&(grant.manualRequest||grant.manualSelected)){if(grant.manualRequest)this.resolveManual(grant,'INVALIDATED');grant.manualSelected=false;await this.surface.invalidate(grant.chromeId,true).catch(()=>{});}}
+  async activeTabChanged(_chromeId:number,_windowId:number):Promise<void>{/* Focus is not material authority. Document, origin, epoch and revocation events invalidate independently. */}
   async end(session: string): Promise<void> { this.ended.add(session); for (const key of this.activeTasks) if (key.startsWith(session + ':')) this.activeTasks.delete(key); for (const grant of [...this.grants.values()]) if (grant.session === session) await this.revoke(grant.scopeId); for (const [id, ticket] of this.tickets) if (ticket.request.backendSessionId === session) this.tickets.delete(id); }
   private async execute(request: Request, trace:(raw:unknown)=>void): Promise<Reply> {
     this.cleanup(); const args = request.args;
@@ -219,6 +233,18 @@ export class ExtensionController {
     if (request.operation === 'endTask') { this.activeTasks.delete(request.backendSessionId + ':' + request.taskId); this.endedTasks.add(request.backendSessionId + ':' + request.taskId); for (const grant of [...this.grants.values()]) if (grant.session === request.backendSessionId && grant.task === request.taskId && grant.lifetime === 'task') await this.revoke(grant.scopeId); for (const [id, ticket] of this.tickets) if (ticket.request.backendSessionId === request.backendSessionId && ticket.request.taskId === request.taskId) this.tickets.delete(id); return { outcome: 'OK', data: { completed: true } }; }
     if (request.operation === 'endSession') { await this.end(request.backendSessionId); return { outcome: 'OK', data: { completed: true } }; }
     if (request.operation === 'listAuthorizedTabs') return { outcome: 'OK', data: [...this.grants.values()].filter(grant => grant.session === request.backendSessionId).map(grant => this.dto(grant)) };
+    if(request.operation==='requestOriginAccess'){
+      this.activeTasks.add(request.backendSessionId+':'+request.taskId);
+      const origin=String(args.origin);
+      if(!await this.sites?.allows(origin)||!this.surface.eligible)return this.ticket(request,undefined,origin);
+      const candidates=(await this.surface.eligible(origin)).filter(tab=>siteOrigin(tab.url)===origin);
+      this.check(request);
+      if(candidates.length===0)throw new Error('ACTIVE_TAB_UNAVAILABLE');
+      const compatible=[...this.grants.values()].find(grant=>candidates.some(tab=>tab.id===grant.chromeId)&&grant.session===request.backendSessionId&&grant.task===request.taskId&&grant.lifetime==='task'&&request.args.lifetime==='task'&&!grant.suspended&&!grant.handoff&&grant.expiresAt>this.now()&&grant.origin===origin&&grant.persistent);
+      if(compatible&&await this.sites?.allows(origin)){this.emit({protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:this.epoch,backendSessionId:compatible.session,event:'accessGranted',tab:this.dto(compatible)});return {outcome:'OK',data:this.dto(compatible)};}
+      if(candidates.length===1){const grant=await this.persistentGrant(request,candidates[0]!);if(!grant)throw new Error('ACCESS_DENIED');return {outcome:'OK',data:this.dto(grant)};}
+      return this.ticket(request,undefined,origin,undefined,candidates);
+    }
     if (request.operation === 'requestTabAccess') {
       this.activeTasks.add(request.backendSessionId + ':' + request.taskId);
       if (this.tickets.size >= 20) throw new Error('REJECTED');

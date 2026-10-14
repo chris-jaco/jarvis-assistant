@@ -1,6 +1,13 @@
 /** Conservative classification of the captured user turn, never tool arguments. */
 export type TaskIntent = Readonly<{ intent: 'ACTION_REQUIRED' } | { intent: 'READ_ONLY'; context: 'PAGE' | 'TABS' }>;
 export type BrowserDraftGoal='PREPARE_PRIVATE_DRAFT'|'WRITE_DRAFT_TO_COMPOSER';
+export type BrowserDraftApplication = Readonly<{ application:'WHATSAPP'; origin:'https://web.whatsapp.com' }>;
+/** Application binding from the trusted admission transcript, never DOM/tool input. */
+export function classifyBrowserDraftApplication(utterance?: string): BrowserDraftApplication | undefined {
+  if (!utterance || utterance.length > 2000) return;
+  const text = utterance.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+  return /\bwhats\s*app\b/.test(text) ? Object.freeze({ application:'WHATSAPP', origin:'https://web.whatsapp.com' }) : undefined;
+}
 /** Trusted admission transcript only; page/DOM content never reaches this classifier. */
 export function classifyBrowserDraftGoal(utterance?:string):BrowserDraftGoal|undefined {
   if(!utterance||utterance.length>2000)return;
