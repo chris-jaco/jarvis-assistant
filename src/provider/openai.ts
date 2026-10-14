@@ -6,6 +6,10 @@ import type { VoiceProvider, ProviderObserver, TranscriptEntry } from '../core/p
 import { VoiceMemoryBridge, updateMemoryInstructions } from './memory.js';
 import { VoiceToolBridge } from './tools.js';
 import { SessionMetrics } from '../telemetry/session.js';
+import { WebCoreTransport } from './core-transport.js';
+import type { CoreTransport } from './core-transport.js';
+import { RealtimeTokenError, WebRealtimeTokenProvider } from './realtime-token.js';
+import type { RealtimeTokenProvider } from './realtime-token.js';
 
 class ClientError extends Error {}
 export class OpenAIVoiceProvider implements VoiceProvider {
@@ -21,7 +25,12 @@ export class OpenAIVoiceProvider implements VoiceProvider {
   private realtimeCorrelation?:RealtimeErrorCorrelation;
   private active = false;
   readonly metrics = new SessionMetrics();
-  constructor(private readonly observer: ProviderObserver, private readonly audio: HTMLAudioElement) {}
+  private readonly core: CoreTransport;
+  private readonly tokenProvider: RealtimeTokenProvider;
+  constructor(private readonly observer: ProviderObserver, private readonly audio: HTMLAudioElement, dependencies: { core?: CoreTransport; tokenProvider?: RealtimeTokenProvider } = {}) {
+    this.core = dependencies.core ?? new WebCoreTransport();
+    this.tokenProvider = dependencies.tokenProvider ?? new WebRealtimeTokenProvider();
+  }
 
   async connect(): Promise<void> {
     this.disconnect('RECONNECT');
@@ -51,19 +60,11 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       if (!current()) { stream.getTracks().forEach(track => track.stop()); return; }
       this.stream = stream;
       this.observer.microphone?.(stream);
-      const response = await fetch('/api/realtime/token', { method: 'POST', signal: abort.signal });
-      const data: unknown = await response.json();
-      if (!response.ok) {
-        const message = typeof data === 'object' && data !== null && 'error' in data && typeof data.error === 'string' ? data.error : 'No se pudo autenticar la sesión.';
-        throw new ClientError(message);
-      }
-      if (typeof data !== 'object' || data === null || !('value' in data) || typeof data.value !== 'string' || !data.value.startsWith('ek_')) {
-        throw new ClientError('No se pudo autorizar esta conversación.');
-      }
+      const token = await this.tokenProvider.token(abort.signal);
       if (!current()) return;
       const playbackDiagnostics=new BrowserTaskDiagnostics();
       const gate=new PresentationGate(muted=>{this.audio.muted=muted;},playbackDiagnostics,()=>({visibility:document.visibilityState,paused:this.audio.paused,ended:this.audio.ended}));this.presentation=gate;
-      const bridge = new VoiceToolBridge((rows, pending) => { if (current()) this.observer.tools?.(rows, pending); }, message => { if (current()&&this.session){gate.expectInternal();transport.sendMessage(message,{},{triggerResponse:false});transport.requestResponse({metadata:{atlas_presentation_source:'INTERNAL_BROWSER_CONTINUATION'}});} },undefined,undefined,{state:state=>gate.update(state),tool:browser=>{gate.tool();if(browser)gate.beginBrowser();}});
+      const bridge = new VoiceToolBridge((rows, pending) => { if (current()) this.observer.tools?.(rows, pending); }, message => { if (current()&&this.session){gate.expectInternal();transport.sendMessage(message,{},{triggerResponse:false});transport.requestResponse({metadata:{atlas_presentation_source:'INTERNAL_BROWSER_CONTINUATION'}});} },undefined,undefined,{state:state=>gate.update(state),tool:browser=>{gate.tool();if(browser)gate.beginBrowser();}},this.core);
       this.tools = bridge;
       sessionStage='TOOLS';
       const toolConfig = await bridge.initialize();
@@ -75,7 +76,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       let memoryContext = '';
       const memory = new VoiceMemoryBridge(async context => {
         if (current() && this.session) { memoryContext = context; updateMemoryInstructions(transport, `${baseInstructions}\n${memoryContext}`); }
-      }, () => bridge.confirmationActive);
+      }, () => bridge.confirmationActive,this.core);
       this.memory = memory;
       sessionStage='MEMORY';memoryContext = await memory.initial();
       if (!current()) { memory.close(); return; }
@@ -149,7 +150,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
         }
         this.observer.transcript(entries);
       });
-      sessionStage='CONNECTING';await session.connect({ apiKey: data.value });
+      sessionStage='CONNECTING';await session.connect({ apiKey: token });
       if (!current()) { session.close(); return; }
       connectedAt=performance.now();sessionStage='CONNECTED';this.metrics.connected();
       this.state('connected');
@@ -161,7 +162,7 @@ export class OpenAIVoiceProvider implements VoiceProvider {
       if (!current()) return;
       const denied = error instanceof DOMException && error.name === 'NotAllowedError';
       const absent = error instanceof DOMException && error.name === 'NotFoundError';
-      this.fail(denied ? 'Permiso de micrófono denegado. Actívalo en el navegador y vuelve a conectar.' : absent ? 'No se encontró un micrófono.' : error instanceof ClientError ? error.message : 'No se pudo conectar. Comprueba micrófono, red y configuración del backend.','CONNECT_FAILURE');
+      this.fail(denied ? 'Permiso de micrófono denegado. Actívalo en el navegador y vuelve a conectar.' : absent ? 'No se encontró un micrófono.' : error instanceof ClientError || error instanceof RealtimeTokenError ? error.message : 'No se pudo conectar. Comprueba micrófono, red y configuración del backend.','CONNECT_FAILURE');
     } finally { clearTimeout(timeout); }
   }
   private fail(message: string,reason:SessionCloseReason): void { this.disconnect(reason); this.state('error', message); }

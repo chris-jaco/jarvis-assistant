@@ -37,6 +37,8 @@ Atlas es un asistente personal de IA, principalmente por voz, con memoria contex
 | V0.5.3.6A | ACCEPTED | Manual Selection & Private Draft | USER_SELECTED, continuación Realtime, borrador RAM-only, envío bloqueado |
 | V0.5.3.6B.1 | Completada | Consequential Contracts & Gates | Capabilities efímeras, journal y autorización de un solo uso; sin Send productivo |
 | V0.5.3.6B.2 | PARTIAL / DEFERRED | Controlled Draft Writing | Confirmaciones CONTENT/WRITE alcanzadas; escritura en compositor no verificada y diferida |
+| V0.6.0 | Completada | Architecture Readiness | Auditoría completada, Electron elegido y GO condicional por hitos |
+| V0.6.1 — Hito 0 | Completada | Architecture Foundation | CoreTransport tipado, transporte web compatible, token Realtime inyectable y ADRs; validación local completa |
 
 **Acceptance V0.5.3.6A:** 665 tests: 662 PASS, 3 SKIP, 0 FAIL. Typecheck y builds OK. Commit publicado en rama de desarrollo; no merge a `main` ni tag/release de 6A.
 
@@ -45,7 +47,7 @@ Atlas es un asistente personal de IA, principalmente por voz, con memoria contex
 | Versión | Nombre | Objetivo | Estado |
 |---|---|---|---|
 | V0.5.3.6B | WhatsApp Consequential Actions | Escritura y envío seguro con autorizaciones separadas y protección de duplicados | B.2 PARTIAL / DEFERRED; B.3 y Send bloqueados |
-| V0.6 | Atlas Core Experience | App Windows con backend local, wake word, publicación, logo, orb-only, logs por voz y costos/modelos | Planificada; arquitectura desktop decidida |
+| V0.6 | Atlas Core Experience | App Windows con backend local, wake word, publicación, logo, orb-only, logs por voz y costos/modelos | En curso por hitos; Hito 0 completado localmente |
 | V0.7 | Productivity Integrations | Notion, Clockify, Instantly, Onabox, HubSpot, Lovable y otras | Alcance por definir |
 | V0.8 | Mobile & Headphones Companion | Hablar desde Android/auriculares sin la web delante | Planificada |
 | V0.9 — Mark 1 | Proactive Atlas | Briefings, alertas, seguimiento, recordatorios y automatizaciones | Planificada |
@@ -71,6 +73,8 @@ Atlas es un asistente personal de IA, principalmente por voz, con memoria contex
 ### V0.6 — Atlas Core Experience
 **Arquitectura decidida:** aplicación de escritorio Windows con backend local, reutilizando voz, memoria, herramientas, Gmail, Calendar y Chrome Bridge. Chrome sigue siendo una herramienta, no la interfaz obligatoria.
 
+**V0.6.0 Architecture Readiness — COMPLETADA:** la auditoría confirmó la reutilización del Core existente, eligió Electron como shell futuro y emitió un GO condicional sujeto a boundaries explícitos, aislamiento del renderer y autenticación del canal local. Las decisiones están registradas en `docs/adr/0060`–`0071`.
+
 - Desktop app: ventana nativa, instalación, inicio automático, backend local y lifecycle.
 - Wake word «Atlas»: detección local, control de micrófono y privacidad.
 - Orb-first UI: sólo orbe central por defecto, sin transcript visible; historial, permisos, confirmaciones y errores accesibles cuando haga falta.
@@ -81,12 +85,12 @@ Atlas es un asistente personal de IA, principalmente por voz, con memoria contex
 - Publicación: instalador Windows, configuración segura, actualización y recuperación de errores.
 
 #### Fases propuestas
-1. **V0.6.1 — Desktop shell y lifecycle:** definir el boundary entre UI y backend local; empaquetar una aplicación Windows mínima; inicio, cierre, single-instance, health state y recuperación sin perder las garantías de herramientas existentes.
-2. **V0.6.2 — Audio y wake word local:** ownership exclusivo del micrófono, activación local «Atlas», estados visibles de escucha y privacidad, barge-in y fallback manual. Ningún audio se envía antes de la activación autorizada.
-3. **V0.6.3 — Orb-first UX:** orbe como superficie principal, estados RUNNING/WAITING/terminales, permisos y confirmaciones accesibles, historial opcional y errores accionables sin exponer información sensible por defecto.
-4. **V0.6.4 — Observabilidad y costos:** diagnósticos sanitizados, códigos de soporte, métricas locales de latencia/uso/costo y evaluación reproducible de modelos. Sin cambiar de modelo silenciosamente para acciones sensibles.
-5. **V0.6.5 — Instalación y actualización:** instalador firmado cuando corresponda, configuración segura, autostart opt-in, actualización recuperable, compatibilidad con Chrome Bridge/Native Host y rollback documentado.
-6. **V0.6.6 — Release candidate:** regresión completa de voz, memoria, Gmail, Calendar y Browser Control; acceptance Windows prolongado; revisión de privacidad, actualización y recuperación antes de integrar a `main`.
+0. **V0.6.1 — Architecture Foundation:** introducir `CoreTransport` y proveedores inyectables conservando las rutas HTTP, cookies, errores, cancelación, polling, Realtime/WebRTC y comportamiento web existentes. Sin Electron ni cambios funcionales de Browser Control.
+1. **Electron vertical slice:** shell mínimo con renderer aislado y backend Node supervisado; health, arranque/cierre y single-instance sin migrar todavía toda la UX.
+2. **Desktop lifecycle y canal local:** autenticación del canal, ownership de procesos, recuperación y actualización sin restaurar autoridad operativa.
+3. **Confirmaciones y orb-first UX:** permisos, estados RUNNING/WAITING/terminales, confirmaciones y errores accionables con transcript opcional.
+4. **Tray, audio y wake word:** tray/autostart opt-in, ownership exclusivo del micrófono, wake word local, barge-in y señalización inequívoca de privacidad.
+5. **Browser capability opcional y hardening:** Chrome Bridge como capacidad opcional, empaquetado/updates, observabilidad y regresión completa antes del release candidate.
 
 #### Dependencias y límites
 - Preservar Tool Registry, Confirmation Engine, memoria, Chrome Bridge y permisos existentes mediante contratos versionados y tests de regresión.

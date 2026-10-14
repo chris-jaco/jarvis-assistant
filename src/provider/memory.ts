@@ -1,9 +1,11 @@
+import { WebCoreTransport } from './core-transport.js';
+import type { CoreTransport } from './core-transport.js';
+
 export function updateMemoryInstructions(transport: { sendEvent(event: { type: 'session.update'; session: { type: 'realtime'; instructions: string } }): void }, instructions: string): void {
   // SDK updateSessionConfig(partial) fills voice/VAD defaults in 0.18.0.
   // The official minimal event changes ONLY instructions and preserves live config.
   transport.sendEvent({ type: 'session.update', session: { type: 'realtime', instructions } });
 }
-
 // Memory updates never create a response or inject a synthetic user message.
 // Automatic VAD/barge-in remains owned by the existing Realtime session.
 export class VoiceMemoryBridge {
@@ -19,11 +21,10 @@ export class VoiceMemoryBridge {
     if (this.starts.size > 100) this.starts.delete(this.starts.keys().next().value!);
   }
   constructor(private readonly update: (context: string) => Promise<unknown>, private readonly confirmationActive: () => boolean,
-    private readonly request: typeof fetch = fetch) {}
+    private readonly core: CoreTransport = new WebCoreTransport()) {}
   async initial(): Promise<string> {
     try {
-      const response = await this.request('/api/tools/memory-context', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: 'preferencias perfil preferences profile' }), signal: AbortSignal.timeout(2000) });
-      if (!response.ok) return ''; const data = await response.json() as { context?: unknown };
+      const data = await this.core.request('memory.context', { query: 'preferencias perfil preferences profile' }, { timeoutMs: 2000 });
       return typeof data.context === 'string' ? data.context.slice(0, 8000) : '';
     } catch { return ''; }
   }
@@ -37,8 +38,7 @@ export class VoiceMemoryBridge {
       // Remove previous-turn/possibly expired context before a new lookup.
       await this.update('');
       if (this.closed || this.confirmationActive() || revision !== this.revision) return;
-      const response = await this.request('/api/tools/memory-turn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ itemId, utterance, ...speech }), signal: AbortSignal.timeout(2000) });
-      if (!response.ok) return; const data = await response.json() as { context?: unknown };
+      const data = await this.core.request('memory.turn', { itemId, utterance, ...speech }, { timeoutMs: 2000 });
       if (!this.closed && !this.confirmationActive() && revision === this.revision && typeof data.context === 'string') await this.update(data.context.slice(0, 8000));
     } catch { /* Optional memory never disconnects Realtime or invents context. */ }
   }
