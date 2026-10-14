@@ -4,8 +4,9 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { createDesktopSecret, desktopApiAuthorized, desktopServerMode, DESKTOP_AUTH_HEADER } from '../server/desktop-auth.js';
 import { DesktopBackendClient } from '../desktop/backend-client.js';
-import { BackendSupervisor } from '../desktop/backend-supervisor.js';
+import { BackendSupervisor, backendEnvironment } from '../desktop/backend-supervisor.js';
 import type { BackendProcess } from '../desktop/backend-supervisor.js';
+import type { BackendStartupDiagnostic } from '../desktop/backend-supervisor.js';
 import { acquireSingleInstance, focusExistingWindow } from '../desktop/lifecycle.js';
 import { audioPermissionAllowed, sameApplicationLocation, secureWindowOptions } from '../desktop/window-policy.js';
 import { registerDesktopIpc } from '../desktop/ipc.js';
@@ -43,13 +44,35 @@ test('desktop backend client authenticates every request, keeps server cookie an
 class FakeChild extends EventEmitter implements BackendProcess {
   stdout = new PassThrough(); stderr = new PassThrough(); pid = 4242; killed = 0;
   kill(): boolean { this.killed++; this.emit('exit', null); return true; }
-  override once(event: 'exit' | 'error', listener: (...args: any[]) => void): this { return super.once(event, listener); }
+  override once(event: 'spawn' | 'exit' | 'error', listener: (...args: any[]) => void): this { return super.once(event, listener); }
 }
+
+test('backend runtime environments separate Electron-as-Node from UtilityProcess', () => {
+  const inherited = { SAFE_VALUE: 'kept', ELECTRON_RUN_AS_NODE: 'inherited' };
+  const node = backendEnvironment(inherited, 'a'.repeat(64), 'node');
+  const utility = backendEnvironment(inherited, 'b'.repeat(64), 'utility');
+  assert.equal(node.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(utility.ELECTRON_RUN_AS_NODE, undefined);
+  assert.deepEqual({ mode: utility.ATLAS_DESKTOP_MODE, host: utility.HOST, port: utility.PORT, safe: utility.SAFE_VALUE }, { mode: 'true', host: '127.0.0.1', port: '0', safe: 'kept' });
+});
+
+test('utility readiness accepts fragmented Windows CRLF, drains stderr and emits sanitized stages', async () => {
+  const child = new FakeChild(); const events: BackendStartupDiagnostic[] = []; let spawnedEnv: NodeJS.ProcessEnv | undefined;
+  const supervisor = new BackendSupervisor({ executable: 'electron', serverEntry: 'server.js', cwd: '.', runtime: 'utility', shutdownTimeoutMs: 5, diagnostic: event => events.push(event),
+    spawn: (_executable, _args, options) => { spawnedEnv = options.env; return child; },
+    clientFactory: endpoint => new DesktopBackendClient(endpoint.baseUrl, endpoint.secret, async input => Response.json(String(input).endsWith('/health') ? { ready: true } : { closing: true }))
+  });
+  const starting = supervisor.start(); child.emit('spawn'); child.stdout.write('ATLAS: http://127.0.0.1:431'); child.stdout.write('25\r\nATLAS_RE'); child.stdout.write('ADY 43125\r\n');
+  assert.equal((await starting).baseUrl, 'http://127.0.0.1:43125');
+  assert.equal(spawnedEnv?.ELECTRON_RUN_AS_NODE, undefined); assert.equal(child.stderr.readableFlowing, true);
+  assert.deepEqual(events.map(event => event.stage), ['CORE_SPAWN_REQUESTED', 'CORE_SPAWNED', 'CORE_STDOUT_OBSERVED', 'CORE_READY_RECEIVED', 'CORE_HEALTH_STARTED', 'CORE_HEALTH_OK']);
+  assert.ok(events.every(event => !JSON.stringify(event).includes('a'.repeat(64)))); await supervisor.stop();
+});
 
 test('backend supervisor owns one child, waits for readiness and bounds shutdown', async () => {
   const child = new FakeChild();
   const supervisor = new BackendSupervisor({ executable: 'electron', serverEntry: 'server.js', cwd: '.', shutdownTimeoutMs: 5,
-    spawn: () => child,
+    spawn: () => child, diagnostic: () => {},
     clientFactory: endpoint => new DesktopBackendClient(endpoint.baseUrl, endpoint.secret, async input => Response.json(String(input).endsWith('/health') ? { ready: true } : { closing: true }))
   });
   const starting = supervisor.start(); child.stdout.write('ATLAS_READY 43123\n');
@@ -59,13 +82,34 @@ test('backend supervisor owns one child, waits for readiness and bounds shutdown
 });
 
 test('backend supervisor fails closed on startup timeout and reports an owned crash', async () => {
-  const timedOut = new FakeChild();
-  const timeoutSupervisor = new BackendSupervisor({ executable: 'electron', serverEntry: 'server.js', cwd: '.', startupTimeoutMs: 5, spawn: () => timedOut });
+  const timedOut = new FakeChild(); const timeoutEvents: BackendStartupDiagnostic[] = [];
+  const timeoutSupervisor = new BackendSupervisor({ executable: 'electron', serverEntry: 'server.js', cwd: '.', startupTimeoutMs: 5, spawn: () => timedOut, diagnostic: event => timeoutEvents.push(event) });
   await assert.rejects(timeoutSupervisor.start(), /START_TIMEOUT/); assert.equal(timedOut.killed, 1);
+  assert.equal(timeoutEvents.filter(event => event.stage === 'CORE_READINESS_TIMEOUT').length, 1); assert.equal(timedOut.stderr.readableFlowing, true);
   const crashed = new FakeChild(); let crash: number | null | undefined;
-  const crashSupervisor = new BackendSupervisor({ executable: 'electron', serverEntry: 'server.js', cwd: '.', spawn: () => crashed, onUnexpectedExit: code => { crash = code; },
+  const crashSupervisor = new BackendSupervisor({ executable: 'electron', serverEntry: 'server.js', cwd: '.', spawn: () => crashed, diagnostic: () => {}, onUnexpectedExit: code => { crash = code; },
     clientFactory: endpoint => new DesktopBackendClient(endpoint.baseUrl, endpoint.secret, async input => Response.json(String(input).endsWith('/health') ? { ready: true } : { closing: true })) });
   const starting = crashSupervisor.start(); crashed.stdout.write('ATLAS_READY 43124\n'); await starting; crashed.emit('exit', 7); assert.equal(crash, 7); await crashSupervisor.stop();
+});
+
+test('backend exit before readiness is explicit, cleans up once and never waits for timeout', async () => {
+  const child = new FakeChild(); const events: BackendStartupDiagnostic[] = [];
+  const supervisor = new BackendSupervisor({ executable: 'electron', serverEntry: 'server.js', cwd: '.', startupTimeoutMs: 100, spawn: () => child, diagnostic: event => events.push(event) });
+  const starting = supervisor.start(); child.emit('spawn'); child.emit('exit', 17);
+  await assert.rejects(starting, /EXITED_EARLY/);
+  assert.equal(events.filter(event => event.stage === 'CORE_EXITED_EARLY').length, 1);
+  assert.equal(events.some(event => event.stage === 'CORE_READINESS_TIMEOUT'), false);
+  assert.equal(child.killed, 0);
+});
+
+test('failed authenticated health is classified and cleans up the owned child', async () => {
+  const child = new FakeChild(); const events: BackendStartupDiagnostic[] = [];
+  const supervisor = new BackendSupervisor({ executable: 'electron', serverEntry: 'server.js', cwd: '.', shutdownTimeoutMs: 5, spawn: () => child, diagnostic: event => events.push(event),
+    clientFactory: endpoint => new DesktopBackendClient(endpoint.baseUrl, endpoint.secret, async () => new Response(null, { status: 401 })) });
+  const starting = supervisor.start(); child.emit('spawn'); child.stdout.write('ATLAS_READY 43126\n');
+  await assert.rejects(starting, /DESKTOP_HEALTH_UNAUTHORIZED/);
+  assert.deepEqual(events.slice(-2).map(event => [event.stage, event.healthFailure]), [['CORE_HEALTH_STARTED', undefined], ['CORE_HEALTH_FAILED', 'UNAUTHORIZED']]);
+  assert.equal(child.killed, 1);
 });
 
 test('window policy isolates renderer, blocks external navigation and grants audio only', () => {

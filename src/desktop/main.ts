@@ -16,7 +16,7 @@ let closing = false;
 let rendererShutdownReady: (() => void) | undefined;
 
 const supervisor = new BackendSupervisor({
-  executable: process.execPath, serverEntry, cwd: projectRoot,
+  executable: process.execPath, serverEntry, cwd: projectRoot, runtime: 'utility',
   spawn: (_executable, args, options) => utilityProcess.fork(args[0]!, [], { cwd: options.cwd, env: options.env, stdio: 'pipe', serviceName: 'Atlas Core' }) as unknown as import('./backend-supervisor.js').BackendProcess,
   onUnexpectedExit: () => {
     if (closing) return;

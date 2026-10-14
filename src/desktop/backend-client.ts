@@ -3,6 +3,11 @@ import { coreHttpRoutes } from '../provider/core-transport.js';
 import type { CoreOperation, CoreOperationMap } from '../provider/core-transport.js';
 import type { DesktopCoreReply, DesktopRequestOptions } from './api.js';
 
+export type DesktopHealthFailure = 'UNAUTHORIZED' | 'NOT_READY' | 'CONNECTION_FAILED' | 'TIMEOUT';
+export class DesktopHealthError extends Error {
+  constructor(readonly failure: DesktopHealthFailure) { super(`DESKTOP_HEALTH_${failure}`); }
+}
+
 export class DesktopBackendClient {
   private cookie = '';
   private active = true;
@@ -22,8 +27,16 @@ export class DesktopBackendClient {
   }
 
   async health(signal?: AbortSignal): Promise<void> {
-    const response = await this.call('/api/desktop/health', { method: 'GET' }, 5_000, signal);
-    if (!response.ok || (await response.json() as { ready?: unknown }).ready !== true) throw new Error('DESKTOP_BACKEND_NOT_READY');
+    let response: Response;
+    try { response = await this.call('/api/desktop/health', { method: 'GET' }, 5_000, signal); }
+    catch (error) {
+      if (error instanceof Error && error.message === 'DESKTOP_BACKEND_CLOSED') throw error;
+      throw new DesktopHealthError(error instanceof DOMException && error.name === 'TimeoutError' ? 'TIMEOUT' : 'CONNECTION_FAILED');
+    }
+    if (response.status === 401) throw new DesktopHealthError('UNAUTHORIZED');
+    if (!response.ok) throw new DesktopHealthError('NOT_READY');
+    try { if ((await response.json() as { ready?: unknown }).ready !== true) throw new DesktopHealthError('NOT_READY'); }
+    catch (error) { if (error instanceof DesktopHealthError) throw error; throw new DesktopHealthError('NOT_READY'); }
   }
 
   async request<K extends CoreOperation>(operation: K, input: CoreOperationMap[K]['input'], options: DesktopRequestOptions = {}, signal?: AbortSignal): Promise<DesktopCoreReply<K>> {
