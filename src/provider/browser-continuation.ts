@@ -6,7 +6,7 @@ import { actionOutcomeSchema, outcomeInstruction } from '../browser/action-outco
 import { browserExecutionStateSchema } from '../browser/execution-state.js';
 import { z } from 'zod';
 import { uuid, replySchema } from '../browser/attached/protocol.js';
-const stateSchema = z.object({ taskId:uuid.optional(), continuation:continuationReceiptSchema.optional(), workflow: replySchema.nullable(), ready: uuid.nullable(), executionState: browserExecutionStateSchema.optional(), accessRevoked:z.boolean().optional(), actionOutcome:actionOutcomeSchema.nullable().optional(),accessCorrelation:uuid.nullable().optional(),revision:z.number().int().positive().optional(),taskActive:z.boolean().optional(),draftGoal:z.enum(['PREPARE_PRIVATE_DRAFT','WRITE_DRAFT_TO_COMPOSER']).optional(),draftPhase:z.enum(['CONTENT_REQUIRED','CONTENT_PENDING_CONFIRMATION','CONTENT_AUTHORIZED','DRAFT_FROZEN','WRITE_CONFIRMATION_PENDING','WRITE_AUTHORIZED','WRITE_EXECUTING','DRAFT_WRITTEN','FAILED','UNKNOWN','CANCELLED']).optional(), contextRecovery:z.object({status:z.enum(['READY','REQUIRED','RECOVERING','INCONCLUSIVE']),attempts:z.number().int().min(0).max(2),ready:uuid.nullable()}).strict().nullable().optional(),manualSelection:z.object({status:z.enum(['PENDING','SELECTED','CANCELLED','EXPIRED','INVALIDATED']),requestId:uuid}).strict().nullable().optional() }).strict();
+const stateSchema = z.object({ taskId:uuid.optional(), continuation:continuationReceiptSchema.optional(), workflow: replySchema.nullable(), ready: uuid.nullable(), executionState: browserExecutionStateSchema.optional(), accessRevoked:z.boolean().optional(), actionOutcome:actionOutcomeSchema.nullable().optional(),accessCorrelation:uuid.nullable().optional(),revision:z.number().int().positive().optional(),taskActive:z.boolean().optional(),draftGoal:z.enum(['PREPARE_PRIVATE_DRAFT','WRITE_DRAFT_TO_COMPOSER']).optional(),draftPhase:z.enum(['CONTENT_REQUIRED','CONTENT_PENDING_CONFIRMATION','CONTENT_AUTHORIZED','DRAFT_FROZEN','WRITE_CONFIRMATION_PENDING','WRITE_AUTHORIZED','WRITE_EXECUTING','DRAFT_WRITTEN','FAILED','UNKNOWN','CANCELLED']).optional(),admissionPending:z.boolean().optional(), contextRecovery:z.object({status:z.enum(['READY','REQUIRED','RECOVERING','INCONCLUSIVE']),attempts:z.number().int().min(0).max(2),ready:uuid.nullable()}).strict().nullable().optional(),manualSelection:z.object({status:z.enum(['PENDING','SELECTED','CANCELLED','EXPIRED','INVALIDATED']),requestId:uuid}).strict().nullable().optional() }).strict();
 export class BrowserContinuation {
   private revision=0;
   private taskId?:string;
@@ -32,19 +32,22 @@ export class BrowserContinuation {
     const manual=this.latest?.manualSelection,manualReady=token===this.latest?.ready&&!!manual&&manual.status!=='PENDING';
     this.taskDiagnostics.event({stage:'CONTINUATION',taskId:this.taskId,tokenId:token,tokenState:status,...this.scheduling(),taskState:this.latest?.executionState,incorporatedBySdkOutput,coalesced:[...this.pending.values()].filter(s=>s==='PENDING'||s==='DELIVERED').length>1,source:incorporatedBySdkOutput?'SDK_OUTPUT':status==='RECEIVED'||status==='PENDING'?'BACKEND_EVENT':'NOTIFICATION',tokenReason:manualReady?'MANUAL_SELECTION_READY':token===this.latest?.ready?'ACCESS_READY':token===this.latest?.contextRecovery?.ready?'CONTEXT_READY':this.latest?.continuation?.tokens.includes(token)?'CLOSE_REJECTED':'UNSPECIFIED'});
     if(manualReady&&['PENDING','DELIVERED','CONSUMED'].includes(status))this.taskDiagnostics.event({stage:status==='PENDING'?'MANUAL_CONTINUATION_PENDING':status==='DELIVERED'?'MANUAL_CONTINUATION_DELIVERED':'MANUAL_CONTINUATION_CONSUMED',taskId:this.taskId,manualRequestId:manual.requestId,manualStatus:manual.status,tokenId:token,tokenState:status,source:incorporatedBySdkOutput?'SDK_OUTPUT':status==='PENDING'?'BACKEND_EVENT':'NOTIFICATION'});
-    if(manualReady&&status==='RECEIVED')this.taskDiagnostics.event({stage:'DRAFT_CONTINUATION',taskId:this.taskId,draftGoal:this.latest?.draftGoal,continuationIntent:this.latest?.draftGoal?'PRESERVED':'MISMATCH'});
   }
   private flush():void {
     if(this.held||this.confirmation||!this.running){for(const [token,status] of this.pending)if(status==='PENDING')this.taskDiagnostics.event({stage:'CONTINUATION_BLOCKED',taskId:this.taskId,tokenId:token,tokenState:'PENDING',...this.scheduling(),taskState:this.latest?.executionState,blockedBy:this.held?'TOOL_OR_RESPONSE_IN_FLIGHT':this.confirmation?'CONFIRMATION':'NOT_RUNNING'});return;}
     const tokens=[...this.pending].filter(([,status])=>status==='PENDING').map(([token])=>token);if(!tokens.length)return;
+    const manual=this.latest?.manualSelection?.status;
+    if(manual==='SELECTED'&&this.latest?.admissionPending){for(const token of tokens)this.taskDiagnostics.event({stage:'CONTINUATION_BLOCKED',taskId:this.taskId,tokenId:token,tokenState:'PENDING',...this.scheduling(),taskState:this.latest?.executionState,blockedBy:'ADMISSION_PENDING'});return;}
     tokens.forEach(token=>this.transition(token,'DELIVERED'));
     if(this.latest?.accessCorrelation)this.diagnostics?.event(this.latest.accessCorrelation,'continuation_sent');
     try {
-    const manual=this.latest?.manualSelection?.status;
+    if(manual==='SELECTED')this.taskDiagnostics.event({stage:'DRAFT_CONTINUATION',taskId:this.taskId,draftGoal:this.latest?.draftGoal,continuationIntent:this.latest?.draftGoal?'PRESERVED':'MISMATCH'});
     const manualInstruction=manual==='SELECTED'
       ? this.latest?.draftGoal==='WRITE_DRAFT_TO_COMPOSER'
         ? ' La persona confirmó manualmente la conversación visible. Es evidencia USER_SELECTED, no identidad verificada. La intención original exige dejar el borrador escrito: primero creá el borrador privado con el texto exacto del usuario y luego llamá browser.writeDraft con sólo su intentId para solicitar la confirmación independiente. No llames browser.endTask antes de resolver esa confirmación. Nunca envíes.'
-        : ' La persona confirmó manualmente la conversación visible. Es evidencia USER_SELECTED, no identidad verificada. Continuá únicamente con el borrador privado; no escribas ni envíes en la página.'
+        : this.latest?.draftGoal==='PREPARE_PRIVATE_DRAFT'
+          ? ' La persona confirmó manualmente la conversación visible. Es evidencia USER_SELECTED, no identidad verificada. Continuá únicamente con el borrador privado; no escribas ni envíes en la página.'
+          : ' La selección manual quedó vinculada, pero el intent congelado no permite determinar si corresponde un borrador privado o escrito. Detenete con INTENT_MISMATCH: no solicites otra selección, no prepares, no escribas y nunca envíes.'
       : manual&&manual!=='PENDING'
         ? ` La selección manual terminó como ${manual}. No la reintentes ni prepares un borrador con esa selección; cerrá la tarea de forma segura.`
         : '';

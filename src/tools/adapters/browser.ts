@@ -20,7 +20,7 @@ const url = z.string().url().max(2000);
 export class BrowserAdapter implements ToolAdapter {
   private confirmations=new Set<string>();
   acknowledge(receipt:ContinuationReceipt):void {if(this.provider instanceof AttachedChromeProvider)this.provider.acknowledge(receipt);}
-  async admitGoal(admission:string,utterance?:string):Promise<void> {if(this.provider instanceof AttachedChromeProvider && await this.provider.admitGoal(admission,utterance,this.executionStates.get(this.executionScope.getStore()??'')??'RUNNING'))this.mark('TASK_ACCEPTED');}
+  async admitGoal(admission:string,utterance?:string,traceState?:BrowserExecutionState,transcriptPending=false,late=false):Promise<void> {if(this.provider instanceof AttachedChromeProvider && await this.provider.admitGoal(admission,utterance,traceState??this.executionStates.get(this.executionScope.getStore()??'')??'RUNNING',transcriptPending,late))this.mark('TASK_ACCEPTED');}
   cancelFromUser():void {if(this.provider instanceof AttachedChromeProvider)this.provider.cancelFromUser();}
   stallDraftProgress():void {if(this.provider instanceof AttachedChromeProvider)this.provider.stallDraftProgress();}
   private presentations=new Map<string,{signature:string;revision:number}>();

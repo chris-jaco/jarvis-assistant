@@ -5,10 +5,10 @@ export type BrowserDraftGoal='PREPARE_PRIVATE_DRAFT'|'WRITE_DRAFT_TO_COMPOSER';
 export function classifyBrowserDraftGoal(utterance?:string):BrowserDraftGoal|undefined {
   if(!utterance||utterance.length>2000)return;
   const text=utterance.normalize('NFD').replace(/\p{M}/gu,'').toLowerCase().replace(/\s+/g,' ').trim();
-  const draft=/(?:draft|borrador)/.test(text),surface=/(?:whatsapp|compositor|composer|conversacion|conversation)/.test(text);
-  if(!draft&&!surface)return;
+  const draft=/(?:draft|borrador)/.test(text),message=/(?:mensaje|message)/.test(text),surface=/(?:whatsapp|compositor|composer|conversacion|conversation)/.test(text);
+  if(!draft&&!message&&!surface)return;
   if(/(?:borrador privado|private draft|no (?:lo )?escrib\w*(?: en whatsapp)?|sin escribir(?:lo)?(?: en whatsapp)?|only private|solo privado)/.test(text))return 'PREPARE_PRIVATE_DRAFT';
-  if(/(?:escrib\w*|write|pon\w*|put|dej\w*)[^.]{0,100}(?:whatsapp|compositor|composer|conversacion|conversation)|(?:whatsapp|compositor|composer|conversacion|conversation)[^.]{0,100}(?:escrib\w*|write|pon\w*|put|dej\w*)|leave (?:it|the message) as a draft/.test(text))return 'WRITE_DRAFT_TO_COMPOSER';
+  if(/(?:escrib\w*|write|pon\w*|put|dej\w*)[^.]{0,160}(?:whatsapp|compositor|composer|conversacion|conversation|mensaje|message|borrador|draft)|(?:whatsapp|compositor|composer|conversacion|conversation|mensaje|message|borrador|draft)[^.]{0,160}(?:escrib\w*|write|pon\w*|put|dej\w*)|leave (?:it|the message) as a draft/.test(text))return 'WRITE_DRAFT_TO_COMPOSER';
   return draft?'PREPARE_PRIVATE_DRAFT':undefined;
 }
 export function classifyTaskIntent(utterance?: string): TaskIntent {

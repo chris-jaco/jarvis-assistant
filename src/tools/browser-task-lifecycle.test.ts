@@ -51,6 +51,10 @@ test('conservative captured-turn intent recognizes reading and defaults ambiguou
  assert.equal(classifyBrowserDraftGoal('Quiero que escribas un borrador en WhatsApp, pero no lo envíes.'),'WRITE_DRAFT_TO_COMPOSER');
  assert.equal(classifyBrowserDraftGoal('Dejá este texto escrito en la conversación para que yo lo envíe'),'WRITE_DRAFT_TO_COMPOSER');
  assert.equal(classifyBrowserDraftGoal('Poné el mensaje en el compositor, sin enviarlo'),'WRITE_DRAFT_TO_COMPOSER');
+ assert.equal(classifyBrowserDraftGoal('Escribí el mensaje Prueba Atlas V3 en WhatsApp'),'WRITE_DRAFT_TO_COMPOSER');
+ assert.equal(classifyBrowserDraftGoal('Seleccioná la conversación abierta y escribí el mensaje'),'WRITE_DRAFT_TO_COMPOSER');
+ assert.equal(classifyBrowserDraftGoal('Escribí un borrador, pero no lo envíes'),'WRITE_DRAFT_TO_COMPOSER');
+ assert.equal(classifyBrowserDraftGoal('Prepará un borrador privado, sin escribirlo'),'PREPARE_PRIVATE_DRAFT');
  assert.equal(classifyBrowserDraftGoal('Prepará un borrador privado, no lo escribas en WhatsApp'),'PREPARE_PRIVATE_DRAFT');
  assert.equal(classifyBrowserDraftGoal('Mandá este mensaje'),undefined);
  assert.match(JARVIS_INSTRUCTIONS,/browser\.writeDraft: esa tool puede escribir un borrador exacto/);assert.doesNotMatch(JARVIS_INSTRUCTIONS,/En V0\.5\.0 sólo navegación, búsqueda y media/);

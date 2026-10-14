@@ -226,7 +226,7 @@ test('manual resolution continuation is silent, single-use and distinguishes sel
  const rows:BrowserTaskTrace[]=[];const diagnostics=new BrowserTaskDiagnostics(row=>rows.push(row));diagnostics.enabled=true;
  const continuation=new BrowserContinuation(async()=>({}),message=>messages.push(message),undefined,diagnostics,receipt=>receipts.push(receipt));
  continuation.update({taskId,workflow:{outcome:'REQUIRES_USER_INTERACTION',handoffId:requestId,reason:'CONVERSATION_SELECTION'},ready:null,executionState:'WAITING_MANUAL',manualSelection:{status:'PENDING',requestId}},false);assert.equal(messages.length,0);
- const selected={taskId,workflow:null,ready,continuation:{taskId,tokens:[ready]},executionState:'RUNNING' as const,manualSelection:{status:'SELECTED' as const,requestId}};continuation.update(selected,false);continuation.update(selected,false);
+ const selected={taskId,workflow:null,ready,continuation:{taskId,tokens:[ready]},executionState:'RUNNING' as const,draftGoal:'PREPARE_PRIVATE_DRAFT' as const,manualSelection:{status:'SELECTED' as const,requestId}};continuation.update(selected,false);continuation.update(selected,false);
  assert.equal(messages.length,1);assert.match(messages[0]!,/USER_SELECTED, no identidad verificada/);assert.match(messages[0]!,/no escribas ni envíes/);assert.equal(receipts.length,1);
  assert.deepEqual(rows.filter(row=>row.stage.startsWith('MANUAL_CONTINUATION_')).map(row=>row.stage),['MANUAL_CONTINUATION_PENDING','MANUAL_CONTINUATION_DELIVERED','MANUAL_CONTINUATION_CONSUMED']);
  assert.ok(rows.filter(row=>row.stage==='CONTINUATION'&&row.tokenId===ready).every(row=>row.tokenReason==='MANUAL_SELECTION_READY'));
@@ -239,6 +239,33 @@ test('manual continuation preserves private-only versus write-to-composer intent
   continuation.update({taskId,workflow:null,ready,continuation:{taskId,tokens:[ready]},executionState:'RUNNING',draftGoal,manualSelection:{status:'SELECTED',requestId}},false);
   assert.equal(messages.length,1);assert.match(messages[0]!,expected);assert.doesNotMatch(messages[0]!,forbidden);assert.match(messages[0]!,/USER_SELECTED, no identidad verificada/);
  }
+});
+
+test('manual continuation waits for a trusted late admission and never maps missing intent to private draft',()=>{
+ const taskId=randomUUID(),requestId=randomUUID(),ready=randomUUID(),messages:string[]=[],rows:BrowserTaskTrace[]=[];const diagnostics=new BrowserTaskDiagnostics(row=>rows.push(row));diagnostics.enabled=true;
+ const continuation=new BrowserContinuation(async()=>({}),message=>messages.push(message),undefined,diagnostics);
+ continuation.update({taskId,workflow:null,ready,continuation:{taskId,tokens:[ready]},executionState:'RUNNING',admissionPending:true,manualSelection:{status:'SELECTED',requestId}},false);
+ assert.equal(messages.length,0);assert.ok(rows.some(row=>row.stage==='CONTINUATION_BLOCKED'&&row.blockedBy==='ADMISSION_PENDING'));
+ continuation.update({taskId,workflow:null,ready,continuation:{taskId,tokens:[ready]},executionState:'RUNNING',admissionPending:false,draftGoal:'WRITE_DRAFT_TO_COMPOSER',manualSelection:{status:'SELECTED',requestId},revision:1},false);
+ assert.equal(messages.length,1);assert.match(messages[0]!,/browser\.writeDraft/);assert.doesNotMatch(messages[0]!,/únicamente con el borrador privado/);assert.ok(rows.some(row=>row.stage==='DRAFT_CONTINUATION'&&row.continuationIntent==='PRESERVED'));
+});
+
+test('manual continuation fails closed on a true intent mismatch without requesting another selection',()=>{
+ const taskId=randomUUID(),requestId=randomUUID(),ready=randomUUID(),messages:string[]=[];
+ const continuation=new BrowserContinuation(async()=>({}),message=>messages.push(message));
+ continuation.update({taskId,workflow:null,ready,continuation:{taskId,tokens:[ready]},executionState:'RUNNING',admissionPending:false,manualSelection:{status:'SELECTED',requestId}},false);
+ assert.equal(messages.length,1);assert.match(messages[0]!,/INTENT_MISMATCH/);assert.match(messages[0]!,/no solicites otra selección/);assert.doesNotMatch(messages[0]!,/únicamente con el borrador privado/);
+});
+
+test('trusted late transcript enriches the same admission without replacing selected task authority',async()=>{
+ const session=randomUUID(),admissionId=randomUUID(),epoch=randomUUID();
+ const transport:BrowserTransport={epoch,connections:()=>[],subscribe:()=>()=>{},close:()=>{},request:async()=>({outcome:'ERROR',code:'REJECTED'})};
+ const provider=new AttachedChromeProvider(transport);try{await provider.inSession(session,async()=>{
+  assert.equal(await provider.admitGoal(admissionId,undefined,'RUNNING',true),true);assert.equal(provider.state(session).admissionPending,true);assert.equal(provider.state(session).draftGoal,undefined);
+  assert.equal(await provider.admitGoal(admissionId,'Seleccioná la conversación abierta y escribí el mensaje Prueba Atlas V3','RUNNING',false,true),false);
+  assert.equal(provider.state(session).admissionPending,false);assert.equal(provider.state(session).draftGoal,'WRITE_DRAFT_TO_COMPOSER');assert.equal(provider.state(session).draftPhase,'CONTENT_REQUIRED');
+  assert.equal(await provider.admitGoal(admissionId,'Prepará un borrador privado','RUNNING',false,true),false);assert.equal(provider.state(session).draftGoal,'WRITE_DRAFT_TO_COMPOSER');
+ });}finally{await provider.close();}
 });
 
 test('WAITING_MANUAL resumes once with USER_SELECTED and a frozen draft survives task close without send authority',async()=>{
@@ -256,6 +283,8 @@ test('WAITING_MANUAL resumes once with USER_SELECTED and a frozen draft survives
   const taskId=provider.state(session).taskId!;selected=true;const event={protocol:'atlas.browser',version:1,kind:'event',connectionEpoch:epoch,backendSessionId:session,event:'manualSelectionResolved',scopeId,manualRequestId:requestId,manualStatus:'SELECTED',taskId,admissionId};listener?.(connection,{...event,admissionId:randomUUID()});assert.equal(provider.state(session).manualSelection?.status,'PENDING');assert.equal(provider.state(session).ready,null);listener?.(connection,event);
   assert.equal(rows.filter(row=>row.stage==='MANUAL_REQUEST_CREATED').length,1);assert.equal(rows.filter(row=>row.stage==='MANUAL_EVENT_RECEIVED').length,1);
   const ready=provider.state(session).ready;assert.ok(ready);assert.equal(provider.state(session).manualSelection?.status,'SELECTED');listener?.(connection,event);assert.equal(provider.state(session).ready,ready,'duplicate resolution cannot create another continuation');
+  const operationCount=operations.length;const repeated=await provider.requestManualSelection(new AbortController().signal);assert.equal(repeated.outcome,'OK');assert.equal(operations.length,operationCount,'a selected request is idempotent and never creates another selection');
+  await adapter.admitGoal(randomUUID(),'Listo, ya seleccioné la conversación');assert.equal(provider.state(session).manualSelection?.status,'SELECTED','incidental acknowledgement cannot replace the owning admission');
   provider.acknowledge(provider.state(session).continuation!);
   evidenceRequestId=randomUUID();await assert.rejects(provider.prepareDraft({recipientHint:'Conversación seleccionada',text:'Texto privado'},new AbortController().signal),error=>error instanceof Error);evidenceRequestId=requestId;
   const draft:any=await provider.prepareDraft({recipientHint:'Conversación seleccionada',text:'Texto privado'},new AbortController().signal);assert.equal(draft.status,'FROZEN');assert.equal(draft.selectionAssurance,'USER_SELECTED');assert.equal(draft.intent.recipient.uniqueness,'USER_SELECTED');assert.equal(draft.confirmationEnabled,false);assert.equal(draft.executionEnabled,false);

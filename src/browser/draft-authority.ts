@@ -27,6 +27,6 @@ export function exactDraftClarification(utterance?:string):ExactDraftContent {
 
 /** A narrow acknowledgement cannot replace authority owned by an active task. */
 export function incidentalAcknowledgement(utterance?:string):boolean {
-  if(!utterance||utterance.length>40)return false;
-  return /^(?:s[ií]|si,? dale|dale|ok(?:ay)?|vale|bien|listo|entendido|continu[aá]|continue|go ahead|yes|yeah|yep|да|хорошо)[.!\s]*$/iu.test(utterance.trim());
+  if(!utterance||utterance.length>80)return false;
+  return /^(?:(?:s[ií]|si,? dale|dale|ok(?:ay)?|vale|bien|listo|entendido|continu[aá]|continue|go ahead|yes|yeah|yep|да|хорошо)|(?:listo,?\s*)?ya seleccion[eé] la conversaci[oó]n|(?:done,?\s*)?i selected the conversation)[.!\s]*$/iu.test(utterance.trim());
 }

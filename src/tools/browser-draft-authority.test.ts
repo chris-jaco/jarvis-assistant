@@ -18,6 +18,6 @@ test('ambiguous transcript never becomes draft authority',()=>{
 });
 
 test('only narrow acknowledgements are incidental',()=>{
-  for(const text of ['Sí','Dale.','OK','Да','continue'])assert.equal(incidentalAcknowledgement(text),true);
+  for(const text of ['Sí','Dale.','OK','Да','continue','Listo, ya seleccioné la conversación.','I selected the conversation'])assert.equal(incidentalAcknowledgement(text),true);
   for(const text of ['Escribí otro mensaje','Cambialo por otro texto','Sí, pero usá otra conversación'])assert.equal(incidentalAcknowledgement(text),false);
 });

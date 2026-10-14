@@ -253,7 +253,8 @@ export class VoiceToolBridge {
   }
   async transcript(itemId: string, text: string): Promise<void> {
     const browserUserTurn=this.browserUserTurns.delete(itemId);
-    if(browserUserTurn&&!this.confirmationActive)this.admission.capture(itemId,text);
+    const lateAdmission=browserUserTurn&&!this.confirmationActive?this.admission.capture(itemId,text):undefined;
+    if(lateAdmission)await toolRequest('browser-admit',lateAdmission).then(()=>this.refresh()).catch(()=>{});
     if (!this.confirmationActive) {if(this.lifecycleEnabled&&browserUserTurn&&explicitBrowserCancellation(text)){const result=await toolRequest('browser-cancel',{itemId,utterance:text}).catch(()=>undefined);if(result&&typeof result==='object'&&(result as {cancelled?:boolean}).cancelled)this.admission.clear();}await this.browserContinuation.transcript(itemId, text, false);}
     if (!this.pending || this.closed) { this.diagnostic('transcript.classify', 'no_pending_or_closed', { itemId }); return; }
     const capture = this.captured.get(itemId); this.captured.delete(itemId);
