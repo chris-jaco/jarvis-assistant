@@ -8,7 +8,7 @@ param(
 
     [string]$OutputPath = (Join-Path (Get-Location) ("atlas-desktop-perf-{0}.csv" -f (Get-Date -Format "yyyyMMdd-HHmmss"))),
 
-    [string]$RepositoryRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$RepositoryRoot = '',
 
     [switch]$SelfTest
 )
@@ -21,6 +21,32 @@ $CsvColumns = @(
     'WorkingSetBytes', 'PrivateBytes', 'CpuTotalSeconds', 'CpuPercentInterval',
     'Handles', 'Threads', 'AtlasProcessCount', 'LocalTcpConnections'
 )
+
+function Resolve-AtlasRepositoryRoot {
+    param(
+        [AllowEmptyString()][string]$RequestedRoot,
+        [Parameter(Mandatory)][string]$ScriptDirectory
+    )
+    $candidate = if ([string]::IsNullOrWhiteSpace($RequestedRoot)) {
+        Split-Path -Parent $ScriptDirectory
+    } else {
+        $RequestedRoot
+    }
+    try {
+        $resolved = (Resolve-Path -LiteralPath $candidate -ErrorAction Stop).Path
+    } catch {
+        throw 'ATLAS_PERF_REPOSITORY_INVALID: repository root does not exist.'
+    }
+    $expectedScript = Join-Path $resolved 'scripts\desktop-perf-sampler.ps1'
+    $packageManifest = Join-Path $resolved 'package.json'
+    $gitMetadata = Join-Path $resolved '.git'
+    if (-not (Test-Path -LiteralPath $expectedScript -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $packageManifest -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $gitMetadata)) {
+        throw 'ATLAS_PERF_REPOSITORY_INVALID: path is not the Atlas checkout containing this sampler.'
+    }
+    return $resolved
+}
 
 function Normalize-PathText {
     param([AllowNull()][string]$Value)
@@ -197,13 +223,14 @@ function Assert-SelfTest {
     Write-Host 'ATLAS_DESKTOP_PERF_SELF_TEST_OK'
 }
 
+if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { throw 'ATLAS_PERF_SCRIPT_CONTEXT_MISSING: script directory is unavailable.' }
+$resolvedRoot = Resolve-AtlasRepositoryRoot -RequestedRoot $RepositoryRoot -ScriptDirectory $PSScriptRoot
 if ($SelfTest) {
     Assert-SelfTest
     exit 0
 }
 
 if ($env:OS -ne 'Windows_NT') { throw 'ATLAS_PERF_WINDOWS_REQUIRED: run this sampler from Windows PowerShell or PowerShell 7 on Windows.' }
-$resolvedRoot = (Resolve-Path -LiteralPath $RepositoryRoot).Path
 $parent = Split-Path -Parent $OutputPath
 if ([string]::IsNullOrWhiteSpace($parent)) { $parent = (Get-Location).Path }
 if (-not (Test-Path -LiteralPath $parent -PathType Container)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
