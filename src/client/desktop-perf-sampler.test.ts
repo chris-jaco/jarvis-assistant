@@ -18,6 +18,16 @@ test('repository root is resolved in the script body instead of from PSScriptRoo
   assert.ok(source.indexOf('$resolvedRoot = Resolve-AtlasRepositoryRoot') < source.indexOf('if ($SelfTest)'));
 });
 
+test('PowerShell 5.1 contracts explicitly admit legitimately empty sampler collections', async () => {
+  const source = await readFile(path, 'utf8');
+  assert.match(source, /\[AllowEmptyCollection\(\)\]\[System\.Collections\.Generic\.HashSet\[int\]\]\$SeenPids/);
+  assert.match(source, /\[AllowEmptyCollection\(\)\]\[hashtable\]\$PreviousCpu/);
+  assert.match(source, /\[AllowEmptyCollection\(\)\]\[hashtable\]\$PreviousProcesses/);
+  assert.equal(source.match(/\[AllowEmptyCollection\(\)\]\[object\[\]\]\$Connections/g)?.length, 2);
+  assert.doesNotMatch(source, /\[AllowEmptyCollection\(\)\]\[object\[\]\]\$Processes/);
+  assert.match(source, /\$seen=\[System\.Collections\.Generic\.HashSet\[int\]\]::new\(\)/);
+});
+
 test('desktop performance sampler is read-only toward Atlas and scopes discovery to the repository process tree', async () => {
   const source = await readFile(path, 'utf8');
   assert.match(source, /dist\\desktop-build\\desktop\\main\.js/);

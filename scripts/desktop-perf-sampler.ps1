@@ -77,7 +77,7 @@ function Get-DescendantProcessIds {
 function Resolve-AtlasProcessSnapshot {
     param(
         [Parameter(Mandatory)][object[]]$Processes,
-        [Parameter(Mandatory)][object[]]$Connections,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Connections,
         [Parameter(Mandatory)][string]$ExpectedRepositoryRoot,
         [int]$ExpectedMainPid = 0,
         [int]$KnownCorePid = 0
@@ -147,14 +147,14 @@ function Get-CpuTotalSeconds {
 function New-AtlasSampleRows {
     param(
         [Parameter(Mandatory)][object]$Snapshot,
-        [Parameter(Mandatory)][object[]]$Connections,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Connections,
         [Parameter(Mandatory)][int]$SampleNumber,
         [Parameter(Mandatory)][datetimeoffset]$Timestamp,
         [Parameter(Mandatory)][double]$ElapsedSeconds,
         [Parameter(Mandatory)][int]$LogicalProcessorCount,
-        [Parameter(Mandatory)][hashtable]$PreviousCpu,
-        [Parameter(Mandatory)][System.Collections.Generic.HashSet[int]]$SeenPids,
-        [Parameter(Mandatory)][hashtable]$PreviousProcesses
+        [Parameter(Mandatory)][AllowEmptyCollection()][hashtable]$PreviousCpu,
+        [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.HashSet[int]]$SeenPids,
+        [Parameter(Mandatory)][AllowEmptyCollection()][hashtable]$PreviousProcesses
     )
     $currentIds = [System.Collections.Generic.HashSet[int]]::new()
     $rows = [System.Collections.Generic.List[object]]::new()
