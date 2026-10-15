@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { MenuItemConstructorOptions } from 'electron';
-import { desktopApplicationMenu, registerDesktopWindowControls, windowsLocalQuit, type DesktopKeyboardInput } from '../desktop/window-controls.js';
+import { desktopApplicationMenu, registerDesktopWindowControls, requestSafeDesktopHide, windowsLocalQuit, type DesktopKeyboardInput } from '../desktop/window-controls.js';
 
 const input=(overrides:Partial<DesktopKeyboardInput>={}):DesktopKeyboardInput=>({type:'keyDown',key:'q',control:true,alt:false,shift:false,meta:false,isAutoRepeat:false,...overrides});
 
@@ -38,4 +38,13 @@ test('local quit recognizer is Windows-specific at registration and rejects modi
 test('visible application menu exposes Salir de Atlas and invokes the same quit authority',()=>{
   let quits=0;const template=desktopApplicationMenu({hide:()=>{},quit:()=>{quits++;}});const submenu=template[0]!.submenu as MenuItemConstructorOptions[];const quit=submenu[0]!;
   assert.equal(quit.label,'Salir de Atlas');assert.equal(quit.accelerator,'CommandOrControl+Q');(quit.click as Function)();assert.equal(quits,1);
+});
+
+test('Tray availability gates hide fail-visible without allowing native close',()=>{
+  let hides=0,warnings=0;
+  assert.equal(requestSafeDesktopHide({canHideSafely:()=>false,hide:()=>{hides++;},unavailable:()=>{warnings++;}}),true);
+  assert.deepEqual({hides,warnings},{hides:0,warnings:1});
+  const result={status:'pending'};
+  assert.equal(requestSafeDesktopHide({canHideSafely:()=>true,hide:()=>{hides++;return result;},unavailable:()=>{warnings++;}}),result);
+  assert.deepEqual({hides,warnings},{hides:1,warnings:1});
 });

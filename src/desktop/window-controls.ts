@@ -21,6 +21,19 @@ export interface DesktopWindowControlsTarget {
 
 export interface DesktopWindowActions { hide():unknown; quit():unknown }
 
+export interface DesktopHideGate {
+  canHideSafely(): boolean;
+  hide(): unknown;
+  unavailable(): unknown;
+}
+
+/** A handled unavailable Tray is deliberately truthy so native close stays prevented. */
+export function requestSafeDesktopHide(gate:DesktopHideGate):unknown{
+  if(gate.canHideSafely())return gate.hide();
+  void gate.unavailable();
+  return true;
+}
+
 export function windowsLocalQuit(input:DesktopKeyboardInput):boolean{
   return input.type==='keyDown'&&input.key.toLowerCase()==='q'&&input.control&&!input.alt&&!input.shift&&!input.meta&&!input.isAutoRepeat;
 }
