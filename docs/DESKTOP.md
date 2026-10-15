@@ -57,3 +57,32 @@ No declarar Hito 1 completado hasta verificar estos pasos en Windows real.
 ## Límites
 
 Sin tray, wake word, instalador, updater, autostart, routing remoto ni background listening. Browser Bridge no se empaqueta. WhatsApp B.2 continúa `PARTIAL / DEFERRED`; B.3 y Send permanecen bloqueados.
+# Desktop performance baseline (Windows 11)
+
+`scripts/desktop-perf-sampler.ps1` is a development-only, read-only process sampler. It identifies the single Electron Main launched from the current checkout, follows only that process tree, and identifies Atlas Core as the unique descendant that owns a loopback listener. It stops safely if either identity is ambiguous. Command lines are used only for local classification and are never exported.
+
+Build and start Atlas from the repository in the first PowerShell window:
+
+```powershell
+cd C:\Users\chris\jarvis-assistant
+git switch v0.6.1-desktop-companion
+npm ci
+npm run desktop:dev
+```
+
+In a second PowerShell window, validate the pure fixture checks and take the initial ten-minute sample:
+
+```powershell
+cd C:\Users\chris\jarvis-assistant
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\desktop-perf-sampler.ps1 -SelfTest
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\desktop-perf-sampler.ps1 `
+  -DurationSeconds 600 `
+  -IntervalSeconds 5 `
+  -OutputPath .\desktop-perf-baseline.csv
+```
+
+PowerShell 7 can use `pwsh` instead of `powershell.exe`. The output path must not already exist, preventing accidental overwrite. The sampler creates only the requested CSV and does not stop processes, change permissions, inspect conversation data, or export command lines, ports, URLs, cookies, tokens, prompts, or secrets.
+
+Each active process produces one row per sample. `ProcessState` is `NEW`, `PRESENT`, or `DISAPPEARED`; disappeared rows deliberately leave resource values empty. Roles are `MAIN`, `RENDERER`, `CORE`, and `AUXILIARY`. `CpuPercentInterval` is normalized across the machine's logical processors, while `CpuTotalSeconds` is cumulative. `LocalTcpConnections` counts loopback TCP entries owned by the process.
+
+Interpret memory only after a warm-up period. Short increases followed by a plateau are normal; a reproducible positive slope across settled samples is the signal to investigate. Compare equivalent states (idle with idle, connected with connected), and retain the raw CSV rather than relying only on the console summary. A ten-minute run establishes tooling and baseline shape; it does not replace the one-hour and twenty-cycle Hito 3 acceptance runs.
