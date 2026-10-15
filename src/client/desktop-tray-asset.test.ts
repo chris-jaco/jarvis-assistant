@@ -6,6 +6,15 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const assetPath = resolve(root, 'public/brand/atlas-tray.ico');
+const applicationAssetPath = resolve(root, 'public/brand/atlas-app.ico');
+
+function icoDimensions(bytes: Buffer): number[] {
+  const count = bytes.readUInt16LE(4);
+  return Array.from({ length: count }, (_, index) => {
+    const width = bytes[6 + index * 16];
+    return width === 0 ? 256 : width!;
+  });
+}
 
 test('official Windows Tray asset is a bounded five-resolution ICO', () => {
   const bytes = readFileSync(assetPath);
@@ -27,12 +36,21 @@ test('official Windows Tray asset is a bounded five-resolution ICO', () => {
     ranges.push([offset, offset + size]);
   }
 
-  assert.deepEqual(dimensions, [16, 20, 24, 32, 48]);
+  assert.deepEqual([...dimensions].sort((left, right) => left - right), [16, 20, 24, 32, 48]);
   assert.equal(new Set(ranges.map(range => range.join(':'))).size, 5, 'ICO entries must be distinct');
 });
 
 test('Electron Main resolves the official ICO instead of the provisional legacy PNG', () => {
   const main = readFileSync(resolve(root, 'src/desktop/main.ts'), 'utf8');
   assert.match(main, /public\/brand\/atlas-tray\.ico/);
+  assert.match(main, /public\/brand\/atlas-app\.ico/);
+  assert.match(main, /icon: applicationIcon/);
   assert.doesNotMatch(main, /atlas_blanco\.png/);
+});
+
+test('official application icon contains the complete Windows resolution set', () => {
+  const bytes = readFileSync(applicationAssetPath);
+  assert.equal(bytes.readUInt16LE(0), 0, 'ICO reserved header');
+  assert.equal(bytes.readUInt16LE(2), 1, 'ICO image type');
+  assert.deepEqual(icoDimensions(bytes), [256, 128, 64, 48, 32, 24, 20, 16]);
 });

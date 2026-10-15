@@ -17,6 +17,7 @@ const projectRoot = resolve(here, '../../..');
 const serverEntry = resolve(projectRoot, 'dist/server/server/index.js');
 const preload = resolve(projectRoot, 'dist/desktop-preload/preload.cjs');
 const trayIcon = resolve(projectRoot, 'public/brand/atlas-tray.ico');
+const applicationIcon = resolve(projectRoot, 'public/brand/atlas-app.ico');
 let window: BrowserWindow | undefined;
 let cleanupIpc: DesktopIpcController | undefined;
 let cleanupProtocol: DesktopCleanupProtocol | undefined;
@@ -67,7 +68,7 @@ function showTrayUnavailable(browserWindow:BrowserWindow):Promise<void>{
 async function start(): Promise<void> {
   const endpoint = await supervisor.start();
   const applicationOrigin = new URL(endpoint.baseUrl).origin;
-  const browserWindow = new BrowserWindow(secureWindowOptions(preload)); window = browserWindow;
+  const browserWindow = new BrowserWindow({ ...secureWindowOptions(preload), icon: applicationIcon }); window = browserWindow;
   cleanupIpc = registerDesktopIpc(ipcMain, supervisor.backendClient(), senderId => browserWindow.webContents.id === senderId && !browserWindow.isDestroyed());
   cleanupProtocol=new DesktopCleanupProtocol(ipcMain,browserWindow.webContents,senderId=>browserWindow.webContents.id===senderId&&!browserWindow.isDestroyed());
   lifecycle=new DesktopLifecycleRuntime({
