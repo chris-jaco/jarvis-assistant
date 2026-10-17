@@ -47,6 +47,7 @@ test('packaged paths separate immutable application resources from user data', (
   assert.equal(paths.resourcesRoot, resolve('/programs/Atlas/resources'));
   assert.equal(paths.unpackedResourcesRoot, resolve('/programs/Atlas/resources/app.asar.unpacked'));
   assert.equal(paths.coreWorkingDirectory, resolve('/users/example/AppData/Roaming/Atlas'));
+  assert.equal(paths.credentialsRoot, resolve('/users/example/AppData/Roaming/Atlas/credentials'));
   for (const writable of [paths.dataRoot, paths.configRoot, paths.localDataRoot, paths.memoryPath, paths.credentialsRoot, paths.googleTokenPath, paths.gmailAccountsPath, paths.journalPath, paths.logsRoot, paths.cacheRoot]) {
     assert.equal(inside(paths.applicationRoot, writable), false, writable);
     assert.equal(inside(paths.resourcesRoot, writable), false, writable);

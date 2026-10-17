@@ -78,7 +78,7 @@ export function resolveDesktopRuntimePaths(input: DesktopPathInputs): DesktopRun
     configFile: join(dataRoot, 'config', 'atlas.env'),
     localDataRoot,
     memoryPath: join(localDataRoot, 'memory', 'memories.json'),
-    credentialsRoot: localDataRoot,
+    credentialsRoot: join(dataRoot, 'credentials'),
     googleTokenPath: join(localDataRoot, 'google-tokens.json'),
     gmailAccountsPath: join(localDataRoot, 'gmail-accounts'),
     journalPath: join(localDataRoot, 'browser-consequential', 'journal.json'),
