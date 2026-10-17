@@ -5,13 +5,16 @@ import { privateRequestPath } from './private-paths.js';
 import { createToolsHandler } from './tools.js';
 import { createClientSecret, TokenError } from './token.js';
 import { desktopApiAuthorized, desktopServerMode } from './desktop-auth.js';
-try { process.loadEnvFile('.env'); } catch (error) {
-  if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+import { coreMayLoadDotEnv } from '../desktop/core-environment.js';
+if (coreMayLoadDotEnv(process.env)) {
+  try { process.loadEnvFile('.env'); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
 }
 const production = process.argv[1]?.endsWith('.js') ?? false;
 const viteApi = production ? undefined : await import('vite');
 const vite = viteApi ? await viteApi.createServer({ server: { middlewareMode: true }, appType: 'spa', plugins: [{ name: 'jarvis-private-storage', configResolved(config) { config.server.fs.deny.push('**/.local/**', '**/*google-tokens*.json', '**/g_*.json'); } }] }) : undefined;
-const root = resolve('dist/client');
+const root = resolve(process.env.ATLAS_CLIENT_ROOT ?? 'dist/client');
 const mime: Record<string, string> = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
 const port = Number(process.env.PORT ?? 3000);
 const host = process.env.HOST ?? '127.0.0.1';

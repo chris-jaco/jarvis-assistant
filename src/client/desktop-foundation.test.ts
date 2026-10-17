@@ -48,12 +48,13 @@ class FakeChild extends EventEmitter implements BackendProcess {
 }
 
 test('backend runtime environments separate Electron-as-Node from UtilityProcess', () => {
-  const inherited = { SAFE_VALUE: 'kept', ELECTRON_RUN_AS_NODE: 'inherited' };
+  const inherited = { USER_TIMEZONE: 'Europe/Madrid', SAFE_VALUE: 'discarded', ELECTRON_RUN_AS_NODE: 'inherited' };
   const node = backendEnvironment(inherited, 'a'.repeat(64), 'node');
   const utility = backendEnvironment(inherited, 'b'.repeat(64), 'utility');
   assert.equal(node.ELECTRON_RUN_AS_NODE, '1');
   assert.equal(utility.ELECTRON_RUN_AS_NODE, undefined);
-  assert.deepEqual({ mode: utility.ATLAS_DESKTOP_MODE, host: utility.HOST, port: utility.PORT, safe: utility.SAFE_VALUE }, { mode: 'true', host: '127.0.0.1', port: '0', safe: 'kept' });
+  assert.deepEqual({ mode: utility.ATLAS_DESKTOP_MODE, host: utility.HOST, port: utility.PORT, timezone: utility.USER_TIMEZONE }, { mode: 'true', host: '127.0.0.1', port: '0', timezone: 'Europe/Madrid' });
+  assert.equal(utility.SAFE_VALUE, undefined);
 });
 
 test('utility readiness accepts fragmented Windows CRLF, drains stderr and emits sanitized stages', async () => {

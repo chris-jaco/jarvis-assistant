@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, session, utilityProcess } from 'electron';
-import { dirname, resolve } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BackendSupervisor } from './backend-supervisor.js';
 import { registerDesktopIpc } from './ipc.js';
@@ -11,13 +12,9 @@ import type { DesktopTrayController } from './tray-controller.js';
 import { desktopApplicationMenu, registerDesktopWindowControls, requestSafeDesktopHide } from './window-controls.js';
 import { audioPermissionAllowed, sameApplicationLocation, secureWindowOptions } from './window-policy.js';
 import { acquireSingleInstance, focusExistingWindow } from './lifecycle.js';
+import { resolveDesktopRuntimePaths } from './runtime-paths.js';
+import { desktopCoreEnvironment } from './core-environment.js';
 
-const here = dirname(fileURLToPath(import.meta.url));
-const projectRoot = resolve(here, '../../..');
-const serverEntry = resolve(projectRoot, 'dist/server/server/index.js');
-const preload = resolve(projectRoot, 'dist/desktop-preload/preload.cjs');
-const trayIcon = resolve(projectRoot, 'public/brand/atlas-tray.ico');
-const applicationIcon = resolve(projectRoot, 'public/brand/atlas-app.ico');
 let window: BrowserWindow | undefined;
 let cleanupIpc: DesktopIpcController | undefined;
 let cleanupProtocol: DesktopCleanupProtocol | undefined;
@@ -25,23 +22,13 @@ let lifecycle: DesktopLifecycleRuntime | undefined;
 let trayController: DesktopTrayController | undefined;
 let closing = false;
 let trayWarning: Promise<void> | undefined;
-
-const supervisor = new BackendSupervisor({
-  executable: process.execPath, serverEntry, cwd: projectRoot, runtime: 'utility',
-  spawn: (_executable, args, options) => utilityProcess.fork(args[0]!, [], { cwd: options.cwd, env: options.env, stdio: 'pipe', serviceName: 'Atlas Core' }) as unknown as import('./backend-supervisor.js').BackendProcess,
-  onUnexpectedExit: () => {
-    if (closing) return;
-    disposeTray();
-    if(lifecycle)void lifecycle.coreCrash();
-    else void startupShutdown({ type: 'error', title: 'Atlas Core se detuvo', message: 'Atlas Core se cerró inesperadamente. Atlas se cerrará de forma segura; volvé a abrirlo para continuar.' });
-  }
-});
+let supervisor: BackendSupervisor | undefined;
 
 async function startupShutdown(message?: Electron.MessageBoxOptions): Promise<void> {
   if (closing) return; closing = true;
   disposeTray();
   cleanupProtocol?.dispose();cleanupProtocol=undefined;cleanupIpc?.dispose();cleanupIpc=undefined;
-  await supervisor.stop();
+  await supervisor?.stop();
   if (message) await dialog.showMessageBox(message);
   if (window && !window.isDestroyed()) window.destroy(); window = undefined;
   app.quit();
@@ -66,9 +53,35 @@ function showTrayUnavailable(browserWindow:BrowserWindow):Promise<void>{
 }
 
 async function start(): Promise<void> {
+  const paths = resolveDesktopRuntimePaths({
+    packaged: app.isPackaged,
+    mainModulePath: fileURLToPath(import.meta.url),
+    appPath: app.getAppPath(),
+    resourcesPath: process.resourcesPath,
+    userDataPath: app.getPath('userData')
+  });
+  await mkdir(paths.coreWorkingDirectory, { recursive: true });
+  if (paths.mode === 'DEVELOPMENT') {
+    try { process.loadEnvFile(join(paths.coreWorkingDirectory, '.env')); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  supervisor = new BackendSupervisor({
+    executable: process.execPath,
+    serverEntry: paths.coreEntry,
+    cwd: paths.coreWorkingDirectory,
+    environment: desktopCoreEnvironment(process.env, paths),
+    runtime: 'utility',
+    spawn: (_executable, args, options) => utilityProcess.fork(args[0]!, [], { cwd: options.cwd, env: options.env, stdio: 'pipe', serviceName: 'Atlas Core' }) as unknown as import('./backend-supervisor.js').BackendProcess,
+    onUnexpectedExit: () => {
+      if (closing) return;
+      disposeTray();
+      if(lifecycle)void lifecycle.coreCrash();
+      else void startupShutdown({ type: 'error', title: 'Atlas Core se detuvo', message: 'Atlas Core se cerró inesperadamente. Atlas se cerrará de forma segura; volvé a abrirlo para continuar.' });
+    }
+  });
   const endpoint = await supervisor.start();
   const applicationOrigin = new URL(endpoint.baseUrl).origin;
-  const browserWindow = new BrowserWindow({ ...secureWindowOptions(preload), icon: applicationIcon }); window = browserWindow;
+  const browserWindow = new BrowserWindow({ ...secureWindowOptions(paths.preloadEntry), icon: paths.applicationIcon }); window = browserWindow;
   cleanupIpc = registerDesktopIpc(ipcMain, supervisor.backendClient(), senderId => browserWindow.webContents.id === senderId && !browserWindow.isDestroyed());
   cleanupProtocol=new DesktopCleanupProtocol(ipcMain,browserWindow.webContents,senderId=>browserWindow.webContents.id===senderId&&!browserWindow.isDestroyed());
   lifecycle=new DesktopLifecycleRuntime({
@@ -76,12 +89,12 @@ async function start(): Promise<void> {
     hideWindow:()=>{if(!browserWindow.isDestroyed())browserWindow.hide();},
     restoreWindow:()=>focusExistingWindow(browserWindow.isDestroyed()?undefined:browserWindow),
     destroyWindow:()=>{closing=true;disposeTray();if(!browserWindow.isDestroyed())browserWindow.destroy();window=undefined;},
-    stopCore:()=>supervisor.stop(),
+    stopCore:()=>supervisor!.stop(),
     showHideFailure:()=>dialog.showMessageBox(browserWindow,{type:'error',title:'Atlas sigue abierto',message:'Atlas no pudo ocultarse de forma segura. La ventana seguirá visible y la voz permanecerá desconectada.'}).then(()=>undefined),
     showCoreCrash:()=>dialog.showMessageBox(browserWindow,{type:'error',title:'Atlas Core se detuvo',message:'Atlas Core se cerró inesperadamente. Atlas se cerrará de forma segura; volvé a abrirlo para continuar.'}).then(()=>undefined),
     quitApplication:()=>{closing=true;app.quit();}
   });
-  trayController=createElectronTrayController(trayIcon,{restore:()=>lifecycle?.restore(),quit:()=>requestQuit()});
+  trayController=createElectronTrayController(paths.trayIcon,{restore:()=>lifecycle?.restore(),quit:()=>requestQuit()});
   trayController.initialize();
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
     const mediaTypes = 'mediaTypes' in details ? details.mediaTypes : undefined;

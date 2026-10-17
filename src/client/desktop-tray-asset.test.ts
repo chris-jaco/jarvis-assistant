@@ -41,10 +41,11 @@ test('official Windows Tray asset is a bounded five-resolution ICO', () => {
 });
 
 test('Electron Main resolves the official ICO instead of the provisional legacy PNG', () => {
+  const paths = readFileSync(resolve(root, 'src/desktop/runtime-paths.ts'), 'utf8');
   const main = readFileSync(resolve(root, 'src/desktop/main.ts'), 'utf8');
-  assert.match(main, /public\/brand\/atlas-tray\.ico/);
-  assert.match(main, /public\/brand\/atlas-app\.ico/);
-  assert.match(main, /icon: applicationIcon/);
+  assert.match(paths, /atlas-tray\.ico/);
+  assert.match(paths, /atlas-app\.ico/);
+  assert.match(main, /icon: paths\.applicationIcon/);
   assert.doesNotMatch(main, /atlas_blanco\.png/);
 });
 

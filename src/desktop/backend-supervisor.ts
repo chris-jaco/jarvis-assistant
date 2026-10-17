@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import { createDesktopSecret } from '../server/desktop-auth.js';
 import { DesktopBackendClient, DesktopHealthError } from './backend-client.js';
+import { allowlistedCoreEnvironment } from './core-environment.js';
 
 export interface BackendEndpoint { baseUrl: string; secret: string }
 export interface BackendProcess {
@@ -17,7 +18,7 @@ export type BackendStartupStage = 'CORE_SPAWN_REQUESTED' | 'CORE_SPAWNED' | 'COR
 export interface BackendStartupDiagnostic { stage: BackendStartupStage; elapsedMs: number; pidPresent?: boolean; exitCode?: number | null; healthFailure?: 'UNAUTHORIZED' | 'NOT_READY' | 'CONNECTION_FAILED' | 'TIMEOUT' }
 
 export function backendEnvironment(base: NodeJS.ProcessEnv, secret: string, runtime: BackendRuntime): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...base, ATLAS_DESKTOP_MODE: 'true', ATLAS_DESKTOP_SECRET: secret, HOST: '127.0.0.1', PORT: '0' };
+  const env: NodeJS.ProcessEnv = { ...allowlistedCoreEnvironment(base), ATLAS_DESKTOP_MODE: 'true', ATLAS_DESKTOP_SECRET: secret, HOST: '127.0.0.1', PORT: '0' };
   if (runtime === 'node') env.ELECTRON_RUN_AS_NODE = '1';
   else delete env.ELECTRON_RUN_AS_NODE;
   return env;
@@ -31,6 +32,7 @@ export class BackendSupervisor {
     executable: string;
     serverEntry: string;
     cwd: string;
+    environment?: NodeJS.ProcessEnv;
     startupTimeoutMs?: number;
     shutdownTimeoutMs?: number;
     spawn?: BackendSpawner;
@@ -52,7 +54,7 @@ export class BackendSupervisor {
     emit({ stage: 'CORE_SPAWN_REQUESTED' });
     const child = spawner(this.options.executable, [this.options.serverEntry], {
       cwd: this.options.cwd,
-      env: backendEnvironment(process.env, secret, this.options.runtime ?? 'node')
+      env: backendEnvironment(this.options.environment ?? process.env, secret, this.options.runtime ?? 'node')
     });
     this.child = child; this.expectedExit = false;
     child.once('spawn', () => emit({ stage: 'CORE_SPAWNED', pidPresent: child.pid !== undefined }));
