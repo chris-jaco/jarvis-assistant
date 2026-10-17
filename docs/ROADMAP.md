@@ -1,8 +1,8 @@
 # ATLAS — Roadmap maestro
 
-**Actualizado:** 14 de octubre de 2026
+**Actualizado:** 17 de octubre de 2026
 **Repositorio:** `chris-jaco/jarvis-assistant`  
-**Rama de desarrollo actual:** `v0.5.3-consequential-actions`  
+**Rama de desarrollo actual:** `v0.6.1-desktop-companion`
 **Baseline aceptada V0.5.3.6A:** `168a468b26823df5dcfb5c2a32842463022bc77f`
 
 ## Visión
@@ -39,7 +39,9 @@ Atlas es un asistente personal de IA, principalmente por voz, con memoria contex
 | V0.5.3.6B.2 | PARTIAL / DEFERRED | Controlled Draft Writing | Confirmaciones CONTENT/WRITE alcanzadas; escritura en compositor no verificada y diferida |
 | V0.6.0 | Completada | Architecture Readiness | Auditoría completada, Electron elegido y GO condicional por hitos |
 | V0.6.1 — Hito 0 | Completada | Architecture Foundation | CoreTransport tipado, transporte web compatible, token Realtime inyectable y ADRs; validación local completa |
-| V0.6.1 — Hito 1 | Implementado; acceptance pendiente | Electron Vertical Slice | Renderer aislado, Core supervisado, canal local autenticado y voz reutilizada; pendiente Windows 11 real |
+| V0.6.1 — Hito 1 | Completada | Electron Vertical Slice | Renderer aislado, Core supervisado, canal local autenticado, voz y resiliencia validados en Windows 11 |
+| V0.6.1 — Hito 2 | Completada | Lifecycle + System Tray | Hide/Restore/Quit seguros, Tray, identidad visual y Core crash validados en Windows 11 |
+| V0.6.1 — Hito 3 | Completada | Estabilización | Ciclos deterministas y reales, conversación prolongada y baseline de recursos completados |
 
 **Acceptance V0.5.3.6A:** 665 tests: 662 PASS, 3 SKIP, 0 FAIL. Typecheck y builds OK. Commit publicado en rama de desarrollo; no merge a `main` ni tag/release de 6A.
 
@@ -48,7 +50,10 @@ Atlas es un asistente personal de IA, principalmente por voz, con memoria contex
 | Versión | Nombre | Objetivo | Estado |
 |---|---|---|---|
 | V0.5.3.6B | WhatsApp Consequential Actions | Escritura y envío seguro con autorizaciones separadas y protección de duplicados | B.2 PARTIAL / DEFERRED; B.3 y Send bloqueados |
-| V0.6 | Atlas Core Experience | App Windows con backend local, wake word, publicación, logo, orb-only, logs por voz y costos/modelos | En curso por hitos; Hito 0 completado localmente |
+| V0.6.1 | Desktop Companion | Preview local Windows con Electron, Core supervisado, lifecycle, Tray y estabilidad | Completada; cierre documental preparado |
+| V0.6.2 | Windows Packaging | Empaquetado e instalador Windows | Planificada |
+| V0.6.3 | Local Wake Word | Wake word local con garantías de privacidad y ownership de micrófono | Planificada |
+| V0.6.4 | Always-on Companion | Companion residente y endurecido para uso prolongado | Planificada |
 | V0.7 | Productivity Integrations | Notion, Clockify, Instantly, Onabox, HubSpot, Lovable y otras | Alcance por definir |
 | V0.8 | Mobile & Headphones Companion | Hablar desde Android/auriculares sin la web delante | Planificada |
 | V0.9 — Mark 1 | Proactive Atlas | Briefings, alertas, seguimiento, recordatorios y automatizaciones | Planificada |
@@ -74,49 +79,38 @@ Atlas es un asistente personal de IA, principalmente por voz, con memoria contex
 ### V0.6 — Atlas Core Experience
 **Arquitectura decidida:** aplicación de escritorio Windows con backend local, reutilizando voz, memoria, herramientas, Gmail, Calendar y Chrome Bridge. Chrome sigue siendo una herramienta, no la interfaz obligatoria.
 
-**V0.6.0 Architecture Readiness — COMPLETADA:** la auditoría confirmó la reutilización del Core existente, eligió Electron como shell futuro y emitió un GO condicional sujeto a boundaries explícitos, aislamiento del renderer y autenticación del canal local. Las decisiones están registradas en `docs/adr/0060`–`0071`.
+**V0.6.0 Architecture Readiness — COMPLETADA:** la auditoría confirmó la reutilización del Core existente, eligió Electron como shell y definió boundaries explícitos, aislamiento del renderer y autenticación local. Las decisiones están registradas en `docs/adr/0060`–`0071`.
 
-- Desktop app: ventana nativa, instalación, inicio automático, backend local y lifecycle.
-- Wake word «Atlas»: detección local, control de micrófono y privacidad.
-- Orb-first UI: sólo orbe central por defecto, sin transcript visible; historial, permisos, confirmaciones y errores accesibles cuando haga falta.
-- Logo: sustituir por el nuevo diseño cuando se entregue.
-- Logs por voz con código: explicación de errores y códigos diagnósticos sanitizados útiles para Codex.
-- Routing de modelos/agentes: evaluar modelos según calidad, latencia, compatibilidad y costo. Haiku, Opus, Muse u otros son candidatos, no elecciones cerradas.
-- Cost management: costos por sesión/modelo/herramienta, límites y alertas.
-- Publicación: instalador Windows, configuración segura, actualización y recuperación de errores.
+#### V0.6.1 Desktop Companion — COMPLETADA
 
-#### Fases propuestas
-0. **V0.6.1 — Architecture Foundation:** introducir `CoreTransport` y proveedores inyectables conservando las rutas HTTP, cookies, errores, cancelación, polling, Realtime/WebRTC y comportamiento web existentes. Sin Electron ni cambios funcionales de Browser Control.
-1. **Electron vertical slice — IMPLEMENTADO / ACCEPTANCE PENDIENTE:** shell mínimo con renderer aislado, backend Node supervisado, health autenticado, cierre acotado y single-instance. Requiere validar voz/micrófono/WebRTC y cleanup en Windows 11 real antes de completarlo.
-2. **Desktop lifecycle y canal local:** autenticación del canal, ownership de procesos, recuperación y actualización sin restaurar autoridad operativa.
-3. **Confirmaciones y orb-first UX:** permisos, estados RUNNING/WAITING/terminales, confirmaciones y errores accionables con transcript opcional.
-4. **Tray, audio y wake word:** tray/autostart opt-in, ownership exclusivo del micrófono, wake word local, barge-in y señalización inequívoca de privacidad.
-5. **Browser capability opcional y hardening:** Chrome Bridge como capacidad opcional, empaquetado/updates, observabilidad y regresión completa antes del release candidate.
+0. **Hito 0 — Architecture Readiness/Foundation:** `CoreTransport` tipado, proveedores inyectables, compatibilidad Web y ADRs.
+1. **Hito 1 — Electron Vertical Slice:** renderer aislado, Core supervisado, canal local autenticado, single-instance, voz y resiliencia ante crash.
+2. **Hito 2 — Lifecycle + System Tray:** minimizar conserva la sesión; `X` ejecuta cleanup y oculta; Restore inicia una conversación nueva; Quit termina Electron/Core; Tray e identidad oficial integrados.
+3. **Hito 3 — Estabilización:** 20/20 ciclos connect/disconnect, 20/20 Hide/Restore, conversación prolongada, barge-in, pérdidas de red/micrófono y baseline de diez minutos.
 
-#### Dependencias y límites
-- Preservar Tool Registry, Confirmation Engine, memoria, Chrome Bridge y permisos existentes mediante contratos versionados y tests de regresión.
-- Definir primero el proceso propietario del backend, audio y secretos; evitar dos instancias o dos dueños simultáneos del micrófono.
-- El wake word requiere una decisión explícita de motor, consumo, distribución y privacidad antes de incorporarlo al instalador.
-- Firma de binarios, mecanismo de actualización y almacenamiento seguro de configuración son dependencias de publicación, no detalles posteriores.
-- B.2 permanece diferida y B.3/Send bloqueados; V0.6 no debe usar una ruta alternativa para escribir o enviar en WhatsApp.
+Validaciones reales en Windows 11:
 
-#### Riesgos principales
-- Regresiones de audio/WebRTC al mover el lifecycle desde la web al shell de escritorio.
-- Exposición de secretos o contenido sensible en logs, crash reports, actualizaciones o almacenamiento local.
-- Conflictos entre autostart, single-instance, Native Host y procesos backend huérfanos.
-- Falsos positivos del wake word, micrófono activo sin señalización clara y consumo sostenido de recursos.
-- Acoplamiento prematuro a un framework desktop o proveedor/modelo sin métricas comparables.
+- Voz Realtime y memoria persistente operativas.
+- Minimizar, Hide, Restore y Quit validados.
+- System Tray, identidad visual y recuperación tras reiniciar Windows Explorer validados.
+- Core crash visible y oculto termina de forma segura, sin autorreinicio ni procesos huérfanos detectados.
+- Pérdida de Internet no provoca reconexión automática.
+- Pérdida y recuperación del micrófono comprobadas; permanece `NOT_VERIFIED` si la recuperación requiere reconexión manual o es automática.
+- Baseline visible/inactivo: 88 muestras, 7 procesos, memoria privada 244,89 → 243,86 MiB y CPU en reposo prácticamente nula; no equivale a una prueba de carga de una hora.
 
-#### Criterios de aceptación
-- Instalación y actualización reproducibles en Windows, con desinstalación limpia y recuperación documentada.
-- Inicio único del backend local y estado de conexión observable; reinicios no duplican procesos ni autorizaciones.
-- Wake word y activación manual funcionan con indicación inequívoca del micrófono; privacidad validada offline/online.
-- Una sesión diaria puede operar sin mantener una pestaña de Atlas abierta, conservando barge-in y respuestas audibles.
-- Gmail, Calendar, memoria y Browser Control pasan sus regresiones y conservan confirmaciones, grants y semántica `EXECUTION_UNKNOWN`.
-- Diagnósticos y métricas no contienen prompts, credenciales ni contenido privado; costos y latencia pueden auditarse por sesión.
-- WhatsApp Send continúa imposible y B.2 no se presenta como completada.
+El registro detallado está en `docs/acceptance/atlas-v0.6.1-windows.md`. V0.6.1 es una preview local: no incluye instalador, auto-updater, autostart ni wake word.
 
-**Cierre esperado:** uso diario sin pestaña abierta, wake word funcional, herramientas existentes sin regresiones y distribución Windows recuperable.
+#### Próximas fases
+
+- **V0.6.2 — Windows Packaging:** empaquetado, instalador y preparación de distribución.
+- **V0.6.3 — Local Wake Word:** activación local, privacidad, consumo y ownership inequívoco del micrófono.
+- **V0.6.4 — Always-on Companion:** operación residente prolongada y hardening adicional.
+
+#### Límites vigentes
+
+- Preservar Tool Registry, Confirmation Engine, memoria, Chrome Bridge, journal y permisos existentes.
+- Firma, updater y almacenamiento seguro para distribución se resolverán en V0.6.2, no en esta preview.
+- B.2 permanece `PARTIAL / DEFERRED`; B.3 y Send están bloqueados. Desktop no introduce rutas alternativas para escribir o enviar en WhatsApp.
 
 ### V0.7 — Productivity Integrations
 Plataformas candidatas, **sin alcance cerrado**:
@@ -159,7 +153,7 @@ Estas capacidades no tienen versión detallada ni compromiso de implementación 
 - Memoria persistente con privacidad.
 - Costos y latencia medibles antes de añadir complejidad multiagente.
 - Checkpoints pequeños, tests, acceptance real y commits separados; preservar regresiones.
-- **Definido:** Windows desktop con backend local; wake word; orb-first; diagnósticos por voz; medición de costos.
-- **Pendiente:** nuevo logo, modelos concretos, alcance final de integraciones, backend remoto para móvil y recuperación futura de B.2. Send real continúa bloqueado.
+- **Definido:** Windows Desktop con backend local, lifecycle y System Tray; identidad visual oficial; futura evolución separada de empaquetado, wake word y always-on.
+- **Pendiente:** modelos concretos, alcance final de integraciones, backend remoto para móvil y recuperación futura de B.2. Send real continúa bloqueado.
 
-**Orden vigente:** cerrar documentalmente B.2 como PARTIAL / DEFERRED y mantener B.3–B.5 bloqueadas → V0.6 desktop por fases → V0.7 integraciones → V0.8 móvil → Mark 1 proactivo → hogar/offline/router → Mark 2. La reapertura de B.2 requerirá una decisión explícita posterior.
+**Orden vigente:** cerrar V0.6.1 Desktop Companion → V0.6.2 empaquetado Windows → V0.6.3 wake word local → V0.6.4 always-on companion → V0.7 integraciones → V0.8 móvil → Mark 1 proactivo → hogar/offline/router → Mark 2. B.2 sigue diferida y su reapertura requiere una decisión explícita posterior.

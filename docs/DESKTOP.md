@@ -1,88 +1,109 @@
-# Atlas Desktop — V0.6.1 Hito 1
+# Atlas Desktop — V0.6.1 Desktop Companion
 
-Estado: vertical slice implementado para validación; aceptación real Windows 11 pendiente.
+Estado: preview local de desarrollo aceptada en Windows 11 el 17 de octubre de 2026.
 
-## Desarrollo
+V0.6.1 no incluye instalador, auto-updater, autostart, wake word ni escucha en segundo plano. El empaquetado para Windows queda planificado para V0.6.2.
 
-Requisitos: Windows 11, Node.js 22.12 o posterior, dependencias instaladas con `npm ci` y la misma configuración backend privada usada por Atlas Web.
+## Desarrollo en Windows 11
 
-```powershell
-git switch v0.5.3-consequential-actions
-npm ci
-npm run desktop:dev
-```
-
-El comando construye web, servidor, extensión y desktop; después abre Electron. No requiere abrir Chrome. Browser Control es opcional y, si no está configurado, no impide voz, memoria ni las demás integraciones.
-
-## Procesos y canal
-
-```text
-Electron Main
- ├─ BrowserWindow sandboxed ── preload allowlisted ── Renderer (UI + WebRTC/audio)
- └─ proceso hijo propio ── HTTP 127.0.0.1:puerto aleatorio ── Atlas Core
-                           header efímero por lanzamiento
-```
-
-Main crea una credencial aleatoria de 32 bytes por lanzamiento y la entrega únicamente al proceso hijo. Todas las rutas `/api/*` del Core en modo desktop la exigen. El renderer no recibe esa credencial: solicita operaciones `CoreTransport` tipadas y el token efímero Realtime mediante IPC cerrado; Main añade autenticación y conserva la cookie HttpOnly de la sesión. No hay IPC de URL o HTTP arbitrario.
-
-El renderer conserva la capacidad de invocar las operaciones Atlas que la UI ya ofrece; por eso un renderer comprometido no se considera una autoridad confiable. Schemas, permisos, confirmaciones, idempotencia, journal y `UNKNOWN` continúan en Core. La mediación reduce exposición de secretos, pero no convierte el renderer en una frontera de autorización.
-
-## Aislamiento y permisos
-
-- `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`.
-- Preload CommonJS dedicado con tres superficies: Core tipado, token efímero y cleanup.
-- CSP restrictiva; ventanas nuevas denegadas y navegación limitada al origen local exacto.
-- Sólo se concede `media` de audio al renderer Atlas. Cámara y otros permisos se rechazan.
-- La API key OpenAI, credenciales OAuth y secreto local nunca llegan al renderer.
-
-## Lifecycle
-
-Electron adquiere el lock de instancia única, inicia un solo Core con `PORT=0`, espera `ATLAS_READY` y verifica `/api/desktop/health` autenticado antes de mostrar la ventana. Cerrar la ventana solicita cleanup del renderer durante un plazo acotado, cierra sesión/medios, solicita shutdown autenticado del Core y sólo termina el hijo que creó si no responde. En Hito 1 cerrar finaliza Atlas; tray queda diferido.
-
-Un crash del Core muestra un error y cierra la aplicación. No se restauran confirmaciones, grants ni ejecuciones inciertas. No hay retries automáticos nuevos.
-
-## Acceptance Windows 11 pendiente
-
-1. Ejecutar `npm run desktop:dev` y comprobar que aparece una ventana independiente sin abrir Chrome.
-2. Conectar, conceder micrófono, conversar, comprobar audio/transcripción y hacer barge-in.
-3. Desconectar y confirmar que el indicador de micrófono desaparece.
-4. Reconectar; cerrar la ventana durante voz y durante una confirmación. Verificar que Electron y su Core hijo terminan y el micrófono se libera.
-5. Lanzar dos veces: la segunda ejecución debe enfocar la primera sin otro Core ni otra captura.
-6. Ejecutar sin Chrome/Bridge y confirmar que la conversación sigue disponible.
-7. Provocar un fallo controlado cerrando únicamente el Core hijo y comprobar el error y cierre acotado.
-8. Ejecutar Atlas Web con `npm run dev` y repetir voz básica para comprobar compatibilidad.
-
-No declarar Hito 1 completado hasta verificar estos pasos en Windows real.
-
-## Límites
-
-Sin tray, wake word, instalador, updater, autostart, routing remoto ni background listening. Browser Bridge no se empaqueta. WhatsApp B.2 continúa `PARTIAL / DEFERRED`; B.3 y Send permanecen bloqueados.
-# Desktop performance baseline (Windows 11)
-
-`scripts/desktop-perf-sampler.ps1` is a development-only, read-only process sampler. It identifies the single Electron Main launched from the current checkout, follows only that process tree, and identifies Atlas Core as the unique descendant that owns a loopback listener. It stops safely if either identity is ambiguous. Command lines are used only for local classification and are never exported.
-
-Build and start Atlas from the repository in the first PowerShell window:
+Requisitos: Node.js 22.12 o posterior, dependencias instaladas con `npm ci` y la misma configuración backend privada utilizada por Atlas Web.
 
 ```powershell
-cd C:\Users\chris\jarvis-assistant
+cd $env:USERPROFILE\jarvis-assistant
 git switch v0.6.1-desktop-companion
 npm ci
 npm run desktop:dev
 ```
 
-In a second PowerShell window, validate the pure fixture checks and take the initial ten-minute sample:
+El comando construye Web, servidor/Core, extensión y Desktop/preload; después abre Electron. Chrome no es necesario para la experiencia Desktop básica. Browser Control es opcional y su ausencia no impide utilizar voz, memoria ni las demás integraciones.
+
+## Arquitectura y autenticación local
+
+```text
+Electron Main
+ ├─ System Tray + lifecycle coordinator/runtime
+ ├─ BrowserWindow sandboxed ── preload allowlisted ── Renderer (UI + WebRTC/audio)
+ └─ proceso hijo propio ── HTTP 127.0.0.1:puerto aleatorio ── Atlas Core
+                           header efímero por lanzamiento
+```
+
+Electron Main es propietario de la ventana, el Tray y el Core supervisado. El renderer conserva la UI y los recursos WebRTC/audio. Atlas Core mantiene herramientas, memoria, autorizaciones, confirmaciones y journal.
+
+Main crea una credencial aleatoria de 32 bytes por lanzamiento y la entrega únicamente al Core hijo. Las rutas `/api/*` en modo Desktop exigen esa credencial. El renderer no la recibe: usa contratos IPC allowlisted y tipados; Main agrega la autenticación y conserva la cookie HttpOnly de sesión. No existe IPC de URL o HTTP arbitrario.
+
+El renderer no es una autoridad de seguridad. Schemas, permisos, confirmaciones, idempotencia, journal y semántica `UNKNOWN` continúan siendo autoritativos en Core.
+
+## Aislamiento
+
+- `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`.
+- Preload CommonJS dedicado con superficies tipadas para Core, token Realtime y cleanup.
+- CSP restrictiva; ventanas nuevas denegadas y navegación limitada al origen local esperado.
+- Sólo se concede audio al renderer Atlas. Cámara y otros permisos se rechazan.
+- API keys, credenciales OAuth y secreto local no se entregan al renderer.
+- Core no se reinicia automáticamente después de un crash.
+
+## Lifecycle actual
+
+| Acción | Resultado |
+|---|---|
+| Minimizar (`—`) | Mantiene la conversación, WebRTC y micrófono activos. |
+| Cerrar (`X`) | Ejecuta cleanup verificado, termina la sesión conversacional, libera voz/micrófono y oculta Atlas. Electron Main y Core permanecen activos. Si el cleanup no termina como `COMPLETED`, Atlas permanece visible y desconectado. |
+| Restaurar desde Tray | Muestra la misma ventana y el mismo Core con una conversación nueva. La voz permanece desconectada hasta una conexión explícita. |
+| Clic o `Abrir Atlas` en Tray | Utiliza la misma ruta de restore; eventos repetidos se coalescen. |
+| `Ctrl+Q`, menú nativo o `Salir de Atlas` | Ejecuta shutdown ordenado, destruye el Tray, detiene Core y termina Electron. |
+| Core crash | Restaura la ventana si estaba oculta, detiene voz y micrófono, muestra un error y termina sin autorreinicio ni retry de acciones sensibles. |
+
+La memoria persistente es independiente de la sesión conversacional: cerrar con `X` descarta el contexto/transcript de esa sesión, pero no borra memoria persistente, configuración, permisos ni journal.
+
+Tras una pérdida de Internet no existe reconexión automática; el usuario debe iniciar una nueva conexión. La pérdida y recuperación del micrófono se validaron, pero permanece `NOT_VERIFIED` si la recuperación concreta requiere reconexión manual o se produce automáticamente.
+
+## System Tray e identidad visual
+
+El Tray se crea una sola vez al iniciar Electron y usa `public/brand/atlas-tray.ico`. El tooltip es `Atlas` y el menú ofrece `Abrir Atlas` y `Salir de Atlas`. La identidad oficial utiliza fondo `#10121F`, símbolo `#2DECDD` y bordes redondeados en los assets de aplicación y Tray.
+
+La política es fail-visible: si el Tray no está disponible, `X` no puede ocultar Atlas sin una vía accesible de restauración. La recuperación del icono después de reiniciar Windows Explorer fue validada en Windows 11.
+
+## Fallos y acciones sensibles
+
+- Un timeout de cleanup nunca se interpreta como éxito.
+- `UNKNOWN` no significa cancelación y no habilita retries automáticos.
+- Ocultar la UI no se considera prueba de cancelación de una acción remota.
+- Un crash o shutdown invalida operaciones pendientes según sus contratos, sin restaurar autoridad operativa.
+- Browser Control B.2 continúa `PARTIAL / DEFERRED`; B.3 y Send permanecen bloqueados.
+
+## Sampler de rendimiento
+
+`scripts/desktop-perf-sampler.ps1` es una herramienta de desarrollo read-only. Identifica el Electron Main del checkout, sigue únicamente su árbol de procesos y clasifica el Core mediante su listener loopback. Falla de forma cerrada si la identidad es ambigua. No exporta command lines, puertos, URLs, cookies, tokens, prompts ni contenido conversacional.
+
+Con Atlas iniciado, ejecutar en otra ventana de PowerShell:
 
 ```powershell
-cd C:\Users\chris\jarvis-assistant
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\desktop-perf-sampler.ps1 -SelfTest
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\desktop-perf-sampler.ps1 `
+cd $env:USERPROFILE\jarvis-assistant
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\desktop-perf-sampler.ps1 -SelfTest
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\desktop-perf-sampler.ps1 `
   -DurationSeconds 600 `
   -IntervalSeconds 5 `
   -OutputPath .\desktop-perf-baseline.csv
 ```
 
-PowerShell 7 can use `pwsh` instead of `powershell.exe`. The output path must not already exist, preventing accidental overwrite. The sampler creates only the requested CSV and does not stop processes, change permissions, inspect conversation data, or export command lines, ports, URLs, cookies, tokens, prompts, or secrets.
+PowerShell 7 puede usar `pwsh`. El CSV registra timestamp, rol, PID, working set, memoria privada, CPU acumulada y por intervalo, handles, threads y conexiones TCP locales. `ProcessState` distingue `NEW`, `PRESENT` y `DISAPPEARED`; los roles son `MAIN`, `RENDERER`, `CORE` y `AUXILIARY`.
 
-Each active process produces one row per sample. `ProcessState` is `NEW`, `PRESENT`, or `DISAPPEARED`; disappeared rows deliberately leave resource values empty. Roles are `MAIN`, `RENDERER`, `CORE`, and `AUXILIARY`. `CpuPercentInterval` is normalized across the machine's logical processors, while `CpuTotalSeconds` is cumulative. `LocalTcpConnections` counts loopback TCP entries owned by the process.
+El baseline aceptado de diez minutos registró 88 muestras y siete procesos estables. La memoria privada total pasó de 244,89 MiB a 243,86 MiB (-1,03 MiB), con CPU en reposo prácticamente nula y un pico auxiliar transitorio posteriormente liberado. El intervalo efectivo medio fue 6,89 segundos porque la captura se suma a la espera configurada. Este baseline no demuestra ausencia de fugas bajo uso intensivo o durante una hora.
 
-Interpret memory only after a warm-up period. Short increases followed by a plateau are normal; a reproducible positive slope across settled samples is the signal to investigate. Compare equivalent states (idle with idle, connected with connected), and retain the raw CSV rather than relying only on the console summary. A ten-minute run establishes tooling and baseline shape; it does not replace the one-hour and twenty-cycle Hito 3 acceptance runs.
+## Validación V0.6.1
+
+En Windows 11 se validaron voz Realtime, memoria persistente, barge-in, lifecycle de ventana, Tray, identidad visual, recuperación de Explorer, Core crash visible y oculto, ausencia observable de procesos huérfanos, 20/20 ciclos de conexión/desconexión, 20/20 ciclos Hide/Restore, conversación de aproximadamente 15 minutos, pérdida/recuperación de red y pérdida/recuperación del micrófono.
+
+El registro completo está en `docs/acceptance/atlas-v0.6.1-windows.md`.
+
+## Limitaciones conocidas
+
+- Preview local: sin instalador, firma, auto-updater ni autostart.
+- Sin wake word ni escucha en segundo plano.
+- Sin empaquetado del Browser Bridge; Browser Control sigue siendo opcional.
+- No se completaron mediciones continuas de una hora visible u oculta ni una medición de recursos posterior a carga intensiva.
+- El modo exacto de recuperación del micrófono permanece `NOT_VERIFIED`.
+- WhatsApp B.2 permanece `PARTIAL / DEFERRED`; B.3 y cualquier Send real permanecen deshabilitados.
