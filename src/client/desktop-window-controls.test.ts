@@ -40,6 +40,12 @@ test('visible application menu exposes Salir de Atlas and invokes the same quit 
   assert.equal(quit.label,'Salir de Atlas');assert.equal(quit.accelerator,'CommandOrControl+Q');(quit.click as Function)();assert.equal(quits,1);
 });
 
+test('packaged menu exposes a local credential reconfiguration action',()=>{
+  let reconfigures=0;const template=desktopApplicationMenu({hide:()=>{},quit:()=>{},reconfigureCredentials:()=>{reconfigures++;}});
+  const submenu=template[0]!.submenu as MenuItemConstructorOptions[];
+  assert.equal(submenu[0]!.label,'Reconfigurar API key…');submenu[0]!.click?.(undefined as never,undefined as never,undefined as never);assert.equal(reconfigures,1);
+});
+
 test('Tray availability gates hide fail-visible without allowing native close',()=>{
   let hides=0,warnings=0;
   assert.equal(requestSafeDesktopHide({canHideSafely:()=>false,hide:()=>{hides++;},unavailable:()=>{warnings++;}}),true);

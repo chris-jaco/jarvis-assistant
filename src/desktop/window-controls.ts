@@ -38,8 +38,11 @@ export function windowsLocalQuit(input:DesktopKeyboardInput):boolean{
   return input.type==='keyDown'&&input.key.toLowerCase()==='q'&&input.control&&!input.alt&&!input.shift&&!input.meta&&!input.isAutoRepeat;
 }
 
-export function desktopApplicationMenu(actions:DesktopWindowActions):MenuItemConstructorOptions[]{
-  return [{label:'Atlas',submenu:[{label:'Salir de Atlas',accelerator:'CommandOrControl+Q',click:()=>{void actions.quit();}}]}];
+export function desktopApplicationMenu(actions:DesktopWindowActions & {reconfigureCredentials?():unknown}):MenuItemConstructorOptions[]{
+  return [{label:'Atlas',submenu:[
+    ...(actions.reconfigureCredentials ? [{label:'Reconfigurar API key…',click:()=>{void actions.reconfigureCredentials!();}}] : []),
+    {label:'Salir de Atlas',accelerator:'CommandOrControl+Q',click:()=>{void actions.quit();}}
+  ]}];
 }
 
 /** Window-local controls only. Minimize deliberately retains Electron defaults. */

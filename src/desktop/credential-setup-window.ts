@@ -28,7 +28,13 @@ export async function runCredentialSetupWindow(
   });
   observeWindow?.(setupWindow);
   const expected = pathToFileURL(paths.html).href;
-  const ipc = registerCredentialSetupIpc(ipcMain, store, senderId => !setupWindow.isDestroyed() && setupWindow.webContents.id === senderId);
+  let approved = false;
+  const ipc = registerCredentialSetupIpc(
+    ipcMain,
+    store,
+    senderId => !setupWindow.isDestroyed() && setupWindow.webContents.id === senderId,
+    () => { approved = true; }
+  );
   setupWindow.webContents.on('will-navigate', (event, url) => { if (url !== expected) event.preventDefault(); });
   setupWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   setupWindow.once('ready-to-show', () => setupWindow.show());
@@ -41,8 +47,7 @@ export async function runCredentialSetupWindow(
     });
     setupWindow.once('closed', () => {
       ipc.dispose(); observeWindow?.(undefined);
-      if (!loaded) { resolve(false); return; }
-      void store.status().then(status => resolve(status.OPENAI_API_KEY === 'CONFIGURED'), () => resolve(false));
+      resolve(loaded && approved);
     });
     void setupWindow.loadFile(paths.html).catch(() => {
       if (!setupWindow.isDestroyed()) setupWindow.destroy();

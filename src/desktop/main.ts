@@ -17,6 +17,7 @@ import { desktopCoreEnvironment } from './core-environment.js';
 import { createElectronDesktopCredentialStore } from './electron-credential-store.js';
 import { runCredentialSetupWindow } from './credential-setup-window.js';
 import { randomUUID } from 'node:crypto';
+import { CredentialSetupPreference, requestCredentialReconfiguration, shouldShowCredentialSetup } from './credential-lifecycle.js';
 
 let window: BrowserWindow | undefined;
 let cleanupIpc: DesktopIpcController | undefined;
@@ -65,15 +66,22 @@ async function start(): Promise<void> {
   });
   await mkdir(paths.coreWorkingDirectory, { recursive: true });
   let credentialStore: ReturnType<typeof createElectronDesktopCredentialStore> | undefined;
+  let credentialPreference: CredentialSetupPreference | undefined;
   if (paths.mode === 'PACKAGED') {
     Menu.setApplicationMenu(null);
     credentialStore = createElectronDesktopCredentialStore(paths.credentialsRoot);
-    const configured = await runCredentialSetupWindow(credentialStore, {
-      html: paths.credentialSetupHtml,
-      preload: paths.credentialSetupPreloadEntry,
-      icon: paths.applicationIcon
-    }, setupWindow => { window = setupWindow; });
-    if (!configured) { closing = true; app.quit(); return; }
+    credentialPreference = new CredentialSetupPreference(paths.configRoot);
+    const state = (await credentialStore.status()).OPENAI_API_KEY;
+    if (shouldShowCredentialSetup(state, await credentialPreference.required())) {
+      const configured = await runCredentialSetupWindow(credentialStore, {
+        html: paths.credentialSetupHtml,
+        preload: paths.credentialSetupPreloadEntry,
+        icon: paths.applicationIcon
+      }, setupWindow => { window = setupWindow; });
+      if (!configured || closing) { closing = true; app.quit(); return; }
+      await credentialPreference.clear();
+      if (closing) return;
+    }
   }
   if (paths.mode === 'DEVELOPMENT') {
     try { process.loadEnvFile(join(paths.coreWorkingDirectory, '.env')); }
@@ -94,7 +102,10 @@ async function start(): Promise<void> {
     }
   });
   const endpoint = credentialStore
-    ? await credentialStore.withOpenAIKey(openAIKey => supervisor!.start({ generation: randomUUID(), openAIKey }))
+    ? await credentialStore.withOpenAIKey(openAIKey => {
+        if (closing) throw new Error('DESKTOP_START_CANCELLED');
+        return supervisor!.start({ generation: randomUUID(), openAIKey });
+      })
     : await supervisor.start();
   const applicationOrigin = new URL(endpoint.baseUrl).origin;
   const browserWindow = new BrowserWindow({ ...secureWindowOptions(paths.preloadEntry), icon: paths.applicationIcon }); window = browserWindow;
@@ -112,6 +123,20 @@ async function start(): Promise<void> {
   });
   trayController=createElectronTrayController(paths.trayIcon,{restore:()=>lifecycle?.restore(),quit:()=>requestQuit()});
   trayController.initialize();
+  let credentialReconfiguration: Promise<boolean> | undefined;
+  const reconfigureCredentials = credentialPreference ? () => {
+    if (credentialReconfiguration) return credentialReconfiguration;
+    const operation = requestCredentialReconfiguration({
+      cleanup: () => lifecycle!.hide(),
+      persistPreference: () => credentialPreference!.request(),
+      quit: () => lifecycle!.quit(),
+      restore: () => { lifecycle?.restore(); },
+      showFailure: () => dialog.showMessageBox(browserWindow, { type: 'error', title: 'No se pudo preparar la reconfiguración', message: 'Atlas no pudo cerrar la sesión de forma segura. La credencial no fue modificada y Atlas seguirá visible.' }).then(() => undefined)
+    });
+    const tracked = operation.finally(() => { if (credentialReconfiguration === tracked) credentialReconfiguration = undefined; });
+    credentialReconfiguration = tracked;
+    return tracked;
+  } : undefined;
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
     const mediaTypes = 'mediaTypes' in details ? details.mediaTypes : undefined;
     callback(webContents.id === browserWindow.webContents.id && audioPermissionAllowed(permission, details.requestingUrl, mediaTypes, applicationOrigin));
@@ -125,7 +150,11 @@ async function start(): Promise<void> {
     hide:()=>closing?false:requestSafeDesktopHide({canHideSafely:()=>trayController?.canHideSafely()??false,hide:()=>lifecycle?.hide()??false,unavailable:()=>showTrayUnavailable(browserWindow)}),
     quit:()=>requestQuit()
   });
-  Menu.setApplicationMenu(Menu.buildFromTemplate(desktopApplicationMenu({hide:()=>lifecycle?.hide(),quit:()=>requestQuit()})));
+  Menu.setApplicationMenu(Menu.buildFromTemplate(desktopApplicationMenu({
+    hide:()=>lifecycle?.hide(),
+    quit:()=>requestQuit(),
+    ...(reconfigureCredentials ? { reconfigureCredentials } : {})
+  })));
   await browserWindow.loadURL(endpoint.baseUrl);
 }
 
@@ -135,10 +164,11 @@ else {
   app.on('window-all-closed', () => { if(!closing)void lifecycle?.quit(); });
   app.on('before-quit', event => {
     if (closing) return;
-    if (!lifecycle) { closing = true; return; }
+    if (!lifecycle) { event.preventDefault(); void startupShutdown(); return; }
     event.preventDefault(); void requestQuit();
   });
   app.whenReady().then(start).catch(error => {
+    if (closing) return;
     console.error('ATLAS_DESKTOP_START_FAILED');
     dialog.showErrorBox('Atlas no pudo iniciar', error instanceof Error && error.message.startsWith('DESKTOP_') ? error.message : 'No se pudo iniciar Atlas Desktop.');
     void startupShutdown();

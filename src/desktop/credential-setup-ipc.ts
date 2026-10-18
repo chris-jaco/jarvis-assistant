@@ -3,6 +3,7 @@ import { DesktopCredentialStoreError } from './credential-store.js';
 import type { DesktopCredentialStore } from './credential-store.js';
 import {
   CREDENTIAL_DELETE_OPENAI_CHANNEL,
+  CREDENTIAL_CONTINUE_CHANNEL,
   CREDENTIAL_PROVISION_OPENAI_CHANNEL,
   CREDENTIAL_STATUS_CHANNEL
 } from './credential-setup-api.js';
@@ -23,7 +24,8 @@ function sanitized(error: unknown): CredentialSetupResult {
 export function registerCredentialSetupIpc(
   ipc: Pick<IpcMain, 'handle' | 'removeHandler'>,
   store: Pick<DesktopCredentialStore, 'status' | 'set' | 'delete'>,
-  trustedSender: (senderId: number) => boolean
+  trustedSender: (senderId: number) => boolean,
+  continueToAtlas?: () => void
 ): CredentialSetupIpcController {
   ipc.handle(CREDENTIAL_STATUS_CHANNEL, async event => {
     if (!trustedSender(event.sender.id)) return sanitized(undefined);
@@ -47,11 +49,21 @@ export function registerCredentialSetupIpc(
       return state === 'MISSING' ? { ok: true, state } satisfies CredentialSetupResult : sanitized(new DesktopCredentialStoreError('CREDENTIAL_STORE_INVALID'));
     } catch (error) { return sanitized(error); }
   });
+  ipc.handle(CREDENTIAL_CONTINUE_CHANNEL, async event => {
+    if (!trustedSender(event.sender.id)) return sanitized(undefined);
+    try {
+      const state = (await store.status()).OPENAI_API_KEY;
+      if (state !== 'CONFIGURED') return sanitized(new DesktopCredentialStoreError('CREDENTIAL_STORE_INVALID'));
+      continueToAtlas?.();
+      return { ok: true, state } satisfies CredentialSetupResult;
+    } catch (error) { return sanitized(error); }
+  });
   return {
     dispose() {
       ipc.removeHandler(CREDENTIAL_STATUS_CHANNEL);
       ipc.removeHandler(CREDENTIAL_PROVISION_OPENAI_CHANNEL);
       ipc.removeHandler(CREDENTIAL_DELETE_OPENAI_CHANNEL);
+      ipc.removeHandler(CREDENTIAL_CONTINUE_CHANNEL);
     }
   };
 }

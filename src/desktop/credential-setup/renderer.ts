@@ -20,17 +20,20 @@ export function mountCredentialSetup(document: Document, api: AtlasCredentialSet
     remove.disabled = !configured || busy;
     save.disabled = busy;
   };
-  const run = async (operation: () => Promise<CredentialSetupResult>) => {
-    if (busy) return;
+  const run = async (operation: () => Promise<CredentialSetupResult>): Promise<CredentialSetupResult | undefined> => {
+    if (busy) return undefined;
     busy = true; save.disabled = true; remove.disabled = true;
-    try { render(await operation()); }
-    catch { render({ ok: false, state: 'INVALID', error: 'OPERATION_FAILED' }); }
+    try { const result = await operation(); render(result); return result; }
+    catch { const result = { ok: false, state: 'INVALID', error: 'OPERATION_FAILED' } as const; render(result); return result; }
     finally { busy = false; input.value = ''; save.disabled = false; remove.disabled = !configured; }
   };
   const submit = (event: Event) => { event.preventDefault(); const value = input.value; void run(() => api.provisionOpenAI(value)); };
   const clearInput = () => { input.value = ''; input.focus(); };
   const deleteCredential = () => { if (globalThis.confirm('¿Eliminar la API key almacenada?')) void run(() => api.deleteOpenAI()); };
-  const continueToAtlas = () => { if (configured && !busy) closeWindow(); };
+  const continueToAtlas = () => {
+    if (!configured || busy) return;
+    void run(() => api.continueToAtlas()).then(result => { if (result?.ok && result.state === 'CONFIGURED') closeWindow(); });
+  };
   form.addEventListener('submit', submit);
   clear.addEventListener('click', clearInput);
   remove.addEventListener('click', deleteCredential);

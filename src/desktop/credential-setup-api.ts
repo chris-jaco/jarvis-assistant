@@ -3,6 +3,7 @@ import type { DesktopCredentialState } from './credential-store.js';
 export const CREDENTIAL_STATUS_CHANNEL = 'credentials.status';
 export const CREDENTIAL_PROVISION_OPENAI_CHANNEL = 'credentials.provisionOpenAI';
 export const CREDENTIAL_DELETE_OPENAI_CHANNEL = 'credentials.deleteOpenAI';
+export const CREDENTIAL_CONTINUE_CHANNEL = 'credentials.continue';
 
 export type CredentialSetupError = 'INVALID_VALUE' | 'STORAGE_UNAVAILABLE' | 'STORE_INVALID' | 'OPERATION_FAILED';
 export type CredentialSetupResult =
@@ -13,4 +14,5 @@ export interface AtlasCredentialSetupApi {
   status(): Promise<CredentialSetupResult>;
   provisionOpenAI(value: string): Promise<CredentialSetupResult>;
   deleteOpenAI(): Promise<CredentialSetupResult>;
+  continueToAtlas(): Promise<CredentialSetupResult>;
 }

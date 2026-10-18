@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { JSDOM } from 'jsdom';
 import {
   CREDENTIAL_DELETE_OPENAI_CHANNEL,
+  CREDENTIAL_CONTINUE_CHANNEL,
   CREDENTIAL_PROVISION_OPENAI_CHANNEL,
   CREDENTIAL_STATUS_CHANNEL
 } from '../desktop/credential-setup-api.js';
@@ -27,21 +28,26 @@ function ipcFixture(state: 'MISSING' | 'CONFIGURED' | 'INVALID' = 'MISSING') {
     async set(_id: 'OPENAI_API_KEY', value: string) { writes++; if (value === 'FAIL') throw new DesktopCredentialStoreError('CREDENTIAL_STORAGE_UNAVAILABLE'); stored = value; current = 'CONFIGURED'; },
     async delete() { deletes++; stored = ''; current = 'MISSING'; }
   };
-  const controller = registerCredentialSetupIpc(ipc as never, store as never, sender => sender === 7);
+  let continued = 0;
+  const controller = registerCredentialSetupIpc(ipc as never, store as never, sender => sender === 7, () => { continued++; });
   const call = (channel: string, sender: number, value?: unknown) => handlers.get(channel)!({ sender: { id: sender } }, value) as Promise<CredentialSetupResult>;
-  return { handlers, controller, call, counts: () => ({ writes, deletes, stored }) };
+  return { handlers, controller, call, counts: () => ({ writes, deletes, stored }), continued: () => continued };
 }
 
-test('credential IPC exposes only status, provision and delete with no read or generic secret operation', async () => {
+test('credential IPC exposes only closed lifecycle operations with no read or generic secret operation', async () => {
   const f = ipcFixture();
-  assert.deepEqual([...f.handlers.keys()].sort(), [CREDENTIAL_DELETE_OPENAI_CHANNEL, CREDENTIAL_PROVISION_OPENAI_CHANNEL, CREDENTIAL_STATUS_CHANNEL].sort());
+  assert.deepEqual([...f.handlers.keys()].sort(), [CREDENTIAL_CONTINUE_CHANNEL, CREDENTIAL_DELETE_OPENAI_CHANNEL, CREDENTIAL_PROVISION_OPENAI_CHANNEL, CREDENTIAL_STATUS_CHANNEL].sort());
   assert.equal(await f.call(CREDENTIAL_STATUS_CHANNEL, 7).then(result => result.state), 'MISSING');
   assert.equal(await f.call(CREDENTIAL_PROVISION_OPENAI_CHANNEL, 7, 'private-fixture-key').then(result => result.state), 'CONFIGURED');
   assert.equal(f.counts().stored, 'private-fixture-key');
   assert.equal(await f.call(CREDENTIAL_PROVISION_OPENAI_CHANNEL, 7, 'replacement-fixture-key').then(result => result.state), 'CONFIGURED');
   assert.equal(f.counts().stored, 'replacement-fixture-key');
+  assert.equal((await f.call(CREDENTIAL_CONTINUE_CHANNEL, 7)).ok, true);
+  assert.equal(f.continued(), 1);
   assert.equal(await f.call(CREDENTIAL_DELETE_OPENAI_CHANNEL, 7).then(result => result.state), 'MISSING');
   assert.deepEqual(f.counts(), { writes: 2, deletes: 1, stored: '' });
+  assert.equal((await f.call(CREDENTIAL_CONTINUE_CHANNEL, 7)).ok, false);
+  assert.equal(f.continued(), 1);
   f.controller.dispose(); assert.equal(f.handlers.size, 0);
 });
 
@@ -62,7 +68,8 @@ function rendererFixture(initial: CredentialSetupResult) {
   const api: AtlasCredentialSetupApi = {
     async status() { calls.push('status'); return state; },
     async provisionOpenAI(value) { calls.push(`set:${value}`); state = { ok: true, state: 'CONFIGURED' }; return state; },
-    async deleteOpenAI() { calls.push('delete'); state = { ok: true, state: 'MISSING' }; return state; }
+    async deleteOpenAI() { calls.push('delete'); state = { ok: true, state: 'MISSING' }; return state; },
+    async continueToAtlas() { calls.push('continue'); return state; }
   };
   const previousConfirm = globalThis.confirm; globalThis.confirm = () => true;
   const dispose = mountCredentialSetup(dom.window.document, api, () => { closed++; });
@@ -88,7 +95,7 @@ test('setup renderer shows MISSING/CONFIGURED/INVALID, clears fields and advance
     await flush();
     assert.equal(input.value, ''); assert.equal(f.closed(), 0);
     f.dom.window.document.querySelector<HTMLButtonElement>('#continue')!.click();
-    assert.equal(f.closed(), 1);
+    await flush(); assert.equal(f.closed(), 1);
     f.dom.window.document.querySelector<HTMLButtonElement>('#delete')!.click();
     await flush(); assert.equal(input.value, '');
   } finally { f.dispose(); }
@@ -106,5 +113,7 @@ test('local setup resources prohibit persistence, network and secret reads; pack
   assert.match(readFileSync(resolve(root, 'src/desktop/credential-setup-window.ts'), 'utf8'), /devTools: false/);
   assert.ok(main.indexOf('runCredentialSetupWindow') < main.indexOf('supervisor = new BackendSupervisor'));
   assert.match(main, /paths\.mode === 'PACKAGED'/);
-  assert.match(main, /if \(!configured\).*app\.quit\(\).*return/s);
+  assert.match(main, /if \(!configured \|\| closing\).*app\.quit\(\).*return/s);
+  assert.match(main, /if \(closing\) throw new Error\('DESKTOP_START_CANCELLED'\)/);
+  assert.match(main, /if \(!lifecycle\).*event\.preventDefault\(\).*startupShutdown\(\)/s);
 });
