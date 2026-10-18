@@ -35,6 +35,8 @@ test('development paths preserve the checkout layout without consulting process 
   assert.equal(paths.applicationRoot, resolve('/checkout'));
   assert.equal(paths.coreEntry, resolve('/checkout/dist/server/server/index.js'));
   assert.equal(paths.preloadEntry, resolve('/checkout/dist/desktop-preload/preload.cjs'));
+  assert.equal(paths.credentialSetupPreloadEntry, resolve('/checkout/dist/desktop-credential-setup/preload.cjs'));
+  assert.equal(paths.credentialSetupHtml, resolve('/checkout/dist/desktop-credential-setup/index.html'));
   assert.equal(paths.rendererRoot, resolve('/checkout/dist/client'));
   assert.equal(paths.coreWorkingDirectory, resolve('/checkout'));
   assert.equal(paths.trayIcon, resolve('/checkout/public/brand/atlas-tray.ico'));

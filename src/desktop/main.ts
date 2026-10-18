@@ -14,6 +14,8 @@ import { audioPermissionAllowed, sameApplicationLocation, secureWindowOptions } 
 import { acquireSingleInstance, focusExistingWindow } from './lifecycle.js';
 import { resolveDesktopRuntimePaths } from './runtime-paths.js';
 import { desktopCoreEnvironment } from './core-environment.js';
+import { createElectronDesktopCredentialStore } from './electron-credential-store.js';
+import { runCredentialSetupWindow } from './credential-setup-window.js';
 
 let window: BrowserWindow | undefined;
 let cleanupIpc: DesktopIpcController | undefined;
@@ -61,6 +63,16 @@ async function start(): Promise<void> {
     userDataPath: app.getPath('userData')
   });
   await mkdir(paths.coreWorkingDirectory, { recursive: true });
+  if (paths.mode === 'PACKAGED') {
+    Menu.setApplicationMenu(null);
+    const credentialStore = createElectronDesktopCredentialStore(paths.credentialsRoot);
+    const configured = await runCredentialSetupWindow(credentialStore, {
+      html: paths.credentialSetupHtml,
+      preload: paths.credentialSetupPreloadEntry,
+      icon: paths.applicationIcon
+    }, setupWindow => { window = setupWindow; });
+    if (!configured) { closing = true; app.quit(); return; }
+  }
   if (paths.mode === 'DEVELOPMENT') {
     try { process.loadEnvFile(join(paths.coreWorkingDirectory, '.env')); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -117,7 +129,11 @@ if (!acquireSingleInstance(app)) { /* quit requested by helper */ }
 else {
   app.on('second-instance', () => {if(!lifecycle?.restore())focusExistingWindow(window);});
   app.on('window-all-closed', () => { if(!closing)void lifecycle?.quit(); });
-  app.on('before-quit', event => { if (!closing) { event.preventDefault(); void requestQuit(); } });
+  app.on('before-quit', event => {
+    if (closing) return;
+    if (!lifecycle) { closing = true; return; }
+    event.preventDefault(); void requestQuit();
+  });
   app.whenReady().then(start).catch(error => {
     console.error('ATLAS_DESKTOP_START_FAILED');
     dialog.showErrorBox('Atlas no pudo iniciar', error instanceof Error && error.message.startsWith('DESKTOP_') ? error.message : 'No se pudo iniciar Atlas Desktop.');

@@ -17,6 +17,8 @@ export interface DesktopRuntimePaths {
   unpackedResourcesRoot: string;
   mainEntry: string;
   preloadEntry: string;
+  credentialSetupPreloadEntry: string;
+  credentialSetupHtml: string;
   coreEntry: string;
   rendererRoot: string;
   assetsRoot: string;
@@ -67,6 +69,8 @@ export function resolveDesktopRuntimePaths(input: DesktopPathInputs): DesktopRun
     unpackedResourcesRoot: join(resourcesPath, 'app.asar.unpacked'),
     mainEntry,
     preloadEntry: join(applicationRoot, 'dist', 'desktop-preload', 'preload.cjs'),
+    credentialSetupPreloadEntry: join(applicationRoot, 'dist', 'desktop-credential-setup', 'preload.cjs'),
+    credentialSetupHtml: join(applicationRoot, 'dist', 'desktop-credential-setup', 'index.html'),
     coreEntry: join(applicationRoot, 'dist', 'server', 'server', 'index.js'),
     rendererRoot: join(applicationRoot, 'dist', 'client'),
     assetsRoot,
