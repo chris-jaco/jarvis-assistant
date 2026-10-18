@@ -156,6 +156,19 @@ export class DesktopCredentialStore {
     });
   }
 
+  /** Main-only bootstrap boundary. The decrypted value is never returned to a renderer or persisted. */
+  async withOpenAIKey<T>(operation: (value: string) => Promise<T>): Promise<T> {
+    await this.mutations;
+    this.requireCrypto();
+    const document = await this.validDocument();
+    const stored = document.credentials.OPENAI_API_KEY;
+    if (!stored) throw new DesktopCredentialStoreError('CREDENTIAL_STORE_INVALID');
+    let value: string;
+    try { value = credentialValue(this.options.crypto.decrypt(Buffer.from(stored.ciphertext, 'base64'))); }
+    catch { throw new DesktopCredentialStoreError('CREDENTIAL_STORE_INVALID'); }
+    return operation(value);
+  }
+
   private invalidStatus(): DesktopCredentialStatus {
     return Object.fromEntries(DESKTOP_CREDENTIAL_IDS.map(id => [id, 'INVALID'])) as DesktopCredentialStatus;
   }

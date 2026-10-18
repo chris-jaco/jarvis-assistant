@@ -6,11 +6,16 @@ import { createToolsHandler } from './tools.js';
 import { createClientSecret, TokenError } from './token.js';
 import { desktopApiAuthorized, desktopServerMode } from './desktop-auth.js';
 import { coreMayLoadDotEnv } from '../desktop/core-environment.js';
+import { receiveCoreCredentialBootstrap } from './core-bootstrap.js';
 if (coreMayLoadDotEnv(process.env)) {
   try { process.loadEnvFile('.env'); } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 }
+const bootstrapGeneration = process.env.ATLAS_CREDENTIAL_BOOTSTRAP_GENERATION;
+const runtimeEnvironment: NodeJS.ProcessEnv = bootstrapGeneration
+  ? { ...process.env, ...await receiveCoreCredentialBootstrap(process.parentPort, bootstrapGeneration) }
+  : process.env;
 const production = process.argv[1]?.endsWith('.js') ?? false;
 const viteApi = production ? undefined : await import('vite');
 const vite = viteApi ? await viteApi.createServer({ server: { middlewareMode: true }, appType: 'spa', plugins: [{ name: 'jarvis-private-storage', configResolved(config) { config.server.fs.deny.push('**/.local/**', '**/*google-tokens*.json', '**/g_*.json'); } }] }) : undefined;
@@ -21,7 +26,7 @@ const host = process.env.HOST ?? '127.0.0.1';
 if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('PORT must be an integer from 0 to 65535.');
 if (!host.trim()) throw new Error('HOST must not be empty.');
 const desktop = desktopServerMode(process.env, host);
-const tools = createToolsHandler(process.env, { development: !production });
+const tools = createToolsHandler(runtimeEnvironment, { development: !production });
 let tokenPending = false;
 let shuttingDown = false;
 const server = createServer(async (req, res) => {
@@ -54,7 +59,7 @@ const server = createServer(async (req, res) => {
     }
     if (tokenPending) { send(429, { error: 'Autenticación en curso. Inténtalo de nuevo.' }); return; }
     tokenPending = true;
-    try { send(200, await createClientSecret(process.env.OPENAI_API_KEY)); }
+    try { send(200, await createClientSecret(runtimeEnvironment.OPENAI_API_KEY)); }
     catch (error) { send(error instanceof TokenError ? error.status : 500, { error: error instanceof TokenError ? error.message : 'Error interno de autenticación.' }); }
     finally { tokenPending = false; }
     return;

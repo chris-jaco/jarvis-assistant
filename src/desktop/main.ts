@@ -16,6 +16,7 @@ import { resolveDesktopRuntimePaths } from './runtime-paths.js';
 import { desktopCoreEnvironment } from './core-environment.js';
 import { createElectronDesktopCredentialStore } from './electron-credential-store.js';
 import { runCredentialSetupWindow } from './credential-setup-window.js';
+import { randomUUID } from 'node:crypto';
 
 let window: BrowserWindow | undefined;
 let cleanupIpc: DesktopIpcController | undefined;
@@ -63,9 +64,10 @@ async function start(): Promise<void> {
     userDataPath: app.getPath('userData')
   });
   await mkdir(paths.coreWorkingDirectory, { recursive: true });
+  let credentialStore: ReturnType<typeof createElectronDesktopCredentialStore> | undefined;
   if (paths.mode === 'PACKAGED') {
     Menu.setApplicationMenu(null);
-    const credentialStore = createElectronDesktopCredentialStore(paths.credentialsRoot);
+    credentialStore = createElectronDesktopCredentialStore(paths.credentialsRoot);
     const configured = await runCredentialSetupWindow(credentialStore, {
       html: paths.credentialSetupHtml,
       preload: paths.credentialSetupPreloadEntry,
@@ -91,7 +93,9 @@ async function start(): Promise<void> {
       else void startupShutdown({ type: 'error', title: 'Atlas Core se detuvo', message: 'Atlas Core se cerró inesperadamente. Atlas se cerrará de forma segura; volvé a abrirlo para continuar.' });
     }
   });
-  const endpoint = await supervisor.start();
+  const endpoint = credentialStore
+    ? await credentialStore.withOpenAIKey(openAIKey => supervisor!.start({ generation: randomUUID(), openAIKey }))
+    : await supervisor.start();
   const applicationOrigin = new URL(endpoint.baseUrl).origin;
   const browserWindow = new BrowserWindow({ ...secureWindowOptions(paths.preloadEntry), icon: paths.applicationIcon }); window = browserWindow;
   cleanupIpc = registerDesktopIpc(ipcMain, supervisor.backendClient(), senderId => browserWindow.webContents.id === senderId && !browserWindow.isDestroyed());

@@ -45,6 +45,18 @@ test('encrypted credentials roundtrip through status without plaintext persisten
   } finally { await f.close(); }
 });
 
+test('Main-only OpenAI bootstrap access decrypts transiently and never changes persistence', async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(f.store.withOpenAIKey(async () => undefined), /CREDENTIAL_STORE_INVALID/);
+    await f.store.set('OPENAI_API_KEY', plaintext);
+    const before = await readFile(f.store.path, 'utf8');
+    const received = await f.store.withOpenAIKey(async value => value === plaintext ? 'used' : 'wrong');
+    assert.equal(received, 'used');
+    assert.equal(await readFile(f.store.path, 'utf8'), before);
+  } finally { await f.close(); }
+});
+
 test('corrupt, unknown-schema and undecryptable stores are INVALID and never overwritten', async () => {
   for (const content of ['{broken', '{"version":2,"provider":"electron.safeStorage","credentials":{}}']) {
     const f = await fixture();
