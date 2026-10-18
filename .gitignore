@@ -3,6 +3,7 @@
 !.env.example
 node_modules/
 dist/
+release/
 artifacts/
 .npm-cache/
 *.log

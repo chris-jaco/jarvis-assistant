@@ -2,6 +2,8 @@
   "name": "jarvis-assistant",
   "version": "0.6.1",
   "private": true,
+  "description": "Atlas Desktop Companion",
+  "main": "dist/desktop-build/desktop/main.js",
   "type": "module",
   "engines": {
     "node": ">=22.12"
@@ -11,6 +13,8 @@
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck && vite build && tsc -p tsconfig.server.json && npm run build:extension",
     "desktop:build": "npm run build && tsc -p tsconfig.desktop.json && node scripts/build-desktop-preload.mjs",
+    "desktop:package:win": "npm run desktop:build && electron-builder --win dir --publish never",
+    "desktop:verify-package": "node scripts/verify-desktop-package.mjs release/win-unpacked",
     "desktop:dev": "npm run desktop:build && electron dist/desktop-build/desktop/main.js",
     "start": "node --env-file-if-exists=.env dist/server/server/index.js",
     "test": "tsx --test src/core/*.test.ts src/server/*.test.ts src/tools/*.test.ts src/memory/*.test.ts src/client/*.test.ts",
@@ -38,9 +42,41 @@
     "@types/node": "^26.6.4",
     "@types/nodemailer": "^8.0.2",
     "electron": "44.7.2",
+    "electron-builder": "26.0.12",
     "jsdom": "26.1.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.2"
+  },
+  "build": {
+    "appId": "com.atlas.desktop",
+    "productName": "Atlas",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/client/**/*",
+      "dist/server/**/*",
+      "dist/desktop-build/**/*",
+      "dist/desktop-preload/**/*",
+      "dist/desktop-credential-setup/**/*",
+      "public/brand/**/*",
+      "node_modules/**/*",
+      "package.json",
+      "!**/*.map",
+      "!**/*.test.*",
+      "!**/.env*",
+      "!**/.local/**",
+      "!**/*google-tokens*.json",
+      "!**/credentials.v1.json",
+      "!**/journal.json"
+    ],
+    "win": {
+      "icon": "public/brand/atlas-app.ico",
+      "target": [
+        "dir"
+      ]
+    }
   }
 }
