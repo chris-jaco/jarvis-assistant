@@ -23,7 +23,8 @@
     "gmail:accounts": "tsx src/server/gmail-accounts.ts",
     "memory:bootstrap": "tsx src/server/memory-bootstrap.ts",
     "build:extension": "node scripts/build-extension.mjs",
-    "pretest": "npm run build:extension"
+    "pretest": "npm run build:extension",
+    "desktop:installer:win": "npm run desktop:build && electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
     "@js-temporal/polyfill": "0.5.1",
@@ -75,8 +76,28 @@
     "win": {
       "icon": "public/brand/atlas-app.ico",
       "target": [
-        "dir"
+        "dir",
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Atlas",
+      "installerIcon": "public/brand/atlas-app.ico",
+      "uninstallerIcon": "public/brand/atlas-app.ico",
+      "installerHeaderIcon": "public/brand/atlas-app.ico",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
     }
   }
 }
