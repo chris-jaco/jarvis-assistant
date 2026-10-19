@@ -56,6 +56,51 @@ may have no per-PID summary because collection itself did not complete. The summ
 does not establish why the previous Windows run failed: run it on Windows to obtain
 the actual stage/code evidence. No elevation or permission changes are required.
 
+### Combined CIM + Win32 coverage (diagnostic only)
+
+```powershell
+node --import tsx scripts/check-atlas-processes.ts 'C:\Users\chris\jarvis-assistant\release\win-unpacked' --coverage
+$LASTEXITCODE
+```
+
+Run without elevation, from the checkout. This command prints only grouped counts,
+fixed status/reason codes, and the existing aggregate Win32 diagnostic summary.
+It never prints PIDs, paths, command lines, creation timestamps or provider errors.
+The executable path and creation dates from CIM are used only in the internal IPC
+snapshot. Do not print/share the collector's raw JSON.
+
+With --coverage only, CIM inventories bracket the unchanged Win32 collection. They
+request ProcessId, CreationDate and ExecutablePath; no methods, privilege changes
+or writes are performed. CIM exceptions yield FAILED, not successful empty arrays.
+The coverage analyzer receives only the detector's uncertain PIDs for correlation.
+
+- cimBefore/cimAfter: total unique valid PIDs, with/without path, unavailable creation,
+  and malformed record counts. Missing/failed inventories disable correlation.
+- matchedWithPath/matchedWithoutPath: uncertain PID present in both CIM inventories,
+  without a demonstrated CIM creation conflict. Missing creation is counted separately;
+  these are coverage counts, not a claim of verified process identity.
+- presentOnlyBefore/presentOnlyAfter/missingInBoth: temporal coverage differences,
+  never proof of termination. PID reuse may explain differences.
+- creationChangedBetweenCimSamples, win32CreationConflictsWithCim and
+  win32InternalCreationConflict: contradictory evidence; no exclusion is performed.
+- FILETIME values are compared at CIM's microsecond precision (100-ns remainder
+  discarded). Equality is useful correlation evidence, not a held process handle.
+- pathTextDiffers only compares text after case/slash normalization; short names,
+  junctions and aliases can explain differences. It is not physical exclusion.
+- Duplicate or malformed records are reported as partial/ambiguous coverage.
+  Counters describe different dimensions and must not all be summed together.
+
+The classifier and its input Win32 observations do not consume CIM. Exit codes
+remain ACTIVE=1, ABSENT=0, INDETERMINATE=2. A CIM failure affects coverage availability,
+not the existing detector's decision. In particular, an uncertain Win32 process
+with a non-null CIM path remains uncertain. This is not a maintenance authorization
+tool independent of the detector, and does not resolve its access-denied limitation.
+
+Validate coverage on Windows with Atlas closed, visible and hidden. Core without
+Main does not require parent correlation. Linux tests use synthetic records and
+do not establish CIM behavior or completeness on Windows. No installation,
+uninstallation or forced crash is part of this diagnostic.
+
 ## Boundaries
 
 - PowerShell adapter: enumerate processes; open separate limited-query and synchronization handles;

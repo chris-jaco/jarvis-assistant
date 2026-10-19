@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param([Parameter(Mandatory = $true)][string]$InstallationDirectory)
+param(
+    [Parameter(Mandatory = $true)][string]$InstallationDirectory,
+    [switch]$IncludeCimCoverage
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -207,8 +210,33 @@ public static class AtlasReadOnlyProcessProbe {
 }
 '@ | Out-Null
 
+function Get-AtlasCimInventory {
+    try {
+        $rows = @(Get-CimInstance Win32_Process -Property ProcessId, CreationDate, ExecutablePath -ErrorAction Stop)
+        $records = @($rows | ForEach-Object {
+            $creation = $null
+            if ($null -ne $_.CreationDate) {
+                try { $creation = ([datetime]$_.CreationDate).ToUniversalTime().ToFileTimeUtc().ToString([Globalization.CultureInfo]::InvariantCulture) } catch { }
+            }
+            @{ pid = [int]$_.ProcessId; creation = $creation; path = $_.ExecutablePath }
+        })
+        return @{ status = 'OK'; records = $records }
+    } catch {
+        # Only fixed status reaches IPC; do not emit raw provider errors or partial success.
+        return @{ status = 'FAILED'; records = @() }
+    }
+}
+
+# CIM brackets Win32 collection but never changes its status, observations or exit behavior.
+$cimBefore = $null
+if ($IncludeCimCoverage) { $cimBefore = Get-AtlasCimInventory }
 # Keep the before/processes/after order explicit. A failed collection never emits an empty success snapshot.
 $before = [AtlasReadOnlyProcessProbe]::Installation($InstallationDirectory)
 $processes = @([AtlasReadOnlyProcessProbe]::Enumerate())
 $after = [AtlasReadOnlyProcessProbe]::Installation($InstallationDirectory)
-@{ before = $before; processes = $processes; after = $after } | ConvertTo-Json -Depth 8 -Compress
+$snapshot = @{ before = $before; processes = $processes; after = $after }
+if ($IncludeCimCoverage) {
+    $snapshot.cimBefore = $cimBefore
+    $snapshot.cimAfter = Get-AtlasCimInventory
+}
+$snapshot | ConvertTo-Json -Depth 8 -Compress
