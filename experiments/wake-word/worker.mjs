@@ -1,6 +1,6 @@
 import { PcmDetector, SpikeError } from './core.js';
 
-let detector, module;
+let detector, module, audioPort, nextSequence = 0;
 function noNetwork() { throw new SpikeError('NETWORK_DISABLED'); }
 // Suppress third-party native/JS diagnostic text. Only closed error codes leave this worker.
 for (const key of ['log', 'info', 'warn', 'error', 'debug']) console[key] = () => {};
@@ -26,11 +26,27 @@ self.onmessage = async ({ data }) => {
       });
       detector = new PcmDetector(spotter);
       self.postMessage({ type: 'ready', wasmHeapBytes: module.HEAPU8.byteLength });
-    } else if (data.type === 'pcm') {
-      if (!detector) throw new SpikeError('NOT_INITIALIZED');
-      const result = detector.process(new Float32Array(data.pcm), 16000);
-      self.postMessage({ type: 'processed', ...result, deliveredAt: data.deliveredAt, wasmHeapBytes: module.HEAPU8.byteLength });
+    } else if (data.type === 'connect') {
+      if (!detector || audioPort) throw new SpikeError('AUDIO_PROTOCOL_ERROR');
+      audioPort = data.port;
+      audioPort.onmessage = ({ data: block }) => {
+        const started = performance.now();
+        try {
+          if (block.type !== 'pcm' || block.sequence !== nextSequence++
+            || !(block.pcm instanceof ArrayBuffer) || block.pcm.byteLength !== 6400) throw new SpikeError('AUDIO_PROTOCOL_ERROR');
+          const result = detector.process(new Float32Array(block.pcm), 16000);
+          // Recycle immediately on the direct port, before sending optional UI telemetry.
+          audioPort.postMessage({ type: 'recycle', pcm: block.pcm, sequence: block.sequence }, [block.pcm]);
+          self.postMessage({ type: 'processed', ...result, sequence: block.sequence, outstanding: block.outstanding,
+            workerMs: performance.now() - started, wasmHeapBytes: module.HEAPU8.byteLength });
+        } catch {
+          if (block.pcm instanceof ArrayBuffer) new Uint8Array(block.pcm).fill(0);
+          audioPort.close(); self.postMessage({ type: 'error', code: 'AUDIO_PROCESSING_FAILED' });
+        }
+      };
+      audioPort.start(); self.postMessage({ type: 'capture-ready' });
     } else if (data.type === 'stop') {
+      audioPort?.close(); audioPort = undefined;
       detector?.stop(); detector = undefined;
       module?.HEAPU8.fill(0); module = undefined;
       self.postMessage({ type: 'stopped' }); self.close();

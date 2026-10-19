@@ -96,8 +96,15 @@ de desarrollo del repositorio. No hay dependencia productiva nueva, addon de
 Electron ni Python.
 
 `browser.ts` controla permisos y recursos. AudioWorklet reúne bloques mono de
-100 ms y los transfiere a un worker. Sólo se admite un bloque en vuelo; ante
-saturación se detiene el ensayo. El worker carga los pesos en MEMFS, ejecuta KWS
+100 ms y los transfiere directamente al worker mediante MessageChannel, sin
+confirmaciones que dependan del hilo de interfaz. Hay exactamente cuatro buffers
+reutilizables de 1600 muestras: 400 ms / 25600 bytes de PCM entre bloque parcial,
+bloques en tránsito y buffers disponibles. El worker devuelve cada buffer puesto
+a cero inmediatamente después de inferir. Se verifican secuencias y devoluciones
+duplicadas; no se descartan bloques ni se hace crecer el pool. Al agotarse se
+detiene el ensayo con contadores de producidos/pendientes. El grafo no se conecta
+hasta confirmar que ambos extremos del canal están preparados. El worker carga
+los pesos en MEMFS, ejecuta KWS
 sincrónico y devuelve eventos Atlas y métricas escalares. `core.ts` permite
 inyectar un motor en tests, valida PCM y coalesce detecciones durante un segundo.
 
@@ -124,8 +131,10 @@ modificó el proxy. No hay SHA completo ni hashes de pesos medidos en este entor
 El servidor bloquea la carga del motor sin un manifiesto preparado y verificado.
 
 Los tests con motores inyectados, protobuf sintético, protocolo worker y worklet
-no prueban reconocimiento acústico. Sigue pendiente ejecutar el modelo real y
-verificar el navegador en Windows 11. **NO-GO para integrar con Atlas** hasta
+no prueban reconocimiento acústico. El propietario confirmó después la carga del
+modelo y motor en Windows 11; la primera captura terminó con AUDIO_OVERRUN
+(ver diagnóstico al final). La ruta corregida y el reconocimiento real siguen
+pendientes de aceptación Windows. **NO-GO para integrar con Atlas** hasta
 completar preparación, compatibilidad, revisión y aceptación acústica.
 
 Registrar manualmente al menos 100 intentos, distribuidos entre ES-AR, ES-ES y
@@ -137,7 +146,8 @@ natural consistente. Añadir ocho horas representativas de negativos con ventana
 visible: objetivo <=1 activación no deseada. El cooldown debe constar en el reporte
 porque puede ocultar activaciones muy próximas.
 
-La interfaz muestra inferencia p95, entrega de bloque p95 y proporción de tiempo
+La interfaz muestra inferencia p95, trabajo del worker p95, máximo de bloques
+pendientes (hasta cuatro) y proporción de tiempo
 de inferencia/audio. **Ninguna mide latencia desde el final acústico de la palabra,
 CPU del sistema ni precisión.** Para el objetivo acústico p95 <500 ms se necesita
 una referencia temporal externa documentada (por ejemplo, vídeo de prueba consentido
@@ -160,3 +170,40 @@ git diff --check
 `desktop:build` incluye typecheck, Web, Core, extensión, Desktop y preload. No
 genera ni ejecuta instaladores. El tsconfig separado comprueba el harness de
 navegador sin incorporarlo a los builds oficiales.
+
+## Repetir AUDIO_OVERRUN en Windows
+
+La primera prueba Windows comunicó modelo y motor cargados, 16 bloques,
+0 detecciones, inferencia p95 3.6 ms y entrega p95 6.0 ms. Estos datos no prueban
+sobrecarga del motor: la versión anterior requería un crédito devuelto vía UI
+antes del siguiente bloque de 100 ms. Una ráfaga del renderizador o una demora
+puntual de esa ruta disparaba el error incluso con inferencia rápida. El contador
+sólo incluía bloques procesados; el tiempo medido empezaba después de que el
+bloque llegara a la página, y excluía esperas anteriores. No se dispone de una
+traza Windows para atribuir aquella demora a un componente concreto.
+
+La corrección elimina la UI de la ruta de audio/reciclaje y añade el pool fijo
+anterior. Sus 400 ms son capacidad de audio, no una garantía de tolerancia de
+400 ms de reloj: el navegador puede renderizar en ráfagas. No hay resampler propio;
+el navegador convierte el dispositivo al AudioContext de 16 kHz, cuya frecuencia
+se comprueba antes de conectar el grafo. Captura física puede comenzar durante
+el permiso, pero la escucha analizada sólo empieza al conectar el grafo preparado.
+No se promete preservar audio pronunciado antes de ese momento. No hay descarga
+ni inicialización del modelo durante escucha.
+
+Con los assets ya preparados, ejecutar sólo `node experiments/wake-word/server.mjs`
+y recargar la página. Cargar motor, activar y dejar en silencio 5 minutos; decir
+«Atlas» varias veces separado por al menos 2 segundos. Registrar bloques,
+máximo pendientes/4, inferencia p95, trabajo worker p95 y cualquier error. Cambiar
+la carga de CPU con uso normal del equipo para evaluar demoras; no ocultar la
+página, pues eso detiene intencionalmente el ensayo. Si se agota el pool, registrar
+producidos/pendientes del estado: no continuar una muestra acústica que terminó
+con overrun ni sumar sus métricas a la siguiente.
+
+Detener y verificar tracks terminados, indicador de micrófono apagado y worker
+finalizado. Repetir cargar/activar/detener cinco veces; probar doble clic en Activar
+y cancelar durante el permiso del micrófono. No debe haber capturas duplicadas
+ni tracks residuales. Verificar también la parada por ocultar la pestaña. Las
+pruebas automatizadas ejercitan ráfagas, bloqueo temporal del consumidor, orden de
+muestras, límite del pool y liberación con adaptadores; la nueva ruta real Windows
+y la precisión siguen pendientes de aceptación manual.

@@ -132,7 +132,7 @@ test('worker blocks network APIs after local initialization and clears heap on s
   const { SpikeError } = await import('../../experiments/wake-word/core.js');
   const context = vm.createContext({
     self, console: { log() {}, info() {}, warn() {}, error() {}, debug() {} },
-    PcmDetector, SpikeError, Uint8Array, Float32Array, performance,
+    PcmDetector, SpikeError, Uint8Array, Float32Array, ArrayBuffer, performance,
     fetch() { network++; },
     __api: {
       initKWSModule: async () => ({ HEAPU8: heap, FS: { writeFile() {} } }),
@@ -146,24 +146,171 @@ test('worker blocks network APIs after local initialization and clears heap on s
     assert.throws(() => vm.runInContext(expression, context), /NETWORK_DISABLED/);
   }
   assert.equal(network, 0);
+  const h = workletHarness();
+  const directPort = { onmessage: undefined as any, start() {}, close() {},
+    postMessage(block: any) {
+      assert.ok(new Float32Array(block.pcm).every(v => v === 0));
+      h.recycle(structuredClone(block, { transfer: [block.pcm] }));
+    }
+  };
+  await self.onmessage!({ data: { type: 'connect', port: directPort } });
+  for (let i = 0; i < 4; i++) h.processor.process([[new Float32Array(1600).fill(.3)]]);
+  // Worker drains a burst and recycles directly, without any page acknowledgement.
+  for (const block of h.sent) directPort.onmessage({ data: block });
+  assert.equal(h.processor.pending.size, 0);
+  assert.equal(messages.filter((m: any) => m.type === 'processed').length, 4);
+  directPort.onmessage({ data: { type: 'pcm', sequence: 99, pcm: new ArrayBuffer(6400) } });
+  assert.equal((messages.at(-1) as any).code, 'AUDIO_PROCESSING_FAILED');
   await self.onmessage!({ data: { type: 'stop' } });
   assert.equal(disposed, 1); assert.equal(closed, true); assert.deepEqual([...heap], [0, 0, 0]);
 });
 
-test('AudioWorklet bounds PCM backlog and stops rather than storing continuous audio', () => {
+function workletHarness() {
   let Processor: any;
-  const messages: { type: string; pcm?: ArrayBuffer }[] = [];
+  const control: any[] = [], sent: any[] = [];
   const context = vm.createContext({
-    Float32Array,
-    AudioWorkletProcessor: class { port = { onmessage: undefined, postMessage: (v: { type: string }) => messages.push(v) }; },
+    Float32Array, ArrayBuffer,
+    AudioWorkletProcessor: class { port = { onmessage: undefined, postMessage: (v: unknown) => control.push(v) }; },
     registerProcessor: (_name: string, processor: unknown) => { Processor = processor; }
   });
   vm.runInContext(readFileSync(resolve(import.meta.dirname, '../../experiments/wake-word/pcm-worklet.js'), 'utf8'), context);
   const processor = new Processor();
-  assert.equal(processor.process([[new Float32Array(1600)]]), true);
-  assert.equal(messages[0]!.type, 'pcm');
-  assert.equal(processor.process([[new Float32Array(1600)]]), false);
-  assert.equal(messages[1]!.type, 'overrun');
-  assert.equal(processor.buffer.every((v: number) => v === 0), true);
-  assert.equal(processor.active, false);
+  const port = { onmessage: undefined as any, start() {}, closed: false,
+    close() { this.closed = true; },
+    postMessage(v: any, transfer: Transferable[]) { sent.push(structuredClone(v, { transfer })); }
+  };
+  processor.port.onmessage({ data: { type: 'connect', port } });
+  return { processor, port, control, sent,
+    recycle(block: any) { new Float32Array(block.pcm).fill(0); port.onmessage({ data: { type: 'recycle', pcm: block.pcm, sequence: block.sequence } }); }
+  };
+}
+
+test('continuous 128-frame rendering preserves sample order across block boundaries without PCM growth', () => {
+  const h = workletHarness(); let acknowledged = 0, sample = 0, expected = 0;
+  for (let quantum = 0; quantum < 1250; quantum++) {
+    const input = Float32Array.from({ length: 128 }, () => (sample++ % 100) / 100);
+    assert.equal(h.processor.process([[input]]), true);
+    while (acknowledged < h.sent.length) {
+      const block = h.sent[acknowledged++];
+      assert.equal(block.sequence, acknowledged - 1);
+      for (const value of new Float32Array(block.pcm)) assert.equal(value, Math.fround((expected++ % 100) / 100));
+      h.recycle(block);
+    }
+    assert.ok(h.processor.free.length + (h.processor.buffer ? 1 : 0) + h.processor.pending.size === 4);
+  }
+  assert.equal(h.sent.length, 100); assert.equal(expected, 160000);
+  h.processor.port.onmessage({ data: 'stop' });
+  assert.equal(h.port.closed, true); assert.equal(h.processor.free.length, 0);
+});
+
+test('four-block burst tolerates a temporarily busy worker; credits arrive without UI participation', () => {
+  const h = workletHarness();
+  // No acknowledgements between callbacks reproduces a render-ahead/scheduling burst.
+  for (let i = 0; i < 4; i++) assert.equal(h.processor.process([[new Float32Array(1600).fill(.25)]]), true);
+  assert.equal(h.processor.pending.size, 4); assert.equal(h.sent.length, 4);
+  for (const block of h.sent.slice()) h.recycle(block);
+  assert.equal(h.processor.pending.size, 0);
+  assert.equal(h.processor.process([[new Float32Array(1600)]]), true);
+  assert.equal(h.sent[4].sequence, 4);
+  assert.deepEqual(h.control.map(v => v.type), ['connected']);
+});
+
+test('exhausted bounded pool reports overrun instead of discarding audio, then releases owned buffers', () => {
+  const h = workletHarness();
+  for (let i = 0; i < 4; i++) h.processor.process([[new Float32Array(1600)]]);
+  assert.equal(h.processor.process([[new Float32Array(128)]]), false);
+  assert.deepEqual({ ...h.control[1] }, { type: 'overrun', code: 'AUDIO_OVERRUN', produced: 4, outstanding: 4 });
+  assert.equal(h.processor.active, false); assert.equal(h.port.closed, true);
+  assert.equal(h.processor.buffer, null); assert.equal(h.processor.free.length, 0);
+  assert.equal(h.processor.process([[new Float32Array(1600)]]), false);
+  h.recycle(h.sent[0]); assert.equal(h.processor.free.length, 0);
+});
+
+test('duplicate buffer acknowledgement fails explicitly and cannot expand the pool', () => {
+  const h = workletHarness(); h.processor.process([[new Float32Array(1600)]]);
+  h.recycle(h.sent[0]); h.recycle(h.sent[0]);
+  assert.equal(h.processor.active, false); assert.equal(h.control[1].code, 'AUDIO_PROTOCOL_ERROR');
+});
+
+async function browserHarness(options: { deferMicrophone?: boolean; deferClose?: boolean } = {}) {
+  const { transform } = await import('esbuild');
+  const source = readFileSync(resolve(import.meta.dirname, '../../experiments/wake-word/browser.ts'), 'utf8');
+  const js = (await transform(source, { loader: 'ts', format: 'esm' })).code.replace(/^import .*\n/gm, '');
+  const elements = new Map<string, any>();
+  for (const id of ['load', 'listen', 'stop', 'status', 'metrics', 'events', 'threshold', 'accent', 'distance', 'noise']) elements.set(id, { disabled: false, textContent: '', value: id === 'threshold' ? '.25' : 'test' });
+  let workers = 0, requests = 0, closedContexts = 0, terminated = 0, connected = 0;
+  let node: any;
+  let resolveMicrophone!: (v: unknown) => void, resolveClose!: () => void;
+  const track = { readyState: 'live', stop() { this.readyState = 'ended'; }, addEventListener() {} };
+  const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
+  const closeGate = options.deferClose ? new Promise<void>(r => { resolveClose = r; }) : Promise.resolve();
+  const microphone = options.deferMicrophone ? new Promise(r => { resolveMicrophone = r; }) : Promise.resolve(stream);
+  const makeNode = () => ({ connect() { connected++; }, disconnect() {}, gain: { value: 0 } });
+  class Context {
+    state = 'running'; sampleRate = 16000; destination = {};
+    audioWorklet = { addModule: async () => {} };
+    async resume() {}
+    async close() { await closeGate; closedContexts++; }
+    createMediaStreamSource() { return makeNode(); }
+    createGain() { return makeNode(); }
+  }
+  class Worklet {
+    port = { onmessage: undefined as any, close() {}, postMessage: (v: any) => { if (v?.type === 'connect') queueMicrotask(() => this.port.onmessage({ data: { type: 'connected' } })); } };
+    constructor() { node = this; }
+    connect() { connected++; } disconnect() {}
+  }
+  class Worker {
+    onmessage: any; onerror: any;
+    constructor() { workers++; }
+    terminate() { terminated++; }
+    postMessage(v: any) {
+      if (v.type === 'init') queueMicrotask(() => this.onmessage({ data: { type: 'ready', wasmHeapBytes: 1024 } }));
+      if (v.type === 'connect') queueMicrotask(() => this.onmessage({ data: { type: 'capture-ready' } }));
+    }
+  }
+  const context = vm.createContext({
+    document: { getElementById: (id: string) => elements.get(id), addEventListener() {}, hidden: false },
+    window: { addEventListener() {} },
+    navigator: { mediaDevices: { getUserMedia() { requests++; return microphone; }, addEventListener() {} } },
+    AudioContext: Context, AudioWorkletNode: Worklet, Worker,
+    MessageChannel: class { port1 = { close() {} }; port2 = { close() {} }; },
+    fetch: async (url: string) => ({ ok: true, json: async () => fixture(), arrayBuffer: async () => new ArrayBuffer(1) }),
+    checkManifest, verifyBytes: async () => {}, ResourceScope,
+    SpikeError: (await import('../../experiments/wake-word/core.js')).SpikeError,
+    AbortController, Uint8Array, ArrayBuffer, Promise, setTimeout, clearTimeout, performance
+  });
+  vm.runInContext(js, context);
+  return { elements, track,
+    load: () => elements.get('load').onclick(), listen: () => elements.get('listen').onclick(),
+    stop: () => vm.runInContext('stop()', context) as Promise<void>,
+    overrun: () => node.port.onmessage({ data: { type: 'overrun', code: 'AUDIO_OVERRUN', produced: 4, outstanding: 4 } }),
+    microphoneReady: () => resolveMicrophone(stream), closeReady: () => resolveClose(),
+    counts: () => ({ workers, requests, closedContexts, terminated, connected })
+  };
+}
+
+const tick = () => new Promise<void>(resolve => setImmediate(resolve));
+test('browser overrun releases microphone, graph, context and worker; repeated stop cannot create overlapping sessions', async () => {
+  const h = await browserHarness({ deferClose: true });
+  await Promise.all([h.load(), h.load()]);
+  await Promise.all([h.listen(), h.listen()]);
+  assert.equal(h.counts().workers, 1); assert.equal(h.counts().requests, 1);
+  assert.equal(h.counts().connected, 3);
+  h.overrun();
+  const stopped = h.stop();
+  assert.equal(h.track.readyState, 'ended');
+  await h.load(); assert.equal(h.counts().workers, 1);
+  h.closeReady(); await stopped;
+  assert.equal(h.counts().closedContexts, 1); assert.equal(h.counts().terminated, 1);
+  assert.match(h.elements.get('status').textContent, /AUDIO_OVERRUN.*tracks terminados: true/);
+  assert.equal(h.elements.get('load').disabled, false);
+});
+
+test('cancelled capture stops a late microphone stream without opening a second capture or connecting it', async () => {
+  const h = await browserHarness({ deferMicrophone: true }); await h.load();
+  const starting = h.listen(); await tick();
+  await h.listen(); assert.equal(h.counts().requests, 1);
+  await h.stop(); h.microphoneReady(); await starting;
+  assert.equal(h.track.readyState, 'ended'); assert.equal(h.counts().connected, 0);
+  assert.equal(h.counts().closedContexts, 1); assert.equal(h.counts().terminated, 1);
 });
