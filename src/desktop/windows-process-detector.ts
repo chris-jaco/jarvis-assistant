@@ -1,6 +1,16 @@
 /** Read-only snapshot policy. ABSENT is an observation, never a maintenance lock. */
 export type DetectionState = 'ACTIVE' | 'ABSENT' | 'INDETERMINATE';
 
+export const diagnosticStages = [
+  'OPEN_PROCESS_FAILED', 'CREATION_TIME_FAILED', 'IMAGE_QUERY_FAILED',
+  'IDENTITY_RESOLUTION_FAILED', 'PROCESS_EXIT_CONFIRMED', 'IDENTITY_MISMATCH'
+] as const;
+export interface ProcessDiagnostic {
+  stage: typeof diagnosticStages[number];
+  win32Error: number | null;
+  access: 'QUERY' | 'SYNCHRONIZE' | null;
+}
+
 export interface FileIdentity {
   canonicalPath: string;
   volume: string;
@@ -12,10 +22,10 @@ export interface InstallationIdentity {
   executable: FileIdentity;
 }
 
-export type ProcessObservation =
+export type ProcessObservation = (
   | { pid: number; status: 'VERIFIED'; creation: string; verifiedCreation: string; image: FileIdentity }
   | { pid: number; status: 'EXITED_CONFIRMED' }
-  | { pid: number; status: 'UNKNOWN' };
+  | { pid: number; status: 'UNKNOWN' }) & { diagnostics?: ProcessDiagnostic[] };
 
 export interface ProcessDetectorAdapter {
   installation(): Promise<InstallationIdentity>;
@@ -30,6 +40,38 @@ export interface DetectionResult {
   activePids: number[];
   uncertainPids: number[];
   reason: string;
+  diagnostics?: Array<ProcessDiagnostic & { pid: number }>;
+}
+
+export function detectionExitCode(state: DetectionState): number {
+  return state === 'ABSENT' ? 0 : state === 'ACTIVE' ? 1 : 2;
+}
+
+/** Allowlisted projection: never copy exception messages, paths or command lines. */
+function safeDiagnostic(value: unknown): ProcessDiagnostic | undefined {
+  if (!value || typeof value !== 'object') return;
+  const row = value as Partial<ProcessDiagnostic>;
+  if (!diagnosticStages.includes(row.stage as ProcessDiagnostic['stage'])) return;
+  return {
+    stage: row.stage!,
+    win32Error: Number.isSafeInteger(row.win32Error) && row.win32Error! >= 0 && row.win32Error! <= 0xffffffff ? row.win32Error! : null,
+    access: row.access === 'QUERY' || row.access === 'SYNCHRONIZE' ? row.access : null
+  };
+}
+
+export function summarizeDetection(value: DetectionResult) {
+  const groups = new Map<string, ProcessDiagnostic & { count: number }>();
+  for (const diagnostic of value.diagnostics ?? []) {
+    const safe = safeDiagnostic(diagnostic); if (!safe) continue;
+    const key = JSON.stringify(safe);
+    const previous = groups.get(key);
+    groups.set(key, { ...safe, count: (previous?.count ?? 0) + 1 });
+  }
+  return {
+    state: value.state, maintenanceAllowed: value.state === 'ABSENT', reason: value.reason,
+    activeCount: value.activePids.length, uncertainCount: value.uncertainPids.length,
+    diagnosticSummary: [...groups.values()].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+  };
 }
 
 function path(value: string): string | undefined {
@@ -66,7 +108,7 @@ function result(state: DetectionState, reason: string, activePids: number[] = []
   return { state, maintenanceAllowed: state === 'ABSENT', activePids, uncertainPids, reason };
 }
 
-export async function detectWindowsProcesses(adapter: ProcessDetectorAdapter): Promise<DetectionResult> {
+async function classifyWindowsProcesses(adapter: ProcessDetectorAdapter): Promise<DetectionResult> {
   try {
     const target = await adapter.installation();
     if (!installationValid(target)) return result('INDETERMINATE', 'TARGET_IDENTITY_INVALID');
@@ -102,4 +144,27 @@ export async function detectWindowsProcesses(adapter: ProcessDetectorAdapter): P
   } catch {
     return result('INDETERMINATE', 'ADAPTER_FAILED');
   }
+}
+
+export async function detectWindowsProcesses(adapter: ProcessDetectorAdapter): Promise<DetectionResult> {
+  let observations: ProcessObservation[] = [];
+  const classification = await classifyWindowsProcesses({
+    installation: () => adapter.installation(),
+    verifyInstallation: () => adapter.verifyInstallation(),
+    enumerate: async () => { const rows = await adapter.enumerate(); if (Array.isArray(rows)) observations = rows; return rows; }
+  });
+  const diagnostics: NonNullable<DetectionResult['diagnostics']> = [];
+  // Diagnostics cannot influence classification, including malformed adapter metadata.
+  for (const row of observations) {
+    if (!row || !Number.isSafeInteger(row.pid) || row.pid <= 0) continue;
+    const entries = Array.isArray(row.diagnostics) ? row.diagnostics : [];
+    const safe = entries.map(safeDiagnostic).filter((d): d is ProcessDiagnostic => !!d);
+    if (row.status === 'EXITED_CONFIRMED' && !safe.some(d => d.stage === 'PROCESS_EXIT_CONFIRMED')) {
+      safe.push({ stage: 'PROCESS_EXIT_CONFIRMED', win32Error: null, access: null });
+    } else if (classification.uncertainPids.includes(row.pid) && safe.length === 0) {
+      safe.push({ stage: 'IDENTITY_MISMATCH', win32Error: null, access: null });
+    }
+    diagnostics.push(...safe.map(d => ({ pid: row.pid, ...d })));
+  }
+  return { ...classification, diagnostics };
 }

@@ -1,12 +1,13 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { detectWindowsProcesses } from '../src/desktop/windows-process-detector.js';
+import { detectWindowsProcesses, detectionExitCode, summarizeDetection } from '../src/desktop/windows-process-detector.js';
 import type { InstallationIdentity, ProcessObservation } from '../src/desktop/windows-process-detector.js';
 
 // No command shell, elevation, profile loading, or policy overrides.
 async function main(): Promise<void> {
-  if (process.platform !== 'win32' || process.argv.length !== 3 || !process.argv[2]) {
+  const summary = process.argv[3] === '--summary';
+  if (process.platform !== 'win32' || !(process.argv.length === 3 || (process.argv.length === 4 && summary)) || !process.argv[2]) {
     console.log(JSON.stringify({ state: 'INDETERMINATE', maintenanceAllowed: false, reason: 'WINDOWS_AND_INSTALLATION_DIRECTORY_REQUIRED' }));
     process.exitCode = 2; return;
   }
@@ -24,8 +25,8 @@ async function main(): Promise<void> {
       enumerate: async () => snapshot.processes,
       verifyInstallation: async () => snapshot.after
     });
-    console.log(JSON.stringify(detection, null, 2));
-    process.exitCode = detection.state === 'ABSENT' ? 0 : detection.state === 'ACTIVE' ? 1 : 2;
+    console.log(JSON.stringify(summary ? summarizeDetection(detection) : detection, null, 2));
+    process.exitCode = detectionExitCode(detection.state);
   } catch {
     console.log(JSON.stringify({ state: 'INDETERMINATE', maintenanceAllowed: false, reason: 'WINDOWS_COLLECTION_FAILED' }));
     process.exitCode = 2;

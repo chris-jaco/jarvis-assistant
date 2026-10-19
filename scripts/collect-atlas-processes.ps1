@@ -26,12 +26,18 @@ public sealed class AtlasInstallationIdentity {
     public AtlasFileIdentity directory;
     public AtlasFileIdentity executable;
 }
+public sealed class AtlasProcessDiagnostic {
+    public string stage;
+    public int? win32Error;
+    public string access;
+}
 public sealed class AtlasProcessObservation {
     public int pid;
     public string status;
     public string creation;
     public string verifiedCreation;
     public AtlasFileIdentity image;
+    public List<AtlasProcessDiagnostic> diagnostics = new List<AtlasProcessDiagnostic>();
 }
 public static class AtlasReadOnlyProcessProbe {
     [StructLayout(LayoutKind.Sequential)] struct FileTime { public uint low, high; }
@@ -71,7 +77,8 @@ public static class AtlasReadOnlyProcessProbe {
             if (((info.attributes & 0x10) != 0) != directory) throw new IOException("FILE_KIND_MISMATCH");
             var buffer = new StringBuilder(32768);
             uint length = GetFinalPathNameByHandleW(file, buffer, (uint)buffer.Capacity, 0);
-            if (length == 0 || length >= buffer.Capacity) throw new IOException("CANONICAL_PATH_UNAVAILABLE");
+            if (length == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if (length >= buffer.Capacity) throw new IOException("CANONICAL_PATH_UNAVAILABLE");
             string canonical = buffer.ToString();
             if (canonical.StartsWith(@"\\?\", StringComparison.Ordinal)) canonical = canonical.Substring(4);
             if (canonical.Length < 3 || canonical[1] != ':' || canonical[2] != '\\') throw new IOException("LOCAL_DISK_REQUIRED");
@@ -97,9 +104,24 @@ public static class AtlasReadOnlyProcessProbe {
         }
         return !found;
     }
+    static void Record(AtlasProcessObservation row, string stage, Exception error, string access) {
+        var native = error as Win32Exception;
+        row.diagnostics.Add(new AtlasProcessDiagnostic { stage = stage,
+            win32Error = native == null ? (int?)null : native.NativeErrorCode, access = access });
+    }
+    static bool Exited(AtlasProcessObservation row, IntPtr sync) {
+        if (sync == IntPtr.Zero) return false;
+        uint state = WaitForSingleObject(sync, 0);
+        if (state == 0) {
+            row.status = "EXITED_CONFIRMED";
+            Record(row, "PROCESS_EXIT_CONFIRMED", null, "SYNCHRONIZE");
+            return true;
+        }
+        if (state == 0xffffffff) Record(row, "OPEN_PROCESS_FAILED", new Win32Exception(Marshal.GetLastWin32Error()), "SYNCHRONIZE");
+        return false;
+    }
     public static AtlasProcessObservation[] Enumerate() {
         var rows = new List<AtlasProcessObservation>();
-        // Acquire identity handles during enumeration, before querying any image paths.
         var handles = new List<IntPtr>();
         try {
             foreach (Process process in Process.GetProcesses()) {
@@ -108,33 +130,73 @@ public static class AtlasReadOnlyProcessProbe {
                     // Windows Idle (0) and System (4) are kernel identities, not user images.
                     if (pid == 0 || pid == 4) continue;
                     var row = new AtlasProcessObservation { pid = pid, status = "UNKNOWN" };
-                    IntPtr handle = OpenProcess(0x00101000, false, pid); // SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+                    // Image/creation queries do not need SYNCHRONIZE.
+                    IntPtr handle = OpenProcess(0x00001000, false, pid);
+                    int openError = handle == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
                     handles.Add(handle); rows.Add(row);
-                    if (handle != IntPtr.Zero) {
-                        try { row.creation = Birth(handle); } catch { }
+                    if (handle == IntPtr.Zero) Record(row, "OPEN_PROCESS_FAILED", new Win32Exception(openError), "QUERY");
+                    else {
+                        try { row.creation = Birth(handle); }
+                        catch (Exception error) { Record(row, "CREATION_TIME_FAILED", error, "QUERY"); }
                     }
                 }
             }
             for (int i = 0; i < rows.Count; i++) {
                 var row = rows[i]; IntPtr handle = handles[i];
+                if (handle == IntPtr.Zero) {
+                    try {
+                        if (Gone(row.pid)) {
+                            row.status = "EXITED_CONFIRMED";
+                            Record(row, "PROCESS_EXIT_CONFIRMED", null, null);
+                        }
+                    } catch (Exception error) { Record(row, "OPEN_PROCESS_FAILED", error, "QUERY"); }
+                    continue;
+                }
+                if (row.creation == null) continue;
+                IntPtr sync = IntPtr.Zero;
+                bool syncBound = false;
+                string stage = "OPEN_PROCESS_FAILED";
+                string access = "SYNCHRONIZE";
                 try {
-                    if (handle == IntPtr.Zero) {
-                        if (Gone(row.pid)) row.status = "EXITED_CONFIRMED";
-                        continue;
+                    // Separate handle: limited query is needed to bind its creation time to the first handle.
+                    // Keep the old acceptance requirement: failed synchronization still blocks VERIFIED.
+                    sync = OpenProcess(0x00101000, false, row.pid);
+                    int syncError = sync == IntPtr.Zero ? Marshal.GetLastWin32Error() : 0;
+                    if (sync == IntPtr.Zero) Record(row, "OPEN_PROCESS_FAILED", new Win32Exception(syncError), "SYNCHRONIZE");
+                    else {
+                        stage = "CREATION_TIME_FAILED";
+                        if (Birth(sync) != row.creation) {
+                            Record(row, "IDENTITY_MISMATCH", null, "SYNCHRONIZE");
+                            CloseHandle(sync); sync = IntPtr.Zero;
+                            continue;
+                        }
+                        syncBound = true;
+                        if (Exited(row, sync)) continue;
                     }
-                    if (WaitForSingleObject(handle, 0) == 0) { row.status = "EXITED_CONFIRMED"; continue; }
-                    if (row.creation == null) continue;
+                    // Collect query failures even if a synchronization handle was unavailable.
+                    stage = "IMAGE_QUERY_FAILED"; access = "QUERY";
                     var name = new StringBuilder(32768); uint size = (uint)name.Capacity;
                     if (!QueryFullProcessImageNameW(handle, 0, name, ref size)) throw new Win32Exception(Marshal.GetLastWin32Error());
+                    stage = "IDENTITY_RESOLUTION_FAILED";
                     row.image = Resolve(name.ToString(), false);
+                    stage = "CREATION_TIME_FAILED";
                     row.verifiedCreation = Birth(handle);
-                    // A held process handle anchors identity even if its PID is later reused.
-                    uint state = WaitForSingleObject(handle, 0);
-                    if (state == 0) row.status = "EXITED_CONFIRMED";
-                    else if (state == 258) row.status = "VERIFIED";
-                } catch {
-                    if (handle != IntPtr.Zero && WaitForSingleObject(handle, 0) == 0) row.status = "EXITED_CONFIRMED";
-                    else row.status = "UNKNOWN";
+                    if (row.creation != row.verifiedCreation) {
+                        Record(row, "IDENTITY_MISMATCH", null, "QUERY");
+                        continue;
+                    }
+                    if (!Exited(row, sync) && sync != IntPtr.Zero) {
+                        // Require the same successful zero-time wait as before; WAIT_FAILED is never success.
+                        uint state = WaitForSingleObject(sync, 0);
+                        if (state == 258) row.status = "VERIFIED";
+                        else if (state == 0) Exited(row, sync);
+                        else Record(row, "OPEN_PROCESS_FAILED", new Win32Exception(Marshal.GetLastWin32Error()), "SYNCHRONIZE");
+                    }
+                } catch (Exception error) {
+                    Record(row, stage, error, access);
+                    if (syncBound) Exited(row, sync);
+                } finally {
+                    if (sync != IntPtr.Zero) CloseHandle(sync);
                 }
             }
             return rows.ToArray();
