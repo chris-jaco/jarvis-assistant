@@ -1,8 +1,61 @@
-# Atlas Desktop — V0.6.1 Desktop Companion
+# Atlas Desktop — V0.6.2 Windows Packaged Preview
 
-Estado: preview local de desarrollo aceptada en Windows 11 el 17 de octubre de 2026.
+Estado: cierre de preview personal empaquetada para Windows 11, 19 de octubre de 2026.
 
-V0.6.1 no incluye instalador, auto-updater, autostart, wake word ni escucha en segundo plano. El empaquetado para Windows queda planificado para V0.6.2.
+V0.6.2 utiliza `win-unpacked`; no incluye instalador soportado, auto-updater,
+autostart, wake word ni distribución pública. No es un instalador ni una aplicación
+portable con datos dentro de la carpeta: los datos persistentes permanecen en userData.
+
+## Generar y ejecutar el paquete Windows
+
+Desde el checkout de la rama `v0.6.2-windows-packaging`, con Node.js 22.12 o posterior:
+
+```powershell
+npm ci
+npm run desktop:package:win
+npm run desktop:verify-package
+& .\release\win-unpacked\Atlas.exe
+```
+
+La generación compila Web, Core, extensión, Desktop y preload; electron-builder genera
+el target `dir`. Copiar **toda** la carpeta `win-unpacked`, no sólo Atlas.exe. El equipo
+que ejecuta el paquete no necesita el repositorio ni Node global. La extensión/Native
+Messaging de Browser Control no se instala con el paquete y sigue siendo opcional.
+
+En el primer inicio, la UI solicita la API key y Main la guarda cifrada mediante
+`electron.safeStorage`. Falla cerrado si el cifrado no está disponible. Main entrega
+la clave a Core mediante bootstrap privado; no se incluye en ASAR ni se entrega al renderer principal de voz.
+Esto no convierte las demás integraciones OAuth en un onboarding empaquetado completo.
+
+## Reemplazar o retirar una carpeta de paquete
+
+1. Usar «Salir de Atlas» desde Tray o el menú. `X` sólo oculta: no termina Atlas/Core.
+2. Esperar el shutdown completo y comprobar que no quedan procesos asociados a esa
+   copia. Si no se puede confirmar su salida, no sobrescribir ni borrar la carpeta.
+3. Preparar la nueva carpeta por separado; no extraer una versión sobre otra activa.
+4. Conservar userData, normalmente `%APPDATA%\Atlas` en Windows, y abrir una sola copia.
+
+No hay exclusión atómica ni migración/reparación automática. No iniciar Atlas mientras
+se copian o eliminan sus binarios. Sobrescribir archivos activos puede dejar un paquete
+parcial o inconsistente. La compatibilidad de upgrade/downgrade de datos no está validada.
+
+userData contiene configuración, credenciales cifradas, memoria, journal, logs y caché,
+fuera de ASAR y del directorio del paquete. No copiar esos datos al paquete ni publicarlos.
+El cifrado está ligado al contexto del sistema/usuario; copiar userData a otra cuenta o
+equipo no garantiza descifrado. Retirar una carpeta de binarios no requiere borrar userData.
+
+## NSIS diferido y diagnósticos
+
+`npm run desktop:installer:win` devuelve error sin compilar ni generar un instalador.
+La configuración `build.nsis` conservada es investigación histórica; el único target
+Windows por defecto es `dir`. No ejecutar electron-builder con un target NSIS explícito:
+el flujo estándar puede cerrar procesos y no cumple la política de Atlas.
+
+Los modos `--summary` y `--coverage` de `scripts/check-atlas-processes.ts` son herramientas
+de investigación. En Windows, Win32/CIM mantuvieron procesos inaccesibles e INDETERMINATE.
+No son autorización para modificar archivos ni ofrecen exclusión frente a nuevos arranques.
+La investigación queda detenida en V0.6.2. Detalle en
+`docs/acceptance/atlas-v0.6.2-process-detector.md`.
 
 ## Desarrollo en Windows 11
 
@@ -10,7 +63,7 @@ Requisitos: Node.js 22.12 o posterior, dependencias instaladas con `npm ci` y la
 
 ```powershell
 cd $env:USERPROFILE\jarvis-assistant
-git switch v0.6.1-desktop-companion
+git switch v0.6.2-windows-packaging
 npm ci
 npm run desktop:dev
 ```
@@ -23,7 +76,7 @@ El comando construye Web, servidor/Core, extensión y Desktop/preload; después 
 Electron Main
  ├─ System Tray + lifecycle coordinator/runtime
  ├─ BrowserWindow sandboxed ── preload allowlisted ── Renderer (UI + WebRTC/audio)
- └─ proceso hijo propio ── HTTP 127.0.0.1:puerto aleatorio ── Atlas Core
+ └─ UtilityProcess propio, código en ASAR ── HTTP 127.0.0.1:puerto aleatorio ── Atlas Core
                            header efímero por lanzamiento
 ```
 

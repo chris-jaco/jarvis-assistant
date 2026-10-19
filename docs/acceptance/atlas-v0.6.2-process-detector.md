@@ -1,5 +1,11 @@
 # Windows process detector — personal preview
 
+> Cierre V0.6.2: investigación conservada, no autorización de mantenimiento.
+> Win32 y CIM dejaron 149 procesos inciertos sin rutas adicionales en Windows 11.
+> La investigación queda diferida; NSIS no está soportado. Un resultado ABSENT es
+> una observación del detector, no exclusión atómica ni permiso para sobrescribir
+> binarios. Ver `atlas-v0.6.2-windows.md` y `../DESKTOP.md`.
+
 Read-only tool, independent of NSIS and Atlas lifecycle. No termination, installation,
 uninstallation, elevation or persistent configuration changes. No dependencies added.
 PowerShell compiles an in-memory Win32 adapter with Add-Type (compiler temporary files

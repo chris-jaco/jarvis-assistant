@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const root = resolve(import.meta.dirname, '../..');
 const packageDocument = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
@@ -11,16 +12,16 @@ test('Windows packaging preserves stable identity, ASAR, official icon and diagn
   assert.equal(packageDocument.build.appId, 'com.atlas.desktop');
   assert.equal(packageDocument.build.productName, 'Atlas');
   assert.equal(packageDocument.build.asar, true);
-  assert.deepEqual(packageDocument.build.win.target, ['dir', { target: 'nsis', arch: ['x64'] }]);
+  assert.deepEqual(packageDocument.build.win.target, ['dir']);
   assert.equal(packageDocument.build.win.icon, 'public/brand/atlas-app.ico');
   assert.doesNotMatch(JSON.stringify(packageDocument.build), /publish|sign|updat/i);
 });
 
-test('Windows installer is assisted, per-user and preserves userData', () => {
+test('NSIS generation is blocked; dormant configuration remains research only', () => {
   assert.equal(packageDocument.scripts['desktop:package:win'],
     'npm run desktop:build && electron-builder --win dir --publish never');
   assert.equal(packageDocument.scripts['desktop:installer:win'],
-    'npm run desktop:build && electron-builder --win nsis --x64 --publish never');
+    'node scripts/desktop-installer-deferred.mjs');
   assert.deepEqual(packageDocument.build.nsis, {
     oneClick: false,
     perMachine: false,
@@ -35,8 +36,15 @@ test('Windows installer is assisted, per-user and preserves userData', () => {
     deleteAppDataOnUninstall: false,
     runAfterFinish: true
   });
-  // Standard NSIS process termination remains a blocking gap until the guard milestone.
-  // These manifest checks do not establish installation or uninstallation safety.
+  // This configuration is retained for research, not an approved installer.
+  // Default builds target dir only; the public installer command fails before building.
+});
+
+test('deferred installer entrypoint fails explicitly without invoking a build', () => {
+  const execution = spawnSync(process.execPath, [resolve(root, 'scripts/desktop-installer-deferred.mjs')], { encoding: 'utf8' });
+  assert.equal(execution.status, 1);
+  assert.equal(execution.stdout, '');
+  assert.match(execution.stderr, /ATLAS_NSIS_DEFERRED/);
 });
 
 test('package manifest includes each runtime boundary and excludes private development data', () => {

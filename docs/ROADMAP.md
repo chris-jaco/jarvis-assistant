@@ -1,8 +1,8 @@
 # ATLAS — Roadmap maestro
 
-**Actualizado:** 17 de octubre de 2026
+**Actualizado:** 19 de octubre de 2026
 **Repositorio:** `chris-jaco/jarvis-assistant`  
-**Rama de desarrollo actual:** `v0.6.1-desktop-companion`
+**Rama de desarrollo actual:** `v0.6.2-windows-packaging`
 **Baseline aceptada V0.5.3.6A:** `168a468b26823df5dcfb5c2a32842463022bc77f`
 
 ## Visión
@@ -51,7 +51,7 @@ Atlas es un asistente personal de IA, principalmente por voz, con memoria contex
 |---|---|---|---|
 | V0.5.3.6B | WhatsApp Consequential Actions | Escritura y envío seguro con autorizaciones separadas y protección de duplicados | B.2 PARTIAL / DEFERRED; B.3 y Send bloqueados |
 | V0.6.1 | Desktop Companion | Preview local Windows con Electron, Core supervisado, lifecycle, Tray y estabilidad | Completada; cierre documental preparado |
-| V0.6.2 | Windows Packaging | Empaquetado e instalador Windows | Planificada |
+| V0.6.2 | Windows Packaged Preview | Atlas.exe en win-unpacked, ASAR, credenciales cifradas y bootstrap privado | Cerrada como preview personal; NSIS diferido |
 | V0.6.3 | Local Wake Word | Wake word local con garantías de privacidad y ownership de micrófono | Planificada |
 | V0.6.4 | Always-on Companion | Companion residente y endurecido para uso prolongado | Planificada |
 | V0.7 | Productivity Integrations | Notion, Clockify, Instantly, Onabox, HubSpot, Lovable y otras | Alcance por definir |
@@ -102,15 +102,34 @@ El registro detallado está en `docs/acceptance/atlas-v0.6.1-windows.md`. V0.6.1
 
 #### Próximas fases
 
-- **V0.6.2 — Windows Packaging:** empaquetado, instalador y preparación de distribución.
+- **V0.6.2 — Windows Packaged Preview:** cerrada con `win-unpacked`; instalador NSIS y distribución pública diferidos.
 - **V0.6.3 — Local Wake Word:** activación local, privacidad, consumo y ownership inequívoco del micrófono.
 - **V0.6.4 — Always-on Companion:** operación residente prolongada y hardening adicional.
 
 #### Límites vigentes
 
 - Preservar Tool Registry, Confirmation Engine, memoria, Chrome Bridge, journal y permisos existentes.
-- Firma, updater y almacenamiento seguro para distribución se resolverán en V0.6.2, no en esta preview.
+- V0.6.2 incorpora credenciales cifradas para uso personal; firma, updater e instalador soportado quedan diferidos, sin compromiso de versión.
 - B.2 permanece `PARTIAL / DEFERRED`; B.3 y Send están bloqueados. Desktop no introduce rutas alternativas para escribir o enviar en WhatsApp.
+
+### Cierre V0.6.2 — Windows Packaged Preview
+
+Salida soportada: `release/win-unpacked/Atlas.exe`, distribuida junto con toda su carpeta,
+para uso personal Windows 11. Incluye Main/Core desde ASAR, runtime independiente del
+repositorio, primera configuración, credenciales cifradas, bootstrap privado Main–Core,
+memoria persistente, voz Realtime, Tray/lifecycle e iconos oficiales.
+
+NSIS queda diferido: el flujo estándar puede cerrar procesos y no existe exclusión
+adecuada frente a Atlas activo. Win32 y CIM mantuvieron 149 procesos inciertos en la
+aceptación real; CIM no recuperó rutas adicionales. No continuar esa investigación en
+este hito. Los diagnósticos publicados son herramientas de investigación, no autorización
+para mantenimiento. `desktop:installer:win` está bloqueado y `dir` es el único target
+Windows por defecto; la configuración NSIS residual no es un instalador aprobado.
+
+Sin updater, autostart, wake word, firma/distribución pública ni tag/GitHub Release.
+No sobrescribir ni borrar archivos activos; salir mediante «Salir de Atlas» y conservar
+userData separado del paquete. Ver `docs/DESKTOP.md` y
+`docs/acceptance/atlas-v0.6.2-windows.md` para operación, evidencia y límites.
 
 ### V0.7 — Productivity Integrations
 Plataformas candidatas, **sin alcance cerrado**:
@@ -156,4 +175,4 @@ Estas capacidades no tienen versión detallada ni compromiso de implementación 
 - **Definido:** Windows Desktop con backend local, lifecycle y System Tray; identidad visual oficial; futura evolución separada de empaquetado, wake word y always-on.
 - **Pendiente:** modelos concretos, alcance final de integraciones, backend remoto para móvil y recuperación futura de B.2. Send real continúa bloqueado.
 
-**Orden vigente:** cerrar V0.6.1 Desktop Companion → V0.6.2 empaquetado Windows → V0.6.3 wake word local → V0.6.4 always-on companion → V0.7 integraciones → V0.8 móvil → Mark 1 proactivo → hogar/offline/router → Mark 2. B.2 sigue diferida y su reapertura requiere una decisión explícita posterior.
+**Orden vigente:** V0.6.1 Desktop Companion completada → V0.6.2 Windows Packaged Preview cerrada → V0.6.3 wake word local → V0.6.4 always-on companion → V0.7 integraciones → V0.8 móvil → Mark 1 proactivo → hogar/offline/router → Mark 2. B.2 sigue diferida y su reapertura requiere una decisión explícita posterior.
