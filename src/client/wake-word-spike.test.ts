@@ -36,7 +36,7 @@ test('corrupt bytes, wrong size and invalid WASM fail before inference', async (
 test('initialized PCM detector emits a bounded event and wipes input; simulated engine is not acoustic acceptance', () => {
   const input = new Float32Array([.5, -.5]);
   const d = new PcmDetector({ processAudio: () => [{ label: 'Atlas' }], dispose() {} }, () => 100);
-  assert.deepEqual(d.process(input), { detected: true, engineMs: 0, pcmMs: .125 });
+  assert.deepEqual(d.process(input), { detected: true, rawHits: 1, suppressedHits: 0, engineMs: 0, pcmMs: .125 });
   assert.deepEqual([...input], [0, 0]); d.stop();
 });
 test('invalid PCM never reaches inference', () => {
@@ -126,6 +126,7 @@ test('worker blocks network APIs after local initialization and clears heap on s
     .replace("await import('/assets/runtime/core.js')", 'globalThis.__api');
   const messages: unknown[] = []; let network = 0, disposed = 0, closed = false;
   const heap = new Uint8Array([1, 2, 3]);
+  let appliedConfig: any, engineCalls = 0;
   const self: { onmessage?: (e: unknown) => Promise<void>; postMessage(v: unknown): void; close(): void } = {
     postMessage: v => messages.push(v), close: () => { closed = true; }
   };
@@ -136,12 +137,15 @@ test('worker blocks network APIs after local initialization and clears heap on s
     fetch() { network++; },
     __api: {
       initKWSModule: async () => ({ HEAPU8: heap, FS: { writeFile() {} } }),
-      createKeywordSpotter: () => ({ processAudio: () => [], dispose() { disposed++; } })
+      createKeywordSpotter: (_module: unknown, config: any) => { appliedConfig = config; return { processAudio: () => engineCalls++ % 2 === 0 ? [{ label: 'Atlas' }] : [], dispose() { disposed++; } }; }
     }
   });
   vm.runInContext(source, context);
-  await self.onmessage!({ data: { type: 'init', keywords: [['A']], threshold: .25, files: Object.fromEntries(['encoder.onnx', 'decoder.onnx', 'joiner.onnx', 'tokens.txt'].map(n => [`model/${n}`, new ArrayBuffer(1)])) } });
+  await self.onmessage!({ data: { type: 'init', keywords: [['A']], threshold: .05, files: Object.fromEntries(['encoder.onnx', 'decoder.onnx', 'joiner.onnx', 'tokens.txt'].map(n => [`model/${n}`, new ArrayBuffer(1)])) } });
   assert.equal((messages[0] as { type: string }).type, 'ready');
+  assert.equal(appliedConfig.keywords[0].threshold, .05); assert.equal(appliedConfig.keywords[0].score, 1);
+  assert.equal(appliedConfig.maxActivePaths, 4);
+  assert.equal((messages[0] as any).config.threshold, .05);
   for (const expression of ["fetch('https://outside.invalid')", 'new XMLHttpRequest()', 'new WebSocket("wss://outside.invalid")']) {
     assert.throws(() => vm.runInContext(expression, context), /NETWORK_DISABLED/);
   }
@@ -159,17 +163,21 @@ test('worker blocks network APIs after local initialization and clears heap on s
   for (const block of h.sent) directPort.onmessage({ data: block });
   assert.equal(h.processor.pending.size, 0);
   assert.equal(messages.filter((m: any) => m.type === 'processed').length, 4);
+  const stats = (messages.filter((m: any) => m.type === 'processed').at(-1) as any).diagnostics;
+  assert.equal(stats.rawHits, 2); assert.equal(stats.withHits.blocks, 2); assert.equal(stats.withoutHits.blocks, 2);
+  assert.ok(stats.beforeRecycleMaxMs >= stats.engineMaxMs);
+  assert.doesNotMatch(JSON.stringify(stats), /pcm|tokens|private|credential|https:/i);
   directPort.onmessage({ data: { type: 'pcm', sequence: 99, pcm: new ArrayBuffer(6400) } });
   assert.equal((messages.at(-1) as any).code, 'AUDIO_PROCESSING_FAILED');
   await self.onmessage!({ data: { type: 'stop' } });
   assert.equal(disposed, 1); assert.equal(closed, true); assert.deepEqual([...heap], [0, 0, 0]);
 });
 
-function workletHarness() {
+function workletHarness(clock?: { now(): number }) {
   let Processor: any;
   const control: any[] = [], sent: any[] = [];
   const context = vm.createContext({
-    Float32Array, ArrayBuffer,
+    Float32Array, ArrayBuffer, performance: clock,
     AudioWorkletProcessor: class { port = { onmessage: undefined, postMessage: (v: unknown) => control.push(v) }; },
     registerProcessor: (_name: string, processor: unknown) => { Processor = processor; }
   });
@@ -219,7 +227,9 @@ test('exhausted bounded pool reports overrun instead of discarding audio, then r
   const h = workletHarness();
   for (let i = 0; i < 4; i++) h.processor.process([[new Float32Array(1600)]]);
   assert.equal(h.processor.process([[new Float32Array(128)]]), false);
-  assert.deepEqual({ ...h.control[1] }, { type: 'overrun', code: 'AUDIO_OVERRUN', produced: 4, outstanding: 4 });
+  assert.equal(h.control.at(-1).code, 'AUDIO_OVERRUN');
+  assert.equal(h.control.at(-1).diagnostics.highWater, 4);
+  assert.equal(h.control.at(-1).diagnostics.outstanding, 4);
   assert.equal(h.processor.active, false); assert.equal(h.port.closed, true);
   assert.equal(h.processor.buffer, null); assert.equal(h.processor.free.length, 0);
   assert.equal(h.processor.process([[new Float32Array(1600)]]), false);
@@ -237,7 +247,7 @@ async function browserHarness(options: { deferMicrophone?: boolean; deferClose?:
   const source = readFileSync(resolve(import.meta.dirname, '../../experiments/wake-word/browser.ts'), 'utf8');
   const js = (await transform(source, { loader: 'ts', format: 'esm' })).code.replace(/^import .*\n/gm, '');
   const elements = new Map<string, any>();
-  for (const id of ['load', 'listen', 'stop', 'status', 'metrics', 'events', 'threshold', 'accent', 'distance', 'noise']) elements.set(id, { disabled: false, textContent: '', value: id === 'threshold' ? '.25' : 'test' });
+  for (const id of ['load', 'listen', 'stop', 'status', 'metrics', 'events', 'diagnostics', 'threshold', 'accent', 'distance', 'noise']) elements.set(id, { disabled: false, textContent: '', value: id === 'threshold' ? '.25' : 'test' });
   let workers = 0, requests = 0, closedContexts = 0, terminated = 0, connected = 0;
   let node: any;
   let resolveMicrophone!: (v: unknown) => void, resolveClose!: () => void;
@@ -313,4 +323,35 @@ test('cancelled capture stops a late microphone stream without opening a second 
   await h.stop(); h.microphoneReady(); await starting;
   assert.equal(h.track.readyState, 'ended'); assert.equal(h.counts().connected, 0);
   assert.equal(h.counts().closedContexts, 1); assert.equal(h.counts().terminated, 1);
+});
+
+
+test('accepted runtime hits and cooldown suppression remain observable without changing acceptance', () => {
+  let clock = 0;
+  const d = new PcmDetector({ processAudio: () => [{ label: 'Atlas' }, { label: 'Atlas' }], dispose() {} }, () => clock);
+  const first = d.process(new Float32Array([0]));
+  assert.equal(first.rawHits, 2); assert.equal(first.suppressedHits, 1); assert.equal(first.detected, true);
+  clock = 500;
+  const second = d.process(new Float32Array([0]));
+  assert.equal(second.rawHits, 2); assert.equal(second.suppressedHits, 2); assert.equal(second.detected, false);
+  clock = 1500; assert.equal(d.process(new Float32Array([0])).detected, true); d.stop();
+});
+
+test('transport diagnostics distinguish audio-clock and wall-clock circulation, preserve peaks and bound history', () => {
+  let time = 0;
+  const h = workletHarness({ now: () => time });
+  for (let i = 0; i < 4; i++) h.processor.process([[new Float32Array(1600)]]);
+  time = 250; h.recycle(h.sent[0]);
+  let stats = h.processor.snapshot();
+  assert.equal(stats.returnAudioMaxMs, 300); assert.equal(stats.returnWallMaxMs, 250);
+  assert.equal(stats.highWater, 4);
+  for (const block of h.sent.slice(1)) h.recycle(block);
+  for (let i = 0; i < 30; i++) { h.processor.process([[new Float32Array(1600)]]); h.recycle(h.sent.at(-1)); }
+  stats = h.processor.snapshot();
+  assert.equal(stats.recent.length, 16); assert.equal(stats.returnWallMaxMs, 250);
+  assert.equal(stats.produced, 34); assert.equal(stats.returned, 34);
+  assert.doesNotMatch(JSON.stringify(stats), /pcm|tokens|command|secret|https:/i);
+  const noWallClock = workletHarness();
+  noWallClock.processor.process([[new Float32Array(1600)]]); noWallClock.recycle(noWallClock.sent[0]);
+  assert.equal(noWallClock.processor.snapshot().returnWallMaxMs, null);
 });

@@ -4,6 +4,10 @@ import type { Manifest } from './core.js';
 const button = (id: string) => document.getElementById(id) as HTMLButtonElement;
 const load = button('load'), listen = button('listen'), stopButton = button('stop');
 const status = document.getElementById('status')!, metrics = document.getElementById('metrics')!, events = document.getElementById('events')!;
+const diagnosticView = document.getElementById('diagnostics')!;
+let diagnostic: { configuration?: unknown; worker?: unknown; transport?: unknown; failure?: unknown } = {};
+let inFlight: { sequence: number; startedAt: number } | undefined;
+function showDiagnostics() { diagnosticView.textContent = JSON.stringify(diagnostic, null, 2); }
 let scope: ResourceScope | undefined, worker: Worker | undefined, worklet: AudioWorkletNode | undefined;
 let stream: MediaStream | undefined, generation = 0, live = false, preparing = false;
 let stopping: Promise<void> | undefined;
@@ -42,6 +46,7 @@ function render(wasmHeapBytes = 0) {
 load.onclick = async () => {
   if (scope || preparing || stopping) return;
   count = processedMs = pcmMs = blocks = highWater = 0; engineTimes.length = deliveries.length = 0; events.textContent = '';
+  diagnostic = {}; inFlight = undefined; showDiagnostics();
   preparing = true; load.disabled = true; stopButton.disabled = false;
   const current = ++generation, resources = new ResourceScope(); scope = resources;
   status.textContent = 'PREPARANDO — micrófono cerrado';
@@ -69,7 +74,10 @@ load.onclick = async () => {
       resources.add(() => { clearTimeout(timeout); reject(new SpikeError('CANCELLED')); });
       engineWorker.onmessage = ({ data: message }) => {
         if (current !== generation) return;
-        if (message.type === 'ready') { render(message.wasmHeapBytes); resolve(); }
+        if (message.type === 'ready') {
+          diagnostic.configuration = { model: manifest.model, ...message.config };
+          showDiagnostics(); render(message.wasmHeapBytes); resolve();
+        }
         if (message.type === 'error') reject(new SpikeError('ENGINE_INITIALIZATION_FAILED'));
       };
       engineWorker.onerror = () => reject(new SpikeError('ENGINE_INITIALIZATION_FAILED'));
@@ -117,7 +125,13 @@ listen.onclick = async () => {
     node.port.onmessage = ({ data }) => {
       if (current !== generation) return;
       if (data.type === 'connected') { connectedWorklet(); return; }
+      if (data.type === 'transport') { diagnostic.transport = data.diagnostics; showDiagnostics(); return; }
       if (data.type === 'overrun') {
+        diagnostic.transport = data.diagnostics;
+        diagnostic.failure = { code: data.code, produced: data.produced, outstanding: data.outstanding,
+          lastStartedSequence: inFlight?.sequence ?? null,
+          sinceStartObservedMs: inFlight ? Math.max(0, performance.timeOrigin + performance.now() - inFlight.startedAt) : null };
+        showDiagnostics();
         void stop(data.code === 'AUDIO_OVERRUN' ? `AUDIO_OVERRUN — producidos: ${data.produced}; pendientes: ${data.outstanding}/4` : 'AUDIO_PROTOCOL_ERROR');
       }
     };
@@ -126,7 +140,9 @@ listen.onclick = async () => {
       if (data.type === 'capture-ready') { connectedWorker(); return; }
       if (data.type === 'error') { rejectConnection(new SpikeError('ENGINE_FAILED')); void stop('ENGINE_FAILED'); return; }
       if (!live) return;
+      if (data.type === 'processing') { inFlight = { sequence: data.sequence, startedAt: data.startedAt }; return; }
       if (data.type !== 'processed') return;
+      inFlight = undefined; diagnostic.worker = data.diagnostics;
       if (data.sequence !== blocks) { void stop('AUDIO_SEQUENCE_ERROR'); return; }
       blocks++; processedMs += data.engineMs; pcmMs += data.pcmMs; highWater = Math.max(highWater, data.outstanding);
       // Bounded scalar telemetry only. Never retain audio or transcripts.
@@ -138,6 +154,7 @@ listen.onclick = async () => {
         events.textContent = `Atlas #${count} — ${scenario}\n` + events.textContent!.split('\n').slice(0, 19).join('\n');
       }
       render(data.wasmHeapBytes);
+      if (blocks % 10 === 0 || data.detected) showDiagnostics();
     };
     engineWorker.onerror = () => { if (current === generation) { rejectConnection(new SpikeError('ENGINE_FAILED')); void stop('ENGINE_FAILED'); } };
     engineWorker.postMessage({ type: 'connect', port: channel.port1 }, [channel.port1]);

@@ -207,3 +207,93 @@ ni tracks residuales. Verificar también la parada por ocultar la pestaña. Las
 pruebas automatizadas ejercitan ráfagas, bloqueo temporal del consumidor, orden de
 muestras, límite del pool y liberación con adaptadores; la nueva ruta real Windows
 y la precisión siguen pendientes de aceptación manual.
+
+## Diagnóstico de threshold y saturación (sin PCM)
+
+La nueva evidencia Windows relaciona threshold <0.25 con AUDIO_OVERRUN; todavía
+no demuestra causalidad. En el código upstream consultado de
+[TransducerKeywordDecoder](https://github.com/k2-fsa/sherpa-onnx/blob/master/sherpa-onnx/csrc/transducer-keyword-decoder.cc),
+`ys_prob >= matched_state->ac_threshold` se evalúa al aceptar un keyword, junto
+con trailing blanks. La selección TopK usa `max_active_paths`, no ese threshold.
+No es un porcentaje calibrado de confianza ni un ajuste directo del tamaño del
+beam. Cambiar aceptación cambia resets e historia de decodificación y puede
+alterar indirectamente el trabajo. Esta lectura del upstream actual no acredita
+la revisión C++ exacta compilada dentro del WASM comunitario 0.3.0; su paquete
+no proporciona esa correspondencia completa. El glue JS descargado sí se auditó:
+serializa cada secuencia con `:score #threshold @id`, procesa el stream y hace
+reset tras cada detección aceptada, antes de que el harness aplique cooldown.
+
+La configuración informada al quedar LISTO es la enviada al constructor del
+motor: threshold efectivo para esa carga, score=1, maxActivePaths=4, cooldown=1000
+ms, tokens del manifiesto y revisión del modelo. No es una lectura de retorno de
+la configuración C++ ni de probabilidades. Modificar el input después de cargar
+no altera el motor. `atlas` y `ATLAS` son variantes ortográficas del modelo
+español, no selectores de pronunciación española/inglesa. El codificador
+SentencePiece es simplificado; confirmar los tokens frente al tokenizer original
+sigue siendo una comprobación independiente pendiente.
+
+El panel Diagnóstico muestra solamente configuración de keyword y métricas:
+
+- `engineMaxMs`: máximo de inferencia de todos los bloques completados de la
+  sesión. El p95 de la interfaz sigue usando los últimos 1000 bloques.
+- `beforeRecycleMaxMs`: máximo desde entrada al handler del worker hasta antes
+  de postear la devolución; incluye validación, inferencia y limpieza del PCM.
+- `recyclePostMaxMs`: coste máximo de la llamada postMessage de devolución.
+  **No equivale al tiempo hasta que AudioWorklet recibe el buffer.**
+- `withHits`/`withoutHits`: cantidad de bloques y máximo de inferencia según
+  tengan hits aceptados por el runtime. No son candidatos rechazados ni una
+  medida aislada del coste de reset.
+- `rawHits` y `suppressedHits`: hits aceptados por el runtime y luego descartados
+  por cooldown. No se cambió el cooldown ni la política de detección.
+- Transporte: producidos, devueltos, pendientes, máximo pendientes y hasta 16
+  eventos numéricos de envío/devolución. `returnAudioMaxMs` y `oldestAudioMs`
+  miden edad según muestras procesadas, a 16 kHz. El reloj de audio puede avanzar
+  en ráfagas: **no se debe interpretar como tiempo de reloj de pared**.
+- `returnWallMaxMs` y `oldestWallMs` usan performance.now en el propio worklet
+  sólo si ese reloj está disponible. En caso contrario son null, no cero.
+- Al fallar, se conserva el snapshot del pool y el último inicio de bloque
+  observado por la UI. `sinceStartObservedMs` compara relojes performance con
+  timeOrigin y también incluye demoras de entrega a la UI. No prueba cuánto
+  tiempo ejecutó CPU el worker.
+
+La UI conserva el último snapshot completado del worker. Una inferencia que
+queda bloqueada y se termina al parar puede no devolver duración final: no
+presentar su tiempo como medido ni retrasar liberar el micrófono para obtenerlo.
+La telemetría del transporte se envía cada 10 devoluciones y siempre al fallar;
+los historiales están limitados a 16 eventos sin PCM, transcripciones, rutas de
+usuario ni mensajes crudos. No se guarda ni exporta automáticamente ningún dato.
+Copiar manualmente el panel después de Detener o AUDIO_OVERRUN. Se añade un
+mensaje escalar al iniciar cada bloque; la instrumentación tiene coste y debe
+mantenerse igual al comparar thresholds.
+
+No hay ajuste de buffers ni de inferencia en esta instrumentación. El pool sigue
+siendo de cuatro buffers; ante agotamiento se detiene explícitamente y libera
+recursos. Una causa plausible es una cola de latencias largas/ráfagas, ausente de
+la estadística p95 anterior, eventualmente relacionada con más hits y resets.
+No se debe afirmar que bajar threshold aumenta necesariamente candidatos o CPU.
+
+Prueba Windows controlada:
+
+1. Usar este mismo harness, modelo/revisión, micrófono, distancia 0.5 m y ES-AR.
+   Cerrar otras capturas de micrófono y mantener la página visible.
+2. Probar secuencia de thresholds **0.25 → 0.15 → 0.25 → 0.05 → 0.25**.
+   Detener, cambiar threshold y volver a cargar el motor en cada serie; comprobar
+   la configuración del panel. Repetir en orden inverso para separar efecto de
+   orden, calentamiento, temperatura y carga del equipo.
+3. En cada serie dejar 30 s de silencio, hacer 20 intentos de «Atlas» uno cada
+   4 s y terminar con 30 s de silencio. No cambiar score, tokens ni cooldown.
+4. Anotar intentos/aciertos, hits brutos/suprimidos, máximos, configuración y
+   snapshots del panel. Si falla, registrar en qué fase, no continuar el ensayo
+   ni ocultar el fallo sumando los resultados al siguiente.
+5. Si falla también en silencio sin hits, no atribuirlo a procesamiento de
+   eventos de detección. Si picos coinciden con hits/reset, priorizar analizar
+   esa ruta; si aumenta la circulación sin picos del worker, analizar scheduling
+   y devoluciones. La correlación de bloques no sustituye una traza temporal.
+6. En el mejor ajuste estable, añadir negativos con conversación sin la palabra,
+   palabras parecidas, música y TV; la validación prolongada de falsos positivos
+   y los 100 intentos independientes siguen pendientes.
+
+No reducir capturas a un umbral permanentemente restrictivo para ocultar fallos,
+no descartar PCM ni ampliar el pool sin un presupuesto y evidencia. La corrección
+mínima de rendimiento se decidirá con estos datos; esta etapa corrige la falta
+de observabilidad y mantiene la parada segura.

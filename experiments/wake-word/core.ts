@@ -55,11 +55,13 @@ export class PcmDetector {
       const start = this.now();
       const hits = this.engine.processAudio(samples, sampleRate);
       const engineMs = Math.max(0, this.now() - start);
-      let detected = false;
-      for (const hit of hits) if (hit.label === 'Atlas' && this.now() - this.lastHit >= this.cooldownMs) {
-        detected = true; this.lastHit = this.now();
+      let detected = false, rawHits = 0, suppressedHits = 0;
+      for (const hit of hits) if (hit.label === 'Atlas') {
+        rawHits++;
+        if (this.now() - this.lastHit >= this.cooldownMs) { detected = true; this.lastHit = this.now(); }
+        else suppressedHits++;
       }
-      return { detected, engineMs, pcmMs: samples.length / 16 };
+      return { detected, rawHits, suppressedHits, engineMs, pcmMs: samples.length / 16 };
     } catch (error) {
       if (error instanceof SpikeError) throw error;
       throw new SpikeError('ENGINE_FAILED');
