@@ -34,7 +34,7 @@ export async function startServer(port = 4317) {
     for (const entry of assets.files) files.set(...entry);
     assetsReady = true;
   } catch { /* Serve the harness, but loading/recording remains blocked until preparation succeeds. */ }
-  for (const name of ['index.html', 'worker.mjs', 'pcm-worklet.js', 'browser.ts', 'core.ts']) {
+  for (const name of ['index.html', 'worker.mjs', 'pcm-worklet.js', 'browser.ts', 'core.ts', 'signal.ts']) {
     const text = await readFile(resolve(here, name), 'utf8');
     files.set('/' + name.replace(/\.ts$/, '.js'), Buffer.from(name.endsWith('.ts')
       ? (await transform(text, { loader: 'ts', target: 'es2022', format: 'esm' })).code : text));

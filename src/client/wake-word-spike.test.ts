@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import vm from 'node:vm';
 import { checkManifest, verifyBytes, PcmDetector, ResourceScope, requiredAssets } from '../../experiments/wake-word/core.js';
+import { measurePcm, SignalTotals } from '../../experiments/wake-word/signal.js';
 import type { Manifest } from '../../experiments/wake-word/core.js';
 
 const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
@@ -122,7 +123,7 @@ test('worker blocks network APIs after local initialization and clears heap on s
   // Execute the actual worker protocol with an injected engine; this is not model/acoustic validation.
   const root = resolve(import.meta.dirname, '../..');
   const source = readFileSync(resolve(root, 'experiments/wake-word/worker.mjs'), 'utf8')
-    .replace(/^import .*\n/, '')
+    .replace(/^import .*\n/gm, '')
     .replace("await import('/assets/runtime/core.js')", 'globalThis.__api');
   const messages: unknown[] = []; let network = 0, disposed = 0, closed = false;
   const heap = new Uint8Array([1, 2, 3]);
@@ -133,7 +134,7 @@ test('worker blocks network APIs after local initialization and clears heap on s
   const { SpikeError } = await import('../../experiments/wake-word/core.js');
   const context = vm.createContext({
     self, console: { log() {}, info() {}, warn() {}, error() {}, debug() {} },
-    PcmDetector, SpikeError, Uint8Array, Float32Array, ArrayBuffer, performance,
+    PcmDetector, SpikeError, measurePcm, SignalTotals, Uint8Array, Float32Array, ArrayBuffer, performance,
     fetch() { network++; },
     __api: {
       initKWSModule: async () => ({ HEAPU8: heap, FS: { writeFile() {} } }),

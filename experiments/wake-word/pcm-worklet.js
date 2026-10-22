@@ -6,6 +6,7 @@ class AtlasPcm extends AudioWorkletProcessor {
     this.free = Array.from({ length: 4 }, () => new Float32Array(1600));
     this.buffer = null; this.offset = 0; this.sequence = 0; this.pending = new Map(); this.active = true;
     this.frames = 0; this.returned = 0; this.highWater = 0; this.returnAudioMaxMs = 0; this.returnWallMaxMs = null; this.recent = [];
+    this.observedChannels = 0; this.blockChannels = new Set();
     this.port.onmessage = ({ data }) => {
       if (data?.type === 'connect' && !this.audioPort) {
         this.audioPort = data.port;
@@ -53,19 +54,24 @@ class AtlasPcm extends AudioWorkletProcessor {
     if (!this.active) return false;
     const channel = inputs[0]?.[0];
     if (!channel) return true;
+    this.observedChannels = inputs[0].length;
     if (!this.audioPort) { this.fail('AUDIO_PROTOCOL_ERROR'); return false; }
     for (const sample of channel) {
       if (!this.buffer) {
         this.buffer = this.free.pop();
         if (!this.buffer) { this.fail('AUDIO_OVERRUN'); return false; }
       }
+      this.blockChannels.add(this.observedChannels);
       this.buffer[this.offset++] = sample; this.frames++;
       if (this.offset === 1600) {
         const sequence = this.sequence++;
         this.pending.set(sequence, { frame: this.frames, wall: this.wallNow() });
         this.highWater = Math.max(this.highWater, this.pending.size);
         this.record({ event: 'send', sequence, pending: this.pending.size });
-        this.audioPort.postMessage({ type: 'pcm', pcm: this.buffer.buffer, sequence, outstanding: this.pending.size }, [this.buffer.buffer]);
+        this.audioPort.postMessage({ type: 'pcm', pcm: this.buffer.buffer, sequence, outstanding: this.pending.size,
+          sampleRate: typeof sampleRate === 'number' ? sampleRate : 16000,
+          channels: this.blockChannels.size === 1 ? this.observedChannels : 0 }, [this.buffer.buffer]);
+        this.blockChannels.clear();
         this.buffer = null; this.offset = 0;
       }
     }

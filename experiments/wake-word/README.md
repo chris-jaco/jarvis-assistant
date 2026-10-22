@@ -297,3 +297,155 @@ No reducir capturas a un umbral permanentemente restrictivo para ocultar fallos,
 no descartar PCM ni ampliar el pool sin un presupuesto y evidencia. La corrección
 mínima de rendimiento se decidirá con estos datos; esta etapa corrige la falta
 de observabilidad y mantiene la parada segura.
+
+## Acoustic Pipeline Diagnostics: señal y WAV local
+
+No cambia la selección de canal, keyword, score, threshold, cooldown ni el pool.
+El diagnóstico añade `capture` con frecuencia/channels del track cuando el
+navegador los proporciona, frecuencia del AudioContext y DSP efectivo. No incluye
+labels, deviceId ni groupId. Una frecuencia del dispositivo de 48 kHz junto a
+AudioContext de 16 kHz es válida: el navegador hace esa conversión.
+
+`worker.signal` y los últimos 16 bloques numéricos muestran RMS, peak absoluto,
+porcentaje de muestras con |x| <= 1e-5, conteo con |x| >= .999 y muestras inválidas.
+El RMS agregado pondera energía por cantidad de muestras, no promedia RMS de
+bloques. Son indicadores orientativos:
+
+- DIGITAL_SILENCE: RMS cero; LOW_LEVEL: RMS menor a .001 (aproximadamente -60 dBFS).
+- NEAR_FULL_SCALE: muestras próximas al máximo; no demuestra clipping físico.
+- INVALID_PCM: no finitos o fuera de [-1,1]; UNEXPECTED_CHANNELS/RATE y
+  INCOMPLETE_BLOCK describen el formato observado.
+
+Estos indicadores no normalizan ni reparan señal y no añaden paradas por nivel
+bajo/clipping/canales. Las validaciones previas de PCM no finito/fuera de rango,
+protocolo y agotamiento se preservan: un bloque inválido no se entrega a WASM ni
+se descarta silenciosamente para continuar como si no hubiera ocurrido.
+
+AudioWorklet informa los canales de entrada de cada bloque; si cambian dentro
+un bloque informa cero como ambiguo. **Se sigue enviando el canal 0**, tal como
+antes: no se introdujo downmix en la captura. En una prueba sintética, canal 0
+silencioso + canal 1 con señal entrega silencio. Esto demuestra una limitación,
+no que la captura Windows haya sido estéreo. Revisar canales y RMS antes de
+proponer un cambio de selección o negociación de mono.
+
+### Preparar y ejecutar el WAV
+
+El WAV debe existir por decisión del usuario. No hay grabación automática ni
+endpoint de subida. Colocarlo manualmente bajo `.local` (ya ignorado por Git),
+por ejemplo `.local/wake-word-spike/audio/atlas-autorizado.wav`. Los symlinks se
+resuelven; se rechazan archivos que resuelvan fuera de `.local`. No añadir audio
+ni modelos al repositorio o a builds oficiales.
+
+Desde la raíz del repositorio en Windows, con assets previamente preparados:
+
+```powershell
+node --import tsx experiments/wake-word/offline.ts --audit-only
+node --import tsx experiments/wake-word/offline.ts .local/wake-word-spike/audio/atlas-autorizado.wav --threshold 0.05
+```
+
+El threshold debe coincidir con la prueba de navegador; el default sigue siendo
+0.25. Modelo, revisión, hashes y keywords se toman del mismo manifest verificado.
+Score=1, maxActivePaths=4, cooldown=1000 ms. Se valida RIFF/WAVE sin compresión:
+PCM16 LE o IEEE Float32; se rechazan headers/chunks inconsistentes, muestras
+inválidas y formatos extensibles/comprimidos. Límite: 32 MiB y cinco minutos.
+Preferir PCM16, mono, 16 kHz para la primera prueba y para comparar referencias.
+
+Si el WAV requiere conversión, autorizarla explícitamente:
+
+```powershell
+node --import tsx experiments/wake-word/offline.ts .local/wake-word-spike/audio/atlas-autorizado.wav --threshold 0.05 --convert
+```
+
+PCM16 se divide por 32768. La conversión opcional promedia canales y aplica un
+filtro Hann-sinc determinista de 64 taps para 16 kHz; no compensa ganancia ni
+recorta picos. Canales en contrafase pueden cancelarse. Overshoot fuera de rango
+se rechaza, no se normaliza. Se informa la conversión y SHA-256 del WAV original
+y del PCM float32 LE canónico. El audio convertido existe sólo en RAM; no se
+escribe. Esta conversión offline no sustituye la del navegador ni demuestra
+igualdad bit a bit con su resampler.
+
+Se transfieren las muestras a un worker Node dedicado y se entregan bloques
+ordenados de 1600 muestras; el último parcial conserva su longitud. No se añade
+silencio ni se llama InputFinished. Preparar el WAV con un segundo inicial,
+intentos conocidos y 1–2 segundos de silencio posterior a cada palabra. El worker
+bloquea APIs web de red tras cargar el WASM local, libera el motor/heap y el padre
+lo termina siempre, incluso en errores/timeout. No se instala Python ni un addon
+Electron. El script imprime únicamente resultados numéricos, configuración de
+keyword y hashes; errores cerrados sin rutas o mensajes nativos.
+
+La reproducción corre tan rápido como permite el motor. El cooldown conserva
+1000 ms pero usa posición de muestras para reproducibilidad, mientras que el
+harness de micrófono usa reloj de ejecución. **Comparar referencias por rawHits**,
+no por el contador visual afectado por cooldown. Eventos offline informan el
+bloque/posición de entrada donde se obtuvo el hit, no latencia acústica exacta.
+Los tiempos de inferencia no forman parte del resultado determinista. No comparar
+este ensayo con otro audio o con silencio añadido artificialmente.
+
+### Auditoría de «Atlas»
+
+La secuencia reportada `▁a / t / la / s` reconstruye `▁atlas`; por sí sola no
+prueba un defecto. `--audit-only` comprueba presencia de piezas en bpe.model,
+tokens/IDs válidos y únicos en tokens.txt, reconstrucción de Atlas y opciones de
+normalización (dummy prefix, espacios, mapa precompilado). No reemplaza keywords.
+También muestra qué produciría el encoder simplificado existente.
+
+STRUCTURALLY_CONSISTENT_REFERENCE_PENDING no es un PASS de tokenización canónica
+ni de dimensiones del ONNX. Es necesario comparar con SentencePiece original de
+la misma revisión, que no se ha instalado. El encoder actual sólo intenta ASCII
+`atlas` y `ATLAS`; no ofrece normalización general de acentos/espacios. No añadir
+«Átlas», frases o pronunciaciones alternativas para conseguir hits sin revisión.
+INCOMPATIBLE/AUDIT_INVALID bloquea la prueba offline y exige revisar evidencia,
+sin corregir automáticamente la keyword.
+
+En cloud siguen faltando bpe.model, tokens.txt y pesos del modelo español. No se
+pudo ejecutar la auditoría real ni un reconocimiento con WAV autorizado aquí:
+`MODEL_ASSETS_UNAVAILABLE` es el resultado esperado hasta preparar esos assets.
+Los tests sintéticos no validan pronunciación, modelos ni precisión.
+
+### Referencia nativa opcional
+
+La C API de sherpa-onnx permite los mismos pesos transducer. Se preparó
+`reference-kws.cc`, un ejecutable standalone de diagnóstico, sin incorporarlo a
+Atlas. Requiere un SDK/C API previamente disponible y compatible; **no se han
+instalado bibliotecas ni compilado este adaptador en este entorno**. Registrar
+revisión de sherpa-onnx/ONNX Runtime, flags y SHA-256 del ejecutable antes de usarlo.
+Una diferencia de versiones/provider/kernel puede producir diferencias numéricas.
+
+Su integración acepta sólo WAV original PCM16 mono 16 kHz, sin conversiones:
+
+```powershell
+node --import tsx experiments/wake-word/offline.ts .local/wake-word-spike/audio/atlas-autorizado.wav --threshold 0.05 --reference-exe C:\herramientas\atlas-kws-reference.exe
+```
+
+El helper pasa los mismos cuatro archivos verificados, las líneas
+`▁a t la s :1 #0.05 @sherpaw_0` (o las secuencias reales del manifest), CPU/un hilo,
+80 features, maxActivePaths=4 y trailing blanks=1. El adaptador alimenta los mismos
+bloques, resetea tras hit y no añade silencio. Sólo se aceptan respuestas JSON
+acotadas con cantidad de muestras/bloques esperada; no se muestran logs crudos.
+No ejecutar un binario desconocido: debe ser el adaptador revisado y compilado
+contra el SDK elegido. Su ejecución no se autoriza implícitamente al ejecutar
+el modo WASM normal.
+
+El CLI oficial consultado añade 0.8 s de silencio y llama InputFinished:
+[fuente](https://github.com/k2-fsa/sherpa-onnx/blob/master/sherpa-onnx/csrc/sherpa-onnx-keyword-spotter.cc).
+Por eso no se sustituye automáticamente por este adaptador ni se comparan sus
+resultados como idénticos al streaming actual. Si no existe SDK/exe aprobado,
+referencia NOT_CONFIGURED: comparación pendiente, no validación exitosa.
+
+### Aceptación Windows del checkpoint
+
+1. Micrófono: 10 s de silencio, 20 pronunciaciones ES-AR a 0.5 m y ritmo de una
+   cada 4 s. Registrar RMS/peak por bloque y agregado, near-zero/clipping,
+   canales/frecuencias, secuencias y transporte. Ningún identificador de dispositivo.
+2. Si RMS no cambia al hablar o el canal está en silencio, investigar captura
+   antes de variar threshold. Si hay dos canales, solicitar revisión antes de
+   cambiar selección/downmix. No amplificar automáticamente para forzar detección.
+3. Ejecutar auditoría de tokens y conservar resultados/hash. Resolver cualquier
+   incompatibilidad demostrada antes de cambiar keyword o modelo.
+4. Ejecutar dos veces el mismo WAV autorizado con iguales hashes/parámetros.
+   Raw hits, posiciones y muestras deben coincidir. Repetir sin Internet.
+5. Si existe referencia aprobada, comparar el mismo WAV canónico y configuración.
+   Si funciona WAV pero no micrófono, priorizar captura; si sólo funciona nativo,
+   priorizar runtime; si ambos fallan, priorizar tokens/modelo/acústica.
+6. Detener/liberar tras prueba y error; confirmar tracks terminados y sin workers
+   vivos. No declarar reconocimiento aprobado con mocks ni por tres hits aislados.

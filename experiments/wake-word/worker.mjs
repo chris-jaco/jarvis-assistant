@@ -1,6 +1,8 @@
 import { PcmDetector, SpikeError } from './core.js';
+import { measurePcm, SignalTotals } from './signal.js';
 
 let detector, module, audioPort, nextSequence = 0;
+const signalTotals = new SignalTotals();
 const diagnostics = { completed: 0, rawHits: 0, suppressedHits: 0, engineMaxMs: 0, recyclePostMaxMs: 0,
   beforeRecycleMaxMs: 0, withHits: { blocks: 0, maxMs: 0 }, withoutHits: { blocks: 0, maxMs: 0 }, recent: [] };
 function noNetwork() { throw new SpikeError('NETWORK_DISABLED'); }
@@ -36,8 +38,12 @@ self.onmessage = async ({ data }) => {
         const started = performance.now();
         try {
           if (block.type !== 'pcm' || block.sequence !== nextSequence++
-            || !(block.pcm instanceof ArrayBuffer) || block.pcm.byteLength !== 6400) throw new SpikeError('AUDIO_PROTOCOL_ERROR');
+            || !(block.pcm instanceof ArrayBuffer) || block.pcm.byteLength !== 6400) { diagnostics.sequenceError = true; throw new SpikeError('AUDIO_PROTOCOL_ERROR'); }
           self.postMessage({ type: 'processing', sequence: block.sequence, startedAt: performance.timeOrigin + started });
+          const signal = measurePcm(new Float32Array(block.pcm), block.sampleRate, block.channels);
+          signalTotals.add(signal);
+          diagnostics.signal = { lastBlock: signal, aggregate: signalTotals.snapshot(), sequence: block.sequence,
+            sequenceOrdered: true, inferenceRate: 16000, inferenceChannels: 1 };
           const result = detector.process(new Float32Array(block.pcm), 16000);
           // Recycle immediately on the direct port, before sending optional UI telemetry.
           const beforeRecycleMs = performance.now() - started, recycleStart = performance.now();
@@ -50,13 +56,13 @@ self.onmessage = async ({ data }) => {
           const group = result.rawHits ? diagnostics.withHits : diagnostics.withoutHits;
           group.blocks++; group.maxMs = Math.max(group.maxMs, result.engineMs);
           diagnostics.recent.push({ sequence: block.sequence, engineMs: result.engineMs, beforeRecycleMs, recyclePostMs,
-            rawHits: result.rawHits, suppressedHits: result.suppressedHits, outstandingAtSend: block.outstanding });
+            rawHits: result.rawHits, suppressedHits: result.suppressedHits, outstandingAtSend: block.outstanding, signal });
           if (diagnostics.recent.length > 16) diagnostics.recent.shift();
           self.postMessage({ type: 'processed', ...result, sequence: block.sequence, outstanding: block.outstanding,
             workerMs: performance.now() - started, wasmHeapBytes: module.HEAPU8.byteLength, diagnostics });
         } catch {
           if (block.pcm instanceof ArrayBuffer && block.pcm.byteLength) new Uint8Array(block.pcm).fill(0);
-          audioPort.close(); self.postMessage({ type: 'error', code: 'AUDIO_PROCESSING_FAILED' });
+          audioPort.close(); self.postMessage({ type: 'error', code: 'AUDIO_PROCESSING_FAILED', diagnostics });
         }
       };
       audioPort.start(); self.postMessage({ type: 'capture-ready' });

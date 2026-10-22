@@ -5,7 +5,7 @@ const button = (id: string) => document.getElementById(id) as HTMLButtonElement;
 const load = button('load'), listen = button('listen'), stopButton = button('stop');
 const status = document.getElementById('status')!, metrics = document.getElementById('metrics')!, events = document.getElementById('events')!;
 const diagnosticView = document.getElementById('diagnostics')!;
-let diagnostic: { configuration?: unknown; worker?: unknown; transport?: unknown; failure?: unknown } = {};
+let diagnostic: { configuration?: unknown; worker?: unknown; transport?: unknown; failure?: unknown; capture?: unknown } = {};
 let inFlight: { sequence: number; startedAt: number } | undefined;
 function showDiagnostics() { diagnosticView.textContent = JSON.stringify(diagnostic, null, 2); }
 let scope: ResourceScope | undefined, worker: Worker | undefined, worklet: AudioWorkletNode | undefined;
@@ -103,6 +103,12 @@ listen.onclick = async () => {
     const capture = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
     if (current !== generation) { capture.getTracks().forEach(t => t.stop()); return; }
     stream = capture; resources.add(() => capture.getTracks().forEach(track => track.stop()));
+    const settings = capture.getAudioTracks()[0]?.getSettings?.() ?? {};
+    diagnostic.capture = { contextSampleRate: context.sampleRate,
+      trackSampleRate: settings.sampleRate ?? null, trackChannels: settings.channelCount ?? null,
+      echoCancellation: settings.echoCancellation ?? null, noiseSuppression: settings.noiseSuppression ?? null,
+      autoGainControl: settings.autoGainControl ?? null, selectedInputChannel: 0 };
+    showDiagnostics();
     const source = context.createMediaStreamSource(capture);
     const node = new AudioWorkletNode(context, 'atlas-pcm', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] }); worklet = node;
     const mute = context.createGain(); mute.gain.value = 0;
@@ -138,7 +144,7 @@ listen.onclick = async () => {
     engineWorker.onmessage = ({ data }) => {
       if (current !== generation) return;
       if (data.type === 'capture-ready') { connectedWorker(); return; }
-      if (data.type === 'error') { rejectConnection(new SpikeError('ENGINE_FAILED')); void stop('ENGINE_FAILED'); return; }
+      if (data.type === 'error') { diagnostic.worker = data.diagnostics; showDiagnostics(); rejectConnection(new SpikeError('ENGINE_FAILED')); void stop('ENGINE_FAILED'); return; }
       if (!live) return;
       if (data.type === 'processing') { inFlight = { sequence: data.sequence, startedAt: data.startedAt }; return; }
       if (data.type !== 'processed') return;
