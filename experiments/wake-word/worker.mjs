@@ -1,7 +1,10 @@
 import { PcmDetector, SpikeError } from './core.js';
 import { measurePcm, SignalTotals } from './signal.js';
+import { PcmTrace } from './trace.js';
 
 let detector, module, audioPort, nextSequence = 0;
+let wavTest = false;
+const trace = new PcmTrace();
 const signalTotals = new SignalTotals();
 const diagnostics = { completed: 0, rawHits: 0, suppressedHits: 0, engineMaxMs: 0, recyclePostMaxMs: 0,
   beforeRecycleMaxMs: 0, withHits: { blocks: 0, maxMs: 0 }, withoutHits: { blocks: 0, maxMs: 0 }, recent: [] };
@@ -33,6 +36,7 @@ self.onmessage = async ({ data }) => {
         config: { threshold: data.threshold, score: 1, maxActivePaths: 4, cooldownMs: 1000, keywords: data.keywords } });
     } else if (data.type === 'connect') {
       if (!detector || audioPort) throw new SpikeError('AUDIO_PROTOCOL_ERROR');
+      wavTest = data.mode === 'wav-test';
       audioPort = data.port;
       audioPort.onmessage = ({ data: block }) => {
         const started = performance.now();
@@ -40,11 +44,16 @@ self.onmessage = async ({ data }) => {
           if (block.type !== 'pcm' || block.sequence !== nextSequence++
             || !(block.pcm instanceof ArrayBuffer) || block.pcm.byteLength !== 6400) { diagnostics.sequenceError = true; throw new SpikeError('AUDIO_PROTOCOL_ERROR'); }
           self.postMessage({ type: 'processing', sequence: block.sequence, startedAt: performance.timeOrigin + started });
-          const signal = measurePcm(new Float32Array(block.pcm), block.sampleRate, block.channels);
+          const validSamples = wavTest ? block.validSamples : 1600;
+          if (!Number.isInteger(validSamples) || validSamples < 1 || validSamples > 1600) throw new SpikeError('AUDIO_PROTOCOL_ERROR');
+          const pcm = new Float32Array(block.pcm, 0, validSamples);
+          if (wavTest) trace.samplesIn(pcm, block.sequence);
+          const signal = measurePcm(pcm, block.sampleRate, block.channels);
           signalTotals.add(signal);
           diagnostics.signal = { lastBlock: signal, aggregate: signalTotals.snapshot(), sequence: block.sequence,
             sequenceOrdered: true, inferenceRate: 16000, inferenceChannels: 1 };
-          const result = detector.process(new Float32Array(block.pcm), 16000);
+          const result = detector.process(pcm, 16000);
+          if (wavTest) { trace.hits(result.rawHits); diagnostics.trace = trace.snapshot(); }
           // Recycle immediately on the direct port, before sending optional UI telemetry.
           const beforeRecycleMs = performance.now() - started, recycleStart = performance.now();
           audioPort.postMessage({ type: 'recycle', pcm: block.pcm, sequence: block.sequence }, [block.pcm]);

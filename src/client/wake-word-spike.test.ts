@@ -7,6 +7,9 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import vm from 'node:vm';
 import { checkManifest, verifyBytes, PcmDetector, ResourceScope, requiredAssets } from '../../experiments/wake-word/core.js';
+import { decodeWav } from '../../experiments/wake-word/wav.js';
+import { canonicalBytes, compareRuns, matchWindows } from '../../experiments/wake-word/trace.js';
+import { PcmTrace } from '../../experiments/wake-word/trace.js';
 import { measurePcm, SignalTotals } from '../../experiments/wake-word/signal.js';
 import type { Manifest } from '../../experiments/wake-word/core.js';
 
@@ -134,7 +137,7 @@ test('worker blocks network APIs after local initialization and clears heap on s
   const { SpikeError } = await import('../../experiments/wake-word/core.js');
   const context = vm.createContext({
     self, console: { log() {}, info() {}, warn() {}, error() {}, debug() {} },
-    PcmDetector, SpikeError, measurePcm, SignalTotals, Uint8Array, Float32Array, ArrayBuffer, performance,
+    PcmDetector, SpikeError, PcmTrace, measurePcm, SignalTotals, Uint8Array, Float32Array, ArrayBuffer, performance,
     fetch() { network++; },
     __api: {
       initKWSModule: async () => ({ HEAPU8: heap, FS: { writeFile() {} } }),
@@ -248,9 +251,9 @@ async function browserHarness(options: { deferMicrophone?: boolean; deferClose?:
   const source = readFileSync(resolve(import.meta.dirname, '../../experiments/wake-word/browser.ts'), 'utf8');
   const js = (await transform(source, { loader: 'ts', format: 'esm' })).code.replace(/^import .*\n/gm, '');
   const elements = new Map<string, any>();
-  for (const id of ['load', 'listen', 'stop', 'status', 'metrics', 'events', 'diagnostics', 'threshold', 'accent', 'distance', 'noise']) elements.set(id, { disabled: false, textContent: '', value: id === 'threshold' ? '.25' : 'test' });
+  for (const id of ['load', 'listen', 'stop', 'status', 'metrics', 'events', 'diagnostics', 'threshold', 'accent', 'distance', 'noise', 'wav-test', 'wav-file', 'wav-convert', 'offline-report', 'word-windows']) elements.set(id, { disabled: false, textContent: '', value: id === 'threshold' ? '.25' : 'test' });
   let workers = 0, requests = 0, closedContexts = 0, terminated = 0, connected = 0;
-  let node: any;
+  let node: any, currentWorker: any;
   let resolveMicrophone!: (v: unknown) => void, resolveClose!: () => void;
   const track = { readyState: 'live', stop() { this.readyState = 'ended'; }, addEventListener() {} };
   const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
@@ -266,13 +269,25 @@ async function browserHarness(options: { deferMicrophone?: boolean; deferClose?:
     createGain() { return makeNode(); }
   }
   class Worklet {
-    port = { onmessage: undefined as any, close() {}, postMessage: (v: any) => { if (v?.type === 'connect') queueMicrotask(() => this.port.onmessage({ data: { type: 'connected' } })); } };
+    port = { onmessage: undefined as any, close() {}, postMessage: (v: any) => { if (v?.type === 'connect') queueMicrotask(() => this.port.onmessage({ data: { type: 'connected' } })); if (v?.type === 'wav-source') { this.wavSamples = v.pcm.byteLength / 4; queueMicrotask(() => this.port.onmessage({ data: { type: 'wav-ready' } })); } } };
     constructor() { node = this; }
-    connect() { connected++; } disconnect() {}
+    wavSamples = 0;
+    connect() {
+      connected++;
+      if (this.wavSamples) queueMicrotask(() => {
+        this.port.onmessage({ data: { type: 'wav-complete', samples: this.wavSamples, diagnostics: { outstanding: 0 } } });
+        assert.equal(terminated, 0, 'EOF must not terminate before final worker telemetry');
+        for (let i = 0; i < Math.ceil(this.wavSamples / 1600); i++) {
+          const samples = Math.min(this.wavSamples, (i + 1) * 1600);
+          currentWorker.onmessage({ data: { type: 'processed', sequence: i, outstanding: 1, engineMs: 0, workerMs: 0, pcmMs: Math.min(1600, this.wavSamples - i * 1600) / 16,
+            diagnostics: { rawHits: 0, signal: { aggregate: { rms: .1, peak: .1 } }, trace: { processedSamples: samples, blocks: i + 1, pcmFnv1a32: '12345678', events: [] } } } });
+        }
+      });
+    } disconnect() {}
   }
   class Worker {
     onmessage: any; onerror: any;
-    constructor() { workers++; }
+    constructor() { workers++; currentWorker = this; }
     terminate() { terminated++; }
     postMessage(v: any) {
       if (v.type === 'init') queueMicrotask(() => this.onmessage({ data: { type: 'ready', wasmHeapBytes: 1024 } }));
@@ -286,13 +301,13 @@ async function browserHarness(options: { deferMicrophone?: boolean; deferClose?:
     AudioContext: Context, AudioWorkletNode: Worklet, Worker,
     MessageChannel: class { port1 = { close() {} }; port2 = { close() {} }; },
     fetch: async (url: string) => ({ ok: true, json: async () => fixture(), arrayBuffer: async () => new ArrayBuffer(1) }),
-    checkManifest, verifyBytes: async () => {}, ResourceScope,
+    checkManifest, verifyBytes: async () => {}, ResourceScope, decodeWav, canonicalBytes, compareRuns, matchWindows, crypto,
     SpikeError: (await import('../../experiments/wake-word/core.js')).SpikeError,
     AbortController, Uint8Array, ArrayBuffer, Promise, setTimeout, clearTimeout, performance
   });
   vm.runInContext(js, context);
   return { elements, track,
-    load: () => elements.get('load').onclick(), listen: () => elements.get('listen').onclick(),
+    load: () => elements.get('load').onclick(), wav: () => elements.get('wav-test').onclick(), listen: () => elements.get('listen').onclick(),
     stop: () => vm.runInContext('stop()', context) as Promise<void>,
     overrun: () => node.port.onmessage({ data: { type: 'overrun', code: 'AUDIO_OVERRUN', produced: 4, outstanding: 4 } }),
     microphoneReady: () => resolveMicrophone(stream), closeReady: () => resolveClose(),
@@ -355,4 +370,21 @@ test('transport diagnostics distinguish audio-clock and wall-clock circulation, 
   const noWallClock = workletHarness();
   noWallClock.processor.process([[new Float32Array(1600)]]); noWallClock.recycle(noWallClock.sent[0]);
   assert.equal(noWallClock.processor.snapshot().returnWallMaxMs, null);
+});
+
+
+test('browser WAV source opens no microphone, prevents double starts and waits across EOF/worker message ordering', async () => {
+  const h = await browserHarness();
+  const bytes = Buffer.alloc(44 + 1700 * 2);
+  bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVE', 8);
+  bytes.write('fmt ', 12); bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22);
+  bytes.writeUInt32LE(16000, 24); bytes.writeUInt32LE(32000, 28); bytes.writeUInt16LE(2, 32); bytes.writeUInt16LE(16, 34);
+  bytes.write('data', 36); bytes.writeUInt32LE(3400, 40);
+  h.elements.get('wav-file').files = [{ size: bytes.length, arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) }];
+  h.elements.get('word-windows').value = '';
+  await h.load(); await Promise.all([h.wav(), h.wav()]); await tick();
+  assert.equal(h.counts().requests, 0); assert.equal(h.counts().workers, 1);
+  assert.equal(h.counts().closedContexts, 1); assert.equal(h.counts().terminated, 1);
+  assert.match(h.elements.get('status').textContent, /WAV_COMPLETO.*tracks terminados: true/);
+  assert.match(h.elements.get('diagnostics').textContent, /"state": "COMPLETED"/);
 });

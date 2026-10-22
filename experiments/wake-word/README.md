@@ -449,3 +449,103 @@ referencia NOT_CONFIGURED: comparación pendiente, no validación exitosa.
    priorizar runtime; si ambos fallan, priorizar tokens/modelo/acústica.
 6. Detener/liberar tras prueba y error; confirmar tracks terminados y sin workers
    vivos. No declarar reconocimiento aprobado con mocks ni por tres hits aislados.
+
+## Comparación del mismo WAV: Offline vs ruta Live
+
+La evidencia Windows aportada para un WAV de 20.65 s/8 pronunciaciones es:
+6 rawHits, 6 detecciones, cero supresiones, threshold .05, RMS .03135,
+peak .54218, sin clipping ni PCM inválido, 207 bloques. Estos valores provienen
+del propietario, no de una ejecución en cloud. Seis hits no demuestran seis
+aciertos distintos: pueden incluir duplicados o falsos positivos. No se confirma
+75 % hasta contrastar las posiciones con ocho ventanas anotadas previamente.
+
+Diferencias demostradas entre las rutas anteriores:
+
+| Tramo | Micrófono Live | Offline WAV |
+| --- | --- | --- |
+| Entrada | getUserMedia, dispositivo/Windows y DSP negociado | PCM del archivo autorizado |
+| Canales | Se solicita mono; se usa el primer canal observado | Mono original o promedio explícito con --convert |
+| Frecuencia | Conversión del navegador al AudioContext de 16 kHz | 16 kHz original o conversión Hann-sinc explícita |
+| Tiempo | AudioWorklet/MessageChannel y cuatro buffers | Bucle síncrono sin reloj real |
+| Cola final | Bloque incompleto se descarta al detener la captura | Se entrega la cola parcial exacta |
+| Cooldown | 1000 ms de reloj de ejecución | 1000 ms de posición de muestras |
+| Decoder | Mismo constructor, parámetros, stream persistente y reset tras hit | Mismo contrato con el wrapper Node/WASM |
+
+La prueba nueva cambia sólo la **fuente de ensayo**: lee el archivo local en
+memoria y transfiere sus muestras a AudioWorklet. Éste las produce en quanta del
+renderizador, con el mismo pool fijo de cuatro buffers y el mismo canal directo
+al worker Live. No usa getUserMedia, AudioBufferSource ni resampler del navegador.
+No prueba aún la captura del dispositivo; sirve para aislar transporte/worker
+antes de investigarla. No reproduce sonido audible.
+
+Sólo en este modo de ensayo se declara la longitud válida del último buffer:
+la cola de 800 muestras del WAV de 20.65 s llega al motor sin rellenarla con
+silencio. El almacenamiento de transporte sigue siendo de cuatro buffers de
+1600 muestras. La política del micrófono no se cambia. Al EOF se espera que todos
+los buffers se devuelvan **y** que llegue la última telemetría del worker, aunque
+los mensajes crucen por puertos distintos. Sólo entonces se informa COMPLETED y
+se libera worker/AudioContext. Stop, overrun, suspensión o error producen una
+prueba incompleta; no se convierten en éxito ni se reintentan.
+
+El informe WAV incluye SHA-256 del archivo y del PCM fuente, muestras/bloques,
+RMS/peak agregado y posiciones de rawHits por bloque. Se calcula además FNV-1a de
+los float32 LE que realmente recibió el worker. Es una huella diagnóstica, **no
+una prueba criptográfica de igualdad**. Coincidencia de fuente SHA-256, orden,
+conteo, huella y métricas proporciona evidencia conjunta de continuidad. No se
+almacena una segunda copia de PCM para calcular la huella ni se registra audio.
+La posición de hit es el intervalo de entrada del bloque donde se obtuvo,
+no el principio/final acústico exacto ni el timestamp de tokens del decoder.
+
+### Procedimiento Windows
+
+1. Usar exactamente el WAV autorizado fuera de Git. No cambiar volumen, modelo,
+   tokens, score ni cooldown para esta comparación. Conservar su SHA-256.
+2. Volver a ejecutar el Offline de esta versión para añadir la huella y posiciones
+   al reporte. Usar threshold .05, como la ejecución original. Sólo si el ensayo
+   original usó --convert, repetir también ese flag. Guardar **el JSON numérico**
+   manualmente bajo `.local` si se desea seleccionarlo en la interfaz; no contiene
+   PCM. No confundir ese reporte con una grabación.
+3. Iniciar `node experiments/wake-word/server.mjs`, recargar la página y seleccionar
+   .05 **antes de Cargar motor**. Confirmar el threshold del diagnóstico, no sólo
+   el valor visible del input.
+4. Seleccionar el mismo WAV en el campo local y el JSON Offline opcional. Por
+   defecto se exige mono/16 kHz. Si el Offline usó --convert, marcar explícitamente
+   su casilla; aplica el mismo lector/conversor ya existente, en memoria. Nunca
+   se aplica ganancia o conversión para conseguir detecciones artificiales.
+5. Pulsar **WAV → AudioWorklet → Worker**, mantener la pestaña visible y esperar
+   `WAV_COMPLETO — sin micrófono`. El indicador de micrófono no debe encenderse.
+   El navegador no puede verificar Git ignore desde el picker: el usuario debe
+   elegir el archivo fuera de Git; no se sube a ningún endpoint del servidor.
+6. Revisar `wav`, `comparison` y las métricas. Para 20.65 s a 16 kHz se esperan
+   330400 muestras y 207 bloques, final de 800 muestras. Toda diferencia de
+   configuración, SHA fuente o conversión invalida la comparación controlada.
+   Reportes antiguos sin FNV muestran sameFingerprint=null: no afirmar coincidencia.
+7. Repetir dos veces con un motor recién cargado en cada ejecución. Comparar
+   rawHits y bloques de detección; el contador tras cooldown puede diferir por
+   las distintas bases temporales. No ajustar el cooldown para hacerlos coincidir.
+8. Para verificar 6/8, escuchar el WAV autorizado con una herramienta local elegida
+   por el usuario y anotar **antes de evaluar** ocho ventanas de activación,
+   una por pronunciación. Usar margen de contexto fijo y documentado. Introducir
+   una ventana por línea, por ejemplo `0.5,2.0` (punto decimal). Se informa una
+   correspondencia uno a uno provisional, duplicados, hits fuera de ventanas,
+   ventanas sin hit y ambigüedades. Revisar manualmente; no ampliar ventanas a
+   posteriori para forzar 75 %.
+9. Si ambos modos coinciden, capturar después la configuración real del micrófono,
+   canales, RMS/peak y resampling. Si difieren con muestras/configuración iguales,
+   investigar scheduling, segmentación, versión del runtime y estado del decoder.
+   No atribuirlo directamente al modelo ni aplicar ganancia.
+
+En cloud no están este WAV ni los pesos españoles. La prueba sintética de 20.65 s
+usa un motor inyectado: comprueba igualdad de muestras, posición y rawHits por la
+ruta real de mensajes, no reconocimiento acústico. La comparación real de las
+seis detecciones y las ocho pronunciaciones queda pendiente de Windows.
+
+Para guardar el reporte Offline como UTF-8 explícito en PowerShell, por ejemplo:
+
+```powershell
+node --import tsx experiments/wake-word/offline.ts .local/wake-word-spike/audio/atlas-autorizado.wav --threshold 0.05 | Set-Content -Encoding utf8 .local/wake-word-spike/offline-comparison.json
+```
+
+Si se usó --convert en la referencia, conservarlo también en ese comando. Evitar
+redirección UTF-16 de Windows PowerShell: el picker de JSON espera UTF-8. Los
+índices de ventanas mostrados por el diagnóstico empiezan en cero (0–7).

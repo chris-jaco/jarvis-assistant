@@ -6,6 +6,14 @@
 <p>Evaluación personal. Licencia de los pesos sin verificar. Sin OpenAI ni grabación de audio.</p>
 <p>1. Cargar motor y archivos locales verificados. 2. Activar micrófono. 3. Decir «Atlas». 4. Detener.</p>
 <button id="load">Cargar motor</button><button id="listen" disabled>Activar micrófono</button><button id="stop" disabled>Detener y liberar</button>
+<p>Comparación sin micrófono: seleccionar el mismo WAV autorizado fuera de Git. Por defecto requiere mono, 16 kHz.</p>
+<label>WAV <input id="wav-file" type="file" accept=".wav"></label>
+<label><input id="wav-convert" type="checkbox">Aplicar la conversión offline existente (sólo si el reporte usó --convert)</label>
+<label>Reporte Offline opcional <input id="offline-report" type="file" accept=".json"></label>
+<button id="wav-test" disabled>WAV → AudioWorklet → Worker</button>
+<p>Opcional: ocho ventanas temporales predefinidas, una por línea como inicio,fin en segundos.
+Incluir un margen fijo para contexto del decoder; la coincidencia es provisional y requiere revisión humana.</p>
+<textarea id="word-windows" rows="3" aria-label="Ocho ventanas esperadas de detección"></textarea>
 <p>Threshold <input id="threshold" type="number" min="0.01" max="1" step="0.05" value="0.25"> (se aplica al cargar).</p>
 <label>Pronunciación <select id="accent"><option>ES-AR</option><option>ES-ES</option><option>EN</option></select></label>
 <label>Distancia <select id="distance"><option>0.5 m</option><option>1 m</option><option>3 m</option></select></label>
