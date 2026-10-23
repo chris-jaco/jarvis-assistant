@@ -246,14 +246,14 @@ test('duplicate buffer acknowledgement fails explicitly and cannot expand the po
   assert.equal(h.processor.active, false); assert.equal(h.control[1].code, 'AUDIO_PROTOCOL_ERROR');
 });
 
-async function browserHarness(options: { deferMicrophone?: boolean; deferClose?: boolean } = {}) {
+async function browserHarness(options: { deferMicrophone?: boolean; deferClose?: boolean; deferWarm?: boolean; failWarm?: boolean; badReset?: boolean } = {}) {
   const { transform } = await import('esbuild');
   const source = readFileSync(resolve(import.meta.dirname, '../../experiments/wake-word/browser.ts'), 'utf8');
   const js = (await transform(source, { loader: 'ts', format: 'esm' })).code.replace(/^import .*\n/gm, '');
   const elements = new Map<string, any>();
-  for (const id of ['load', 'listen', 'stop', 'status', 'metrics', 'events', 'diagnostics', 'threshold', 'accent', 'distance', 'noise', 'wav-test', 'wav-file', 'wav-convert', 'offline-report', 'word-windows']) elements.set(id, { disabled: false, textContent: '', value: id === 'threshold' ? '.25' : 'test' });
+  for (const id of ['load', 'listen', 'stop', 'status', 'metrics', 'events', 'diagnostics', 'threshold', 'accent', 'distance', 'noise', 'wav-test', 'wav-file', 'wav-convert', 'offline-report', 'word-windows', 'live-mode']) elements.set(id, { disabled: false, textContent: '', value: id === 'threshold' ? '.25' : id === 'live-mode' ? 'COLD' : 'test' });
   let workers = 0, requests = 0, closedContexts = 0, terminated = 0, connected = 0;
-  let node: any, currentWorker: any;
+  let node: any, currentWorker: any, resolveWarm: () => void, expireWarm: () => void;
   let resolveMicrophone!: (v: unknown) => void, resolveClose!: () => void;
   const track = { getSettings: () => ({ sampleRate: 48000, channelCount: 2, echoCancellation: false, noiseSuppression: false, autoGainControl: false, deviceId: 'private-device', groupId: 'private-group' }), readyState: 'live', stop() { this.readyState = 'ended'; }, addEventListener() {} };
   const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
@@ -264,7 +264,7 @@ async function browserHarness(options: { deferMicrophone?: boolean; deferClose?:
     state = 'running'; sampleRate = 16000; destination = {};
     audioWorklet = { addModule: async () => {} };
     async resume() {}
-    async close() { await closeGate; closedContexts++; }
+    async close() { await closeGate; this.state = 'closed'; closedContexts++; }
     createMediaStreamSource() { return makeNode(); }
     createGain() { return makeNode(); }
   }
@@ -290,7 +290,18 @@ async function browserHarness(options: { deferMicrophone?: boolean; deferClose?:
     constructor() { workers++; currentWorker = this; }
     terminate() { terminated++; }
     postMessage(v: any) {
-      if (v.type === 'init') queueMicrotask(() => this.onmessage({ data: { type: 'ready', wasmHeapBytes: 1024 } }));
+      if (v.type === 'init') queueMicrotask(() => {
+        const ready = () => this.onmessage({ data: { type: 'ready', wasmHeapBytes: 1024,
+          config: { threshold: v.threshold, score: 1, maxActivePaths: 4, cooldownMs: 1000, keywords: v.keywords },
+          preparation: v.warm ? { mode: 'WARM', state: 'COMPLETED', decodeCalls: 2, newStreamVerified: !options.badReset, wallMs: 12, resetWallMs: 1 }
+            : { mode: 'COLD', state: 'NOT_REQUESTED' } } });
+        if (v.warm) {
+          this.onmessage({ data: { type: 'warmup-start' } });
+          if (options.failWarm) this.onmessage({ data: { type: 'error', code: 'WARMUP_RESET_FAILED' } });
+          else if (options.deferWarm) resolveWarm = ready;
+          else ready();
+        } else ready();
+      });
       if (v.type === 'connect') queueMicrotask(() => this.onmessage({ data: { type: 'capture-ready' } }));
     }
   }
@@ -303,7 +314,7 @@ async function browserHarness(options: { deferMicrophone?: boolean; deferClose?:
     fetch: async (url: string) => ({ ok: true, json: async () => fixture(), arrayBuffer: async () => new ArrayBuffer(1) }),
     checkManifest, verifyBytes: async () => {}, ResourceScope, compareSignalLevels, decodeWav, canonicalBytes, compareRuns, matchWindows, crypto,
     SpikeError: (await import('../../experiments/wake-word/core.js')).SpikeError,
-    AbortController, Uint8Array, ArrayBuffer, Promise, setTimeout, clearTimeout, performance
+    AbortController, Uint8Array, ArrayBuffer, Promise, setTimeout: (fn: () => void, ms: number) => { if (ms === 10000) expireWarm = fn; return setTimeout(fn, ms); }, clearTimeout, performance
   });
   vm.runInContext(js, context);
   return { elements, track,
@@ -311,6 +322,7 @@ async function browserHarness(options: { deferMicrophone?: boolean; deferClose?:
     stop: () => vm.runInContext('stop()', context) as Promise<void>,
     workerMessage: (data: any) => currentWorker.onmessage({ data }),
     overrun: () => node.port.onmessage({ data: { type: 'overrun', code: 'AUDIO_OVERRUN', produced: 4, outstanding: 4 } }),
+    warmReady: () => resolveWarm(), warmTimeout: () => expireWarm(),
     microphoneReady: () => resolveMicrophone(stream), closeReady: () => resolveClose(),
     counts: () => ({ workers, requests, closedContexts, terminated, connected })
   };
@@ -427,4 +439,60 @@ test('pending inference observation survives overrun and cleanup without asserti
   assert.equal(report.failure.inferencePendingAtFaultMs, null);
   assert.equal(h.track.readyState, 'ended'); assert.equal(h.counts().terminated, 1);
   assert.equal(h.counts().closedContexts, 1);
+});
+
+
+test('Warm Live does not request microphone or permit duplicate starts until reset acknowledgement; diagnostics start fresh', async () => {
+  const h = await browserHarness({ deferWarm: true }); h.elements.get('live-mode').value = 'WARM';
+  const loading = h.load(); await tick(); await tick();
+  await h.listen(); await h.load();
+  assert.equal(h.counts().requests, 0); assert.equal(h.counts().connected, 0); assert.equal(h.counts().workers, 1);
+  assert.equal(h.elements.get('live-mode').disabled, true);
+  h.warmReady(); await loading; assert.equal(h.counts().requests, 0);
+  assert.equal(h.elements.get('listen').disabled, false); assert.equal(h.elements.get('wav-test').disabled, true);
+  await Promise.all([h.listen(), h.listen()]); assert.equal(h.counts().requests, 1);
+  h.workerMessage({ type: 'processed', sequence: 0, outstanding: 1, engineMs: 42, workerMs: 43, pcmMs: 100,
+    diagnostics: { wasmProfile: { firstDecode: { sequence: 0, wallMs: 41.28 }, maxBlockWallMs: 85.57 } } });
+  let report = JSON.parse(h.elements.get('diagnostics').textContent);
+  assert.equal(report.preparation.newStreamVerified, true); assert.equal(report.liveTrial.mode, 'WARM');
+  h.overrun(); await tick(); report = JSON.parse(h.elements.get('diagnostics').textContent);
+  assert.equal(report.liveTrial.processedBlocks, 1); assert.equal(report.liveTrial.processedSamples, 1600);
+  assert.equal(report.liveTrial.firstDecode.wallMs, 41.28); assert.equal(report.liveTrial.overruns, 1);
+  assert.equal(report.liveTrial.maxEngineBlockWallMs, 85.57);
+  assert.equal(report.release.cleanupCompleted, true); assert.equal(report.release.tracksEnded, true);
+  assert.equal(report.release.audioContextClosed, true);
+  assert.equal(h.counts().terminated, 1); assert.equal(h.elements.get('live-mode').disabled, false);
+});
+
+test('Warm failures, unverified reset and watchdog never open microphone', async () => {
+  for (const options of [{ failWarm: true }, { badReset: true }, { deferWarm: true }]) {
+    const h = await browserHarness(options); h.elements.get('live-mode').value = 'WARM';
+    const loading = h.load(); await tick(); await tick();
+    if (options.deferWarm) h.warmTimeout();
+    await loading;
+    assert.equal(h.counts().requests, 0); assert.equal(h.counts().connected, 0); assert.equal(h.counts().terminated, 1);
+    const report = JSON.parse(h.elements.get('diagnostics').textContent);
+    assert.equal(report.preparation.state, 'FAILED'); assert.match(report.preparation.code, /WARMUP_/);
+    assert.equal(h.elements.get('listen').disabled, true);
+  }
+});
+
+test('Stop during Warm ignores late readiness and preserves closed microphone', async () => {
+  const h = await browserHarness({ deferWarm: true }); h.elements.get('live-mode').value = 'WARM';
+  const loading = h.load(); await tick(); await tick(); await h.stop(); h.warmReady(); await loading;
+  await h.listen(); assert.equal(h.counts().requests, 0); assert.equal(h.counts().terminated, 1);
+});
+
+test('Cold and Warm Live retain exact parameters; Live rejects a loaded threshold other than .25', async () => {
+  for (const mode of ['COLD', 'WARM']) {
+    const h = await browserHarness(); h.elements.get('live-mode').value = mode; await h.load();
+    const r = JSON.parse(h.elements.get('diagnostics').textContent);
+    assert.equal(r.configuration.threshold, .25); assert.equal(r.configuration.score, 1);
+    assert.equal(r.configuration.maxActivePaths, 4); assert.equal(r.configuration.cooldownMs, 1000);
+    await h.listen(); await h.stop(); assert.equal(h.track.readyState, 'ended');
+  }
+  for (const mode of ['COLD', 'WARM']) {
+    const h = await browserHarness(); h.elements.get('live-mode').value = mode; h.elements.get('threshold').value = '.05';
+    await h.load(); await h.listen(); assert.equal(h.counts().requests, 0); await h.stop();
+  }
 });

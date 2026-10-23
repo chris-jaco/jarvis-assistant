@@ -7,11 +7,14 @@ import { canonicalBytes, compareRuns, matchWindows } from './trace.js';
 const button = (id: string) => document.getElementById(id) as HTMLButtonElement;
 const load = button('load'), listen = button('listen'), stopButton = button('stop');
 const wavButton = button('wav-test');
+const modeSelect = document.getElementById('live-mode') as HTMLSelectElement;
+let loadedMode = 'COLD', loadedThreshold = .25, liveTrialStartedAt: number | undefined;
 const status = document.getElementById('status')!, metrics = document.getElementById('metrics')!, events = document.getElementById('events')!;
 const diagnosticView = document.getElementById('diagnostics')!;
-let diagnostic: { configuration?: unknown; worker?: unknown; transport?: unknown; failure?: unknown; capture?: unknown; wav?: unknown; comparison?: unknown; alignment?: unknown; microphoneComparison?: unknown; timing?: unknown; wasmStage?: unknown } = {};
+let diagnostic: { configuration?: unknown; worker?: unknown; transport?: unknown; failure?: unknown; capture?: unknown; wav?: unknown; comparison?: unknown; alignment?: unknown; microphoneComparison?: unknown; timing?: unknown; wasmStage?: unknown; preparation?: unknown; liveTrial?: any; release?: unknown } = {};
 let inFlight: { sequence: number; startedAt: number; inferenceEpochMs?: number | null } | undefined;
 function showDiagnostics() { diagnosticView.textContent = JSON.stringify(diagnostic, null, 2); }
+let activeContext: AudioContext | undefined;
 let scope: ResourceScope | undefined, worker: Worker | undefined, worklet: AudioWorkletNode | undefined;
 let stream: MediaStream | undefined, generation = 0, live = false, preparing = false;
 let stopping: Promise<void> | undefined;
@@ -29,18 +32,24 @@ function blockNetwork() {
 function stop(code = 'DETENIDO'): Promise<void> {
   if (stopping) return stopping;
   ++generation; live = false; preparing = false;
+  if (diagnostic.liveTrial?.state === 'LISTENING') {
+    diagnostic.liveTrial.elapsedWallMs = liveTrialStartedAt === undefined ? null : performance.now() - liveTrialStartedAt;
+    diagnostic.liveTrial.state = 'STOPPED'; diagnostic.liveTrial.stopReason = code;
+  }
   load.disabled = true; listen.disabled = true; stopButton.disabled = true;
   wavButton.disabled = true;
+  const hadWorker = Boolean(worker), closingContext = activeContext;
   stream?.getTracks().forEach(track => track.stop());
   const released = !stream || stream.getTracks().every(track => track.readyState === 'ended'); stream = undefined;
   worklet?.port.postMessage('stop'); worklet = undefined;
   worker?.postMessage({ type: 'stop' });
   const release = scope; scope = undefined;
   stopping = (async () => {
-    try { await release?.stop(); status.textContent = `${code} — tracks terminados: ${released}`; }
-    catch { status.textContent = 'RELEASE_FAILED'; }
-    restoreNetwork?.(); restoreNetwork = undefined; worker = undefined;
-    load.disabled = false; stopping = undefined;
+    try { await release?.stop(); diagnostic.release = { cleanupCompleted: true, tracksEnded: released, workerTerminationRequested: hadWorker, audioContextClosed: closingContext ? closingContext.state === 'closed' : null }; showDiagnostics(); status.textContent = `${code} — tracks terminados: ${released}`; }
+    catch { diagnostic.release = { cleanupCompleted: false, tracksEnded: released, workerTerminationRequested: hadWorker,
+      audioContextClosed: closingContext ? closingContext.state === 'closed' : null }; showDiagnostics(); status.textContent = 'RELEASE_FAILED'; }
+    restoreNetwork?.(); restoreNetwork = undefined; worker = undefined; activeContext = undefined;
+    load.disabled = false; modeSelect.disabled = false; stopping = undefined;
   })();
   return stopping;
 }
@@ -51,8 +60,9 @@ function render(wasmHeapBytes = 0) {
 load.onclick = async () => {
   if (scope || preparing || stopping) return;
   count = processedMs = pcmMs = blocks = highWater = 0; engineTimes.length = deliveries.length = 0; events.textContent = '';
-  diagnostic = {}; inFlight = undefined; showDiagnostics();
-  preparing = true; load.disabled = true; stopButton.disabled = false;
+  diagnostic = {}; inFlight = undefined; liveTrialStartedAt = undefined; showDiagnostics();
+  loadedMode = modeSelect.value;
+  preparing = true; load.disabled = true; modeSelect.disabled = true; stopButton.disabled = false;
   const current = ++generation, resources = new ResourceScope(); scope = resources;
   status.textContent = 'PREPARANDO — micrófono cerrado';
   try {
@@ -73,34 +83,59 @@ load.onclick = async () => {
     const engineWorker = worker; resources.add(() => engineWorker.terminate());
     const threshold = Number((document.getElementById('threshold') as HTMLInputElement).value);
     if (!Number.isFinite(threshold) || threshold <= 0 || threshold > 1) throw new SpikeError('THRESHOLD_INVALID');
-    let timeout: ReturnType<typeof setTimeout>;
+    if (!['COLD', 'WARM'].includes(loadedMode) || (loadedMode === 'WARM' && threshold !== .25)) throw new SpikeError('LIVE_THRESHOLD_REQUIRED');
+    loadedThreshold = threshold;
+    let timeout: ReturnType<typeof setTimeout>, warmDeadline: ReturnType<typeof setTimeout> | undefined;
+    let warmStarted = false;
     const ready = new Promise<void>((resolve, reject) => {
       timeout = setTimeout(() => reject(new SpikeError('INITIALIZATION_TIMEOUT')), 60_000);
       resources.add(() => { clearTimeout(timeout); reject(new SpikeError('CANCELLED')); });
       engineWorker.onmessage = ({ data: message }) => {
         if (current !== generation) return;
+        if (message.type === 'warmup-start') {
+          if (loadedMode !== 'WARM' || warmStarted) { reject(new SpikeError('WARMUP_PROTOCOL_ERROR')); return; }
+          warmStarted = true; diagnostic.preparation = { mode: 'WARM', state: 'IN_PROGRESS' };
+          status.textContent = 'WARM-UP — micrófono cerrado'; showDiagnostics();
+          warmDeadline = setTimeout(() => reject(new SpikeError('WARMUP_TIMEOUT')), 10000);
+          resources.add(() => { clearTimeout(warmDeadline); }); return;
+        }
         if (message.type === 'ready') {
+          if (loadedMode === 'WARM' && (!warmStarted || message.preparation?.state !== 'COMPLETED'
+            || message.preparation?.decodeCalls < 2 || message.preparation?.newStreamVerified !== true)) {
+            reject(new SpikeError('WARMUP_RESET_FAILED')); return;
+          }
+          clearTimeout(warmDeadline); diagnostic.preparation = message.preparation ?? { mode: 'COLD', state: 'NOT_REQUESTED' };
+
           diagnostic.configuration = { model: manifest.model,
             modelHashes: manifest.files.filter(f => f.name.startsWith('model/')).map(f => ({ name: f.name, sha256: f.sha256 })), ...message.config };
           showDiagnostics(); render(message.wasmHeapBytes); resolve();
         }
-        if (message.type === 'error') reject(new SpikeError('ENGINE_INITIALIZATION_FAILED'));
+        if (message.type === 'error') {
+          const allowed = ['WARMUP_TIMEOUT', 'WARMUP_LIMIT', 'WARMUP_UNSUPPORTED', 'WARMUP_RESET_FAILED', 'LIVE_THRESHOLD_REQUIRED'];
+          reject(new SpikeError(allowed.includes(message.code) ? message.code : 'ENGINE_INITIALIZATION_FAILED'));
+        }
       };
       engineWorker.onerror = () => reject(new SpikeError('ENGINE_INITIALIZATION_FAILED'));
     });
-    engineWorker.postMessage({ type: 'init', files: data, keywords: (manifest as Manifest).keywords, threshold }, Object.values(data));
-    try { await ready; } finally { clearTimeout(timeout!); }
+    engineWorker.postMessage({ type: 'init', files: data, keywords: (manifest as Manifest).keywords, threshold, warm: loadedMode === 'WARM' }, Object.values(data));
+    try { await ready; } finally { clearTimeout(timeout!); clearTimeout(warmDeadline); }
     if (current !== generation) return;
-    preparing = false; listen.disabled = false; wavButton.disabled = false; status.textContent = 'LISTO — micrófono cerrado';
-  } catch { if (current === generation) await stop('INITIALIZATION_FAILED'); }
+    preparing = false; listen.disabled = loadedThreshold !== .25; wavButton.disabled = loadedMode === 'WARM'; status.textContent = 'LISTO — micrófono cerrado';
+  } catch (error) { if (current === generation) {
+    const allowed = ['WARMUP_TIMEOUT', 'WARMUP_LIMIT', 'WARMUP_UNSUPPORTED', 'WARMUP_RESET_FAILED', 'LIVE_THRESHOLD_REQUIRED'];
+    diagnostic.preparation = { mode: loadedMode, state: 'FAILED', code: error instanceof SpikeError && allowed.includes(error.code) ? error.code : 'INITIALIZATION_FAILED' };
+    await stop('INITIALIZATION_FAILED');
+  } }
 };
 async function startCapture(wavMode = false) {
   if (!worker || live || preparing || stopping || !scope) return;
+  if ((!wavMode && loadedThreshold !== .25) || (wavMode && loadedMode === 'WARM')) { await stop('LIVE_MODE_INVALID'); return; }
   listen.disabled = true; wavButton.disabled = true; preparing = true;
   const current = generation, resources = scope, engineWorker = worker;
   let wavPcm: Float32Array | undefined, wavInfo: any, offlineReport: any;
   let drained = false, completed = false, lastWorker: any;
   let windows: number[][] = [];
+  let captureStarted = 0;
   const maybeComplete = () => {
     if (!wavMode || !drained || completed || blocks !== Math.ceil(wavInfo.samples / 1600)) return;
     completed = true;
@@ -145,7 +180,7 @@ async function startCapture(wavMode = false) {
       }
       if (current !== generation) return;
     }
-    const context = new AudioContext({ sampleRate: 16000 });
+    const context = new AudioContext({ sampleRate: 16000 }); activeContext = context;
     resources.add(() => context.close()); await context.resume();
     context.onstatechange = () => { if (live && context.state !== 'running') void stop('AUDIO_CONTEXT_SUSPENDED'); };
     if (current !== generation) return;
@@ -197,9 +232,12 @@ async function startCapture(wavMode = false) {
         if (data.samples !== wavInfo.samples || data.diagnostics?.outstanding !== 0) { void stop('WAV_SAMPLE_MISMATCH'); return; }
         diagnostic.transport = data.diagnostics; drained = true; maybeComplete(); return;
       }
-      if (data.type === 'transport') { diagnostic.transport = data.diagnostics; showDiagnostics(); return; }
+      if (data.type === 'transport') { diagnostic.transport = data.diagnostics;
+        if (diagnostic.liveTrial) diagnostic.liveTrial.maxPending = Math.max(diagnostic.liveTrial.maxPending, data.diagnostics?.highWater ?? 0);
+        showDiagnostics(); return; }
       if (data.type === 'overrun') {
         diagnostic.transport = data.diagnostics;
+        if (diagnostic.liveTrial) { diagnostic.liveTrial.overruns++; diagnostic.liveTrial.maxPending = Math.max(diagnostic.liveTrial.maxPending, data.outstanding); }
         diagnostic.failure = { code: data.code, produced: data.produced, outstanding: data.outstanding,
           lastStartedSequence: inFlight?.sequence ?? null,
           inferencePendingObservedMs: inFlight?.inferenceEpochMs != null ? performance.timeOrigin + performance.now() - inFlight.inferenceEpochMs : null,
@@ -228,6 +266,14 @@ async function startCapture(wavMode = false) {
       if (data.sequence !== blocks) { void stop('AUDIO_SEQUENCE_ERROR'); return; }
       if (!wavMode && offlineReport) diagnostic.microphoneComparison = compareSignalLevels(data.diagnostics?.signal?.aggregate, offlineReport?.result?.signal);
       blocks++; processedMs += data.engineMs; pcmMs += data.pcmMs; highWater = Math.max(highWater, data.outstanding);
+      if (!wavMode && diagnostic.liveTrial) {
+        Object.assign(diagnostic.liveTrial, { processedBlocks: blocks, processedSamples: blocks * 1600,
+          firstDecode: data.diagnostics?.wasmProfile?.firstDecode ?? null,
+          maxEngineBlockWallMs: data.diagnostics?.wasmProfile?.maxBlockWallMs ?? null,
+          maxWorkerBlockWallMs: Math.max(diagnostic.liveTrial.maxWorkerBlockWallMs, data.workerMs),
+          maxPending: Math.max(diagnostic.liveTrial.maxPending, data.outstanding),
+          elapsedWallMs: performance.now() - captureStarted });
+      }
       // Bounded scalar telemetry only. Never retain audio or transcripts.
       engineTimes.push(data.engineMs); deliveries.push(data.workerMs);
       if (engineTimes.length > 1000) engineTimes.shift(); if (deliveries.length > 1000) deliveries.shift();
@@ -246,7 +292,12 @@ async function startCapture(wavMode = false) {
     if (wavMode) node.port.postMessage({ type: 'wav-source', pcm: wavPcm!.buffer }, [wavPcm!.buffer]);
     try { await Promise.race([connected, connectionFailed]); } finally { clearTimeout(connectionTimeout!); }
     if (current !== generation) return;
-    restoreNetwork = blockNetwork(); live = true; preparing = false;
+    restoreNetwork = blockNetwork(); live = true; preparing = false; captureStarted = performance.now();
+    if (!wavMode) liveTrialStartedAt = captureStarted;
+    if (!wavMode) diagnostic.liveTrial = { mode: loadedMode, state: 'LISTENING', processedBlocks: 0, processedSamples: 0,
+      firstDecode: null, maxEngineBlockWallMs: null, maxWorkerBlockWallMs: 0, maxPending: 0, overruns: 0,
+      finalTransportSnapshotIsNotDrainProof: true };
+    showDiagnostics();
     if (wavMode) node.port.postMessage('wav-start');
     if (wavMode) {
       const deadline = setTimeout(() => { if (current === generation) void stop('WAV_DRAIN_TIMEOUT'); }, 30000 + wavInfo.samples / 16);

@@ -910,3 +910,95 @@ probar silencio/voz prolongados, memoria, cleanup, cero overruns y cero pérdida
 
 En cloud faltan el WAV y los pesos: se valida orquestación/reset/cleanup con un
 motor inyectado, sin afirmar tres detecciones acústicas ni mejora real de latencia.
+
+
+## Warm Live: validación experimental del micrófono
+
+El propietario completó cinco pares Offline en Windows: mediana Cold 109.25 ms,
+Warm 41.28 ms (62.2 % menos), cinco pares equivalentes, tres hits en bloques
+27/46/91 y máximo bloque Warm 85.57 ms. Es evidencia para probar Live, no evidencia
+de que Live sea ya estable. Cloud no repitió ese audio ni esas métricas.
+
+Seleccionar Cold Live o Warm Live **antes de Cargar motor**. Se bloquea el selector
+hasta Detener, y cada carga crea un Worker/módulo/motor nuevos. Live exige threshold
+.25 en ambos modos; score=1, beam=4, cooldown=1000 ms, canal 0 y pool de cuatro
+buffers permanecen iguales. Cold conserva la ruta WAV y otros thresholds de esa
+prueba; Warm Live no habilita el botón WAV para evitar mezclar experimentos.
+
+Warm reutiliza prepareWarm: bloques de silencio sintético, al menos dos Decode,
+30 bloques/10 s como máximo y reset() una sola vez. La comprobación adicional de
+reset observa una creación de stream, una destrucción y handles distintos válidos,
+restaurando las funciones observadas incluso ante error. Sólo registra
+newStreamVerified=true, nunca handles. Esto verifica la recreación por la API del
+wrapper, no demuestra equivalencia interna absoluta del estado del modelo.
+
+La UI recibe warmup-start y aplica otro watchdog de 10 s, capaz de terminar el
+Worker si una llamada nativa no retorna. LISTO sólo se anuncia tras preparación
+y reset verificados. No se crea AudioContext ni se solicita el micrófono durante
+la preparación. Después el usuario debe pulsar Activar micrófono. Error, timeout,
+Stop o cambio de página durante warm-up cancela la prueba: no se habilita captura,
+no hay reintentos ni fallback automático a Cold. Mensajes tardíos se ignoran.
+
+El profiler, counters de transporte, señal y cooldown se crean limpios para Live;
+no incluyen los bloques sintéticos. Se conservan todas las trazas previas. Campos:
+
+- preparation: duración de preparación/reset, bloques sintéticos, llamadas Decode,
+  modo, resultado y verificación de stream nuevo.
+- liveTrial: primera Decode capturada, máximo por bloque del motor y del handler
+  Worker, bloques/muestras procesados, máximo pendientes, overruns y duración de
+  captura en pared (excluye preparación y espera del usuario antes de Activar).
+- worker/transport/timing/wasmStage: perfiles y relojes anteriores, sin cambios en
+  significado. Un primer Decode aún no terminado no tiene duración final medida.
+- release: tracks terminados, solicitud de terminación del Worker, AudioContext
+  cerrado cuando existió y resultado del cleanup; errores no se marcan como éxito.
+
+### Protocolo Windows exacto
+
+```powershell
+node experiments/wake-word/server.mjs
+```
+
+1. Abrir la URL 127.0.0.1 indicada, mantener la pestaña visible y fijar threshold
+   **0.25 antes de Cargar**. Conservar mismo navegador, dispositivo, distancia,
+   volumen y condiciones. No ajustar DSP/ganancia/canal ni ejecutar otras cargas
+   distintas entre controles. Anotar si DevTools estaba abierto y la espera entre
+   LISTO y Activar; no copiar nombres/IDs de dispositivos.
+2. Ejecutar tres pares Cold/Warm de **silencio de al menos 60 s de captura** cada
+   modalidad. En cada ensayo: seleccionar modalidad, Cargar motor, esperar LISTO,
+   revisar preparation/configuration, Activar micrófono y empezar el cronómetro.
+   En Warm comprobar newStreamVerified=true, decodeCalls>=2 y contador Live cero.
+3. Transcurridos al menos 60 s, pulsar Detener y copiar manualmente el JSON del
+   panel. Etiquetarlo COLD-S1/WARM-S1 hasta S3, sin audio. Antes de cada siguiente
+   ensayo esperar cleanupCompleted=true y cargar una instancia nueva. No reutilizar
+   el motor preparado de un ensayo anterior.
+4. Ejecutar otros tres pares Cold/Warm de voz, al menos 60 s cada ensayo. Decir
+   «Atlas» 20 veces, aproximadamente cada tres segundos, a misma distancia y con
+   pronunciación natural. Anotar intentos y detecciones observadas; no atribuir
+   automáticamente todo rawHit a un intento distinto. Etiquetas COLD-V1/WARM-V1
+   hasta V3. Son seis ensayos Warm y seis controles Cold en total.
+5. En cada ensayo registrar preparation/reset, primera Decode Live, máximos por
+   bloque, rawHits/supresiones, pendientes/highWater, elapsedWallMs, señal/DSP,
+   overruns y release. Todos son tiempos de pared, no CPU. Observar CPU/RAM con
+   Administrador de tareas sin incluir datos privados en el reporte.
+6. Si aparece overrun, timeout, error de secuencia o pérdida de micrófono, conservar
+   el JSON y marcar el ensayo fallido con su duración; no intentar completarlo
+   ocultando el fallo ni reanudarlo automáticamente.
+
+Criterio para revisar otro checkpoint: los seis Warm completan duración e intentos,
+cero AUDIO_OVERRUN, cero errores de secuencia/protocolo, sin descartes durante la
+captura, cuatro buffers como máximo y liberación correcta tras todos los Stop.
+Comparar además latencia, precisión y memoria con Cold; no aprobar sólo porque no
+se agotó el pool. Un Cold fallido se registra como tal, no como una muestra de 60 s.
+El objetivo de precisión sigue pendiente de aceptación acústica más amplia.
+
+La parada manual conserva su política existente: detiene captura y libera recursos,
+no añade un drenaje nuevo ni espera inferencias pendientes. El último snapshot de
+transporte puede ser anterior a Stop; **no demuestra que todos los buffers se
+hubieran devuelto en ese instante**. Validar continuidad observada durante escucha
+y ausencia de recursos residuales; no declarar un drenaje final perfecto. No hay
+cambio de transporte para producir una apariencia de cero pérdidas.
+
+No se guardan PCM, grabaciones ni transcripciones. El reporte sólo vive en el panel
+hasta que el usuario lo copie explícitamente. No se integra Atlas, Realtime, Tray,
+Main ni Core. Tests inyectados validan orden, fallos, watchdog, reset y cleanup;
+la estabilidad acústica/temporal real de estos doce ensayos queda para Windows.

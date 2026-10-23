@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
+import { prepareLiveWarm, verifyNewStream } from '../../experiments/wake-word/live-warmup.js';
+import { PcmDetector } from '../../experiments/wake-word/core.js';
+import { PcmTrace } from '../../experiments/wake-word/trace.js';
+import { measurePcm, SignalTotals } from '../../experiments/wake-word/signal.js';
 import { prepareWarm } from '../../experiments/wake-word/warmup.js';
 import { runWarmupPairs } from '../../experiments/wake-word/warmup-pairs.js';
 import { waitOfflineResult } from '../../experiments/wake-word/offline.js';
@@ -145,5 +149,69 @@ test('offline Warm worker confirms reset before WAV, restores hooks and releases
     assert.ok(pcm.every(v => v === 0)); assert.ok(h.module.HEAPU8.every((v: number) => v === 0));
     profileExports.forEach((n, i) => assert.equal(h.module[n], h.originals[i]));
     assert.doesNotMatch(JSON.stringify(messages), /private-path|private-reset/);
+  }
+});
+
+
+test('Live reset verification observes a distinct created stream and old-stream destruction without exposing handles', () => {
+  const h = fixture();
+  h.module._SherpaOnnxCreateKeywordStream = () => 22;
+  h.module._SherpaOnnxDestroyOnlineStream = () => {};
+  const create = h.module._SherpaOnnxCreateKeywordStream, destroy = h.module._SherpaOnnxDestroyOnlineStream;
+  const reset = h.engine.reset.bind(h.engine);
+  h.engine.reset = () => { h.module._SherpaOnnxCreateKeywordStream(10); h.module._SherpaOnnxDestroyOnlineStream(11); reset(); };
+  const report = prepareLiveWarm(h.module, h.engine);
+  assert.equal(report.newStreamVerified, true); assert.ok(report.decodeCalls >= 2); assert.equal(h.counts().resets, 1);
+  assert.equal(h.counts().streamBlocks, 0);
+  assert.equal(h.module._SherpaOnnxCreateKeywordStream, create); assert.equal(h.module._SherpaOnnxDestroyOnlineStream, destroy);
+  assert.doesNotMatch(JSON.stringify(report), /handle|pointer|device|pcm|transcript/i);
+});
+
+test('missing, reused or unverifiable stream reset fails closed and restores observer descriptors', () => {
+  assert.throws(() => verifyNewStream({}, () => {}), /WARMUP_RESET_FAILED/);
+  for (const scenario of ['same', 'missing', 'throw']) {
+    const module: any = { _SherpaOnnxCreateKeywordStream: () => 11, _SherpaOnnxDestroyOnlineStream: () => {} };
+    const descriptors = Object.getOwnPropertyDescriptors(module);
+    assert.throws(() => verifyNewStream(module, () => {
+      if (scenario === 'throw') throw Error('private');
+      if (scenario !== 'missing') { module._SherpaOnnxCreateKeywordStream(); module._SherpaOnnxDestroyOnlineStream(11); }
+    }));
+    assert.deepEqual(Object.getOwnPropertyDescriptors(module), descriptors);
+  }
+});
+
+test('actual Live Worker prepares before readiness, preserves live counter zero and cleans up failed reset', async () => {
+  const source = readFileSync(new URL('../../experiments/wake-word/worker.mjs', import.meta.url), 'utf8')
+    .replace(/^import .*\n/gm, '').replace("await import('/assets/runtime/core.js')", 'globalThis.__api');
+  for (const valid of [true, false]) {
+    const h = fixture(), messages: any[] = [];
+    h.module.FS = { writeFile() {} };
+    h.module._SherpaOnnxCreateKeywordStream = () => valid ? 22 : 11;
+    h.module._SherpaOnnxDestroyOnlineStream = () => {};
+    const reset = h.engine.reset.bind(h.engine);
+    h.engine.reset = () => { h.module._SherpaOnnxCreateKeywordStream(10); h.module._SherpaOnnxDestroyOnlineStream(11); reset(); };
+    const self = { onmessage: undefined as any, postMessage: (v: any) => messages.push(structuredClone(v)), close() {} };
+    const ctx = vm.createContext({ self, prepareLiveWarm, createWasmProfiler, PcmDetector, SpikeError, PcmTrace, measurePcm, SignalTotals,
+      Float32Array, Uint8Array, ArrayBuffer, performance,
+      console: { log() {}, info() {}, warn() {}, error() {}, debug() {} },
+      __api: { initKWSModule: async () => h.module, createKeywordSpotter: () => h.engine } });
+    vm.runInContext(source, ctx);
+    await self.onmessage({ data: { type: 'init', warm: true, threshold: .25, keywords: [['atlas']],
+      files: Object.fromEntries(['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].map(n => ['model/' + n, new ArrayBuffer(1)])) } });
+    assert.equal(messages[0].type, 'warmup-start');
+    if (valid) {
+      assert.equal(messages[1].type, 'ready'); assert.equal(messages[1].preparation.newStreamVerified, true);
+      assert.equal(messages.some(m => m.type === 'processing'), false);
+      const port = { onmessage: undefined as any, start() {}, close() {}, postMessage(v: any, transfer: Transferable[]) { structuredClone(v, { transfer }); } };
+      await self.onmessage({ data: { type: 'connect', port } });
+      port.onmessage({ data: { type: 'pcm', pcm: new Float32Array(1600).fill(.25).buffer, sequence: 0, sampleRate: 16000, channels: 1, outstanding: 1 } });
+      const result = messages.find(m => m.type === 'processed');
+      assert.equal(result.diagnostics.completed, 1); assert.equal(result.diagnostics.rawHits, 1);
+      assert.equal(result.diagnostics.wasmProfile.firstDecode.sequence, 0);
+      await self.onmessage({ data: { type: 'stop' } });
+    } else {
+      assert.equal(messages.at(-1).code, 'WARMUP_RESET_FAILED'); assert.equal(messages.some(m => m.type === 'ready'), false);
+    }
+    assert.equal(h.counts().disposed, 1); assert.ok(h.module.HEAPU8.every((v: number) => v === 0));
   }
 });

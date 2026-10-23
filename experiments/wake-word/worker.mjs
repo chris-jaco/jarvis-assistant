@@ -2,8 +2,9 @@ import { PcmDetector, SpikeError } from './core.js';
 import { measurePcm, SignalTotals } from './signal.js';
 import { PcmTrace } from './trace.js';
 import { createWasmProfiler } from './profile.js';
+import { prepareLiveWarm } from './live-warmup.js';
 
-let wasmProfiler;
+let wasmProfiler, initializingSpotter;
 let detector, module, audioPort, nextSequence = 0;
 let wavTest = false;
 const trace = new PcmTrace();
@@ -48,6 +49,13 @@ self.onmessage = async ({ data }) => {
         model: { encoder: '/encoder.onnx', decoder: '/decoder.onnx', joiner: '/joiner.onnx', tokens: '/tokens.txt' }, maxActivePaths: 4,
         keywords: [{ label: 'Atlas', matches: data.keywords.map(tokens => ({ tokens })), score: 1, threshold: data.threshold }]
       });
+      initializingSpotter = spotter;
+      let preparation = { state: 'NOT_REQUESTED', mode: 'COLD' };
+      if (data.warm) {
+        if (data.threshold !== .25) throw new SpikeError('LIVE_THRESHOLD_REQUIRED');
+        self.postMessage({ type: 'warmup-start' });
+        preparation = { ...prepareLiveWarm(module, spotter), mode: 'WARM' };
+      }
       wasmProfiler = createWasmProfiler(module, event => self.postMessage({ type: 'wasm-stage', event }));
       const profiledSpotter = wasmProfiler.wrapEngine(spotter);
       detector = new PcmDetector({
@@ -60,7 +68,8 @@ self.onmessage = async ({ data }) => {
         },
         dispose() { profiledSpotter.dispose(); }
       });
-      self.postMessage({ type: 'ready', wasmHeapBytes: module.HEAPU8.byteLength,
+      initializingSpotter = undefined;
+      self.postMessage({ type: 'ready', preparation, wasmHeapBytes: module.HEAPU8.byteLength,
         config: { threshold: data.threshold, score: 1, maxActivePaths: 4, cooldownMs: 1000, keywords: data.keywords } });
     } else if (data.type === 'connect') {
       if (!detector || audioPort) throw new SpikeError('AUDIO_PROTOCOL_ERROR');
@@ -124,6 +133,10 @@ self.onmessage = async ({ data }) => {
       self.postMessage({ type: 'stopped' }); self.close();
     }
   } catch (error) {
+    if (initializingSpotter) {
+      try { initializingSpotter.dispose(); } catch { }
+      initializingSpotter = undefined; wasmProfiler?.restore(); module?.HEAPU8.fill(0);
+    }
     self.postMessage({ type: 'error', code: error instanceof SpikeError ? error.code : 'ENGINE_INITIALIZATION_FAILED' });
   }
 };

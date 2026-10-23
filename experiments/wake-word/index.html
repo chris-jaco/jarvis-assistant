@@ -5,6 +5,8 @@
 <h1>«Atlas» — spike local</h1>
 <p>Evaluación personal. Licencia de los pesos sin verificar. Sin OpenAI ni grabación de audio.</p>
 <p>1. Cargar motor y archivos locales verificados. 2. Activar micrófono. 3. Decir «Atlas». 4. Detener.</p>
+<label>Prueba Live <select id="live-mode"><option value="COLD">Cold Live</option><option value="WARM">Warm Live</option></select></label>
+<p>Live requiere threshold 0.25. Warm prepara y verifica un stream nuevo antes de habilitar el micrófono. Seleccionar antes de cargar.</p>
 <button id="load">Cargar motor</button><button id="listen" disabled>Activar micrófono</button><button id="stop" disabled>Detener y liberar</button>
 <p>Comparación sin micrófono: seleccionar el mismo WAV autorizado fuera de Git. Por defecto requiere mono, 16 kHz.</p>
 <label>WAV <input id="wav-file" type="file" accept=".wav"></label>
