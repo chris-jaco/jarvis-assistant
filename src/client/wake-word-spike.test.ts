@@ -10,7 +10,7 @@ import { checkManifest, verifyBytes, PcmDetector, ResourceScope, requiredAssets 
 import { decodeWav } from '../../experiments/wake-word/wav.js';
 import { canonicalBytes, compareRuns, matchWindows } from '../../experiments/wake-word/trace.js';
 import { PcmTrace } from '../../experiments/wake-word/trace.js';
-import { measurePcm, SignalTotals } from '../../experiments/wake-word/signal.js';
+import { measurePcm, SignalTotals, compareSignalLevels } from '../../experiments/wake-word/signal.js';
 import type { Manifest } from '../../experiments/wake-word/core.js';
 
 const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
@@ -255,7 +255,7 @@ async function browserHarness(options: { deferMicrophone?: boolean; deferClose?:
   let workers = 0, requests = 0, closedContexts = 0, terminated = 0, connected = 0;
   let node: any, currentWorker: any;
   let resolveMicrophone!: (v: unknown) => void, resolveClose!: () => void;
-  const track = { readyState: 'live', stop() { this.readyState = 'ended'; }, addEventListener() {} };
+  const track = { getSettings: () => ({ sampleRate: 48000, channelCount: 2, echoCancellation: false, noiseSuppression: false, autoGainControl: false, deviceId: 'private-device', groupId: 'private-group' }), readyState: 'live', stop() { this.readyState = 'ended'; }, addEventListener() {} };
   const stream = { getTracks: () => [track], getAudioTracks: () => [track] };
   const closeGate = options.deferClose ? new Promise<void>(r => { resolveClose = r; }) : Promise.resolve();
   const microphone = options.deferMicrophone ? new Promise(r => { resolveMicrophone = r; }) : Promise.resolve(stream);
@@ -301,7 +301,7 @@ async function browserHarness(options: { deferMicrophone?: boolean; deferClose?:
     AudioContext: Context, AudioWorkletNode: Worklet, Worker,
     MessageChannel: class { port1 = { close() {} }; port2 = { close() {} }; },
     fetch: async (url: string) => ({ ok: true, json: async () => fixture(), arrayBuffer: async () => new ArrayBuffer(1) }),
-    checkManifest, verifyBytes: async () => {}, ResourceScope, decodeWav, canonicalBytes, compareRuns, matchWindows, crypto,
+    checkManifest, verifyBytes: async () => {}, ResourceScope, compareSignalLevels, decodeWav, canonicalBytes, compareRuns, matchWindows, crypto,
     SpikeError: (await import('../../experiments/wake-word/core.js')).SpikeError,
     AbortController, Uint8Array, ArrayBuffer, Promise, setTimeout, clearTimeout, performance
   });
@@ -387,4 +387,28 @@ test('browser WAV source opens no microphone, prevents double starts and waits a
   assert.equal(h.counts().closedContexts, 1); assert.equal(h.counts().terminated, 1);
   assert.match(h.elements.get('status').textContent, /WAV_COMPLETO.*tracks terminados: true/);
   assert.match(h.elements.get('diagnostics').textContent, /"state": "COMPLETED"/);
+});
+
+
+test('microphone diagnostics expose reported rate conversion and DSP without device identifiers or changing requested channel', async () => {
+  const h = await browserHarness(); await h.load(); await h.listen();
+  const data = JSON.parse(h.elements.get('diagnostics').textContent);
+  assert.equal(data.capture.contextSampleRate, 16000);
+  assert.equal(data.capture.trackSampleRate, 48000); assert.equal(data.capture.trackChannels, 2);
+  assert.equal(data.capture.selectedInputChannel, 0);
+  assert.equal(data.capture.resampling, 'BROWSER_RATE_CONVERSION_EXPECTED');
+  assert.equal(data.capture.hardwareRateVerified, false);
+  assert.equal(data.capture.autoGainControl, false);
+  assert.doesNotMatch(JSON.stringify(data), /private-device|private-group|deviceId|groupId/);
+  await h.stop(); assert.equal(h.track.readyState, 'ended');
+});
+
+
+test('stop during optional reference loading never opens a late microphone or context', async () => {
+  const h = await browserHarness(); await h.load();
+  let finish!: (s: string) => void;
+  h.elements.get('offline-report').files = [{ size: 2, text: () => new Promise<string>(r => { finish = r; }) }];
+  const starting = h.listen(); await h.stop(); finish('{}'); await starting;
+  assert.equal(h.counts().requests, 0); assert.equal(h.counts().closedContexts, 0);
+  assert.equal(h.counts().terminated, 1);
 });

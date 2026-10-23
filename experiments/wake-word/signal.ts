@@ -45,3 +45,14 @@ export class SignalTotals {
       clippedSamples: this.clippedSamples, invalidSamples: this.invalidSamples };
   }
 }
+
+// Compare numerical levels only. Never echo arbitrary report fields or infer speech correctness.
+export function compareSignalLevels(live: any, reference: any) {
+  const number = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+  const values = (s: any) => ({ rms: number(s?.rms), peak: number(s?.peak),
+    nearZeroPercent: number(s?.nearZeroPercent), clippedSamples: number(s?.clippedSamples), invalidSamples: number(s?.invalidSamples) });
+  const a = values(live), b = values(reference);
+  return { live: a, reference: b, rmsRatio: a.rms !== null && b.rms !== null && b.rms > 0 ? a.rms / b.rms : null,
+    peakRatio: a.peak !== null && b.peak !== null && b.peak > 0 ? a.peak / b.peak : null,
+    note: 'DIFFERENT_AUDIO_AND_SILENCE_DURATIONS_NOT_RECOGNITION_OR_GAIN_RECOMMENDATION' };
+}

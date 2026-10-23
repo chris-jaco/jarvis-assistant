@@ -549,3 +549,71 @@ node --import tsx experiments/wake-word/offline.ts .local/wake-word-spike/audio/
 Si se usó --convert en la referencia, conservarlo también en ese comando. Evitar
 redirección UTF-16 de Windows PowerShell: el picker de JSON espera UTF-8. Los
 índices de ventanas mostrados por el diagnóstico empiezan en cero (0–7).
+
+
+## Estabilización WAV y diagnóstico de micrófono
+
+La evidencia Windows nueva, a threshold .25, mostró igualdad Offline/Worklet:
+3 rawHits en bloques 27, 46 y 91, 207 bloques, **330411 muestras**, FNV
+`f5a0e491`, RMS/peak iguales y cero supresiones. No se ejecutó ese audio en cloud.
+La duración 20.65 s estaba redondeada: para este archivo la cola real es de
+**811 muestras**, no 800. Siempre usar el conteo del archivo, no una duración
+redondeada para inferirlo.
+
+El fallo reproducible de transporte era ausencia de backpressure de la fuente
+WAV: se consumía el archivo al ritmo del renderizador aun con cuatro buffers
+pendientes. Una pausa de scheduling, devolución tardía o inferencia lenta podía
+agotar el pool aunque p95 fuese pequeño. Los datos disponibles no identifican
+cuál de esas pausas ocurrió en cada ejecución Windows.
+
+Ahora el archivo pausa su cursor cuando no hay buffer libre, incluso a mitad
+de un quantum. Lo reanuda al devolver un buffer, conservando orden y longitud.
+No crece el pool, no se descartan/duplican muestras y no se introduce silencio
+al decoder. La salida del grafo continúa muda. `transport.wavBackpressure`
+informa quanta y tiempo de render no consumido; el tiempo de pared puede superar
+la duración del audio. No es una prueba de rendimiento Realtime ni de que el
+micrófono soporte esas pausas. El micrófono sigue fallando explícitamente con
+AUDIO_OVERRUN cuando no puede conservar audio real. El timeout finito previo
+(duración del WAV + 30 s) sigue deteniendo/liberando una prueba incompleta;
+no hay reintentos. Cooldown y sus bases temporales no se modifican: comparar
+rawHits y posiciones antes de comparar detecciones filtradas.
+
+### Aceptación Windows
+
+1. Ejecutar `node experiments/wake-word/server.mjs` y abrir la dirección local
+   indicada. Mantener la pestaña visible. Usar el mismo WAV local y reporte
+   Offline UTF-8, el mismo modelo y .25 antes de cargar el motor.
+2. Repetir WAV → AudioWorklet → Worker al menos diez veces, cargando un motor
+   nuevo en cada intento. Confirmar ausencia de micrófono y de tráfico externo;
+   330411 muestras/207 bloques, cola 811 y la misma huella, RMS/peak y rawHits
+   en los mismos bloques. Registrar highWater, waitQuanta, waitRenderMs y máximos
+   de inferencia/devolución. Un highWater de 4 ahora puede producir pausa WAV,
+   no pérdida. Timeout, Stop o error deben informar INCOMPLETE y liberar recursos.
+3. Para micrófono, seleccionar opcionalmente el mismo reporte Offline y cargar
+   nuevamente el motor sin cambiar parámetros. Activar micrófono, medir unos
+   segundos de silencio y luego un número conocido de pronunciaciones a igual
+   distancia. Hacer ensayos separados para silencio y voz; sus proporciones
+   afectan el RMS agregado. No se guarda ninguna grabación.
+4. Revisar `capture`: frecuencia/canales reportados por el track, 16 kHz del
+   contexto, DSP negociado y solicitud original. `resampling` señala diferencias
+   reportadas; no verifica frecuencia física ni DSP interno del driver/Windows.
+5. Revisar `transport.inputChannels` (totales escalares de hasta ocho canales
+   observados en la entrada del worklet) y `worker.signal.lastBlock/aggregate`.
+   Canal 0 sigue siendo la única entrada al motor. Si su RMS/peak es casi nulo
+   mientras otro canal tiene señal, documentar el problema antes de cambiar la
+   selección. `channelsTruncated` indica si hay más canales que los medidos.
+   Los canales observados son los del grafo del navegador, no evidencia de los
+   canales físicos originales del dispositivo.
+6. `microphoneComparison` contrasta sólo RMS, peak, nearZero, clipping e inválidos
+   con el reporte elegido. Ratios no prueban reconocimiento ni autorizan ganancia.
+   Comparar también los bloques durante voz: un agregado bajo puede deberse a
+   más silencio. Una señal no nula no demuestra por sí sola que sea voz útil.
+7. Detener y verificar tracks terminados, AudioContext cerrado y Worker liberado.
+   No deben existir sesiones duplicadas. No ajustar DSP, canales, ganancia,
+   resampling, modelo ni umbrales para esta medición.
+
+Los diagnósticos no imprimen deviceId, groupId, nombres de archivos/dispositivos,
+PCM ni transcripciones. Sólo memoria de sesión; ninguna exportación automática.
+Las pruebas sintéticas verifican continuidad bajo backpressure, no reconocimiento
+acústico ni estabilidad real de Windows. Siguiente checkpoint: revisar estas
+mediciones antes de cambiar la captura o integrar wake word.

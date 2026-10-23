@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 import { PcmDetector, SpikeError } from '../../experiments/wake-word/core.js';
 import { PcmTrace, canonicalBytes, compareRuns, matchWindows } from '../../experiments/wake-word/trace.js';
-import { measurePcm, SignalTotals } from '../../experiments/wake-word/signal.js';
+import { measurePcm, SignalTotals, compareSignalLevels } from '../../experiments/wake-word/signal.js';
 import { replayPcm } from '../../experiments/wake-word/replay.js';
 
 function sourceHarness(pcm?: Float32Array) {
@@ -70,14 +70,19 @@ test('WAV completion waits for all recycled buffers; no silence padding or early
   assert.equal(h.controls.at(-1).type, 'wav-complete'); assert.equal(h.controls.at(-1).samples, 1700);
 });
 
-test('WAV mode preserves bounded overrun and cancellation; microphone mode keeps its existing partial-block policy', () => {
+test('WAV mode pauses its cursor with a full pool; microphone keeps overrun and partial-block policies', () => {
   const h = sourceHarness(new Float32Array(16000));
   for (let i = 0; i < 70 && h.p.active; i++) h.p.process([], [[new Float32Array(128)]]);
-  assert.equal(h.controls.at(-1).code, 'AUDIO_OVERRUN'); assert.equal(h.controls.at(-1).outstanding, 4);
+  assert.equal(h.p.active, true); assert.equal(h.p.pending.size, 4);
+  assert.equal(h.p.wavOffset, 6400); assert.ok(h.p.snapshot().wavBackpressure.waitQuanta > 0);
+  const owned = h.p.wav; h.p.port.onmessage({ data: 'stop' }); assert.ok(owned.every((v: number) => v === 0));
   assert.equal(h.controls.some(m => m.type === 'wav-complete'), false);
   const mic = sourceHarness(); mic.p.process([[new Float32Array(1700)]]);
   assert.equal(mic.queue.length, 1); assert.equal(mic.p.offset, 100);
   mic.p.port.onmessage({ data: 'stop' }); assert.equal(mic.queue.length, 1);
+  const busyMic = sourceHarness();
+  for (let i = 0; i < 5; i++) busyMic.p.process([[new Float32Array(1600)]]);
+  assert.equal(busyMic.controls.at(-1).code, 'AUDIO_OVERRUN'); assert.equal(busyMic.p.active, false);
 });
 
 test('trace fingerprint is independent of segmentation and preserves float32 LE sample identity', () => {
@@ -106,4 +111,62 @@ test('comparison reports config, PCM, amplitude and hit differences without adju
   assert.equal(compareRuns(current, { ...offline, configuration: { ...configuration, threshold: .25 } }).sameConfiguration, false);
   assert.equal(compareRuns(current, { ...offline, result: { ...offline.result, signal: { rms: .01, peak: .05 } } }).rmsDifference, .1 - .01);
   assert.throws(() => compareRuns(current, {}), /OFFLINE_REPORT_INVALID/);
+});
+
+
+test('delayed and burst recycling resumes exact WAV sample cursor without loss, duplicates or padded silence', async () => {
+  const pcm = new Float32Array(330411);
+  for (let i = 0; i < pcm.length; i++) pcm[i] = (i % 313) / 1000;
+  const offline = replayPcm(pcm.slice(), engine());
+  const h = sourceHarness(pcm.slice()), w = await workerHarness(h);
+  // Simulate an occupied Worker, including pauses mid-render-quantum. Drain in bursts.
+  for (let i = 0; i < 14000 && h.p.active; i++) {
+    h.p.process([], [[new Float32Array(128)]]);
+    if (i % 200 === 199) w.drain();
+  }
+  w.drain();
+  const results = w.messages.filter(m => m.type === 'processed');
+  const last = results.at(-1).diagnostics;
+  assert.equal(results.length, 207); assert.equal(last.trace.processedSamples, pcm.length);
+  assert.equal(last.signal.lastBlock.blockLength, 811);
+  assert.equal(last.trace.pcmFnv1a32, offline.pcmFnv1a32);
+  assert.equal(last.signal.aggregate.rms, offline.signal.rms);
+  assert.equal(last.signal.aggregate.peak, offline.signal.peak);
+  assert.deepEqual(last.trace.events, offline.events);
+  assert.equal(h.controls.filter(m => m.type === 'wav-complete').length, 1);
+  assert.ok(h.p.snapshot().wavBackpressure.waitQuanta > 0);
+  assert.equal(h.p.highWater, 4); assert.equal(h.p.returned, 207);
+  assert.ok(!h.controls.some(m => m.type === 'overrun')); await w.stop();
+});
+
+test('channel diagnostics reveal silent selected channel without changing PCM or retaining channel arrays', () => {
+  const h = sourceHarness();
+  const left = new Float32Array(1600), right = new Float32Array(1600).fill(.1);
+  h.p.process([[left, right]]);
+  const stats = h.p.snapshot().inputChannels;
+  assert.equal(stats.length, 2); assert.equal(stats[0].rms, 0); assert.equal(stats[0].nearZeroPercent, 100);
+  assert.ok(Math.abs(stats[1].rms - .1) < 1e-7); assert.equal(stats[1].nearZeroPercent, 0);
+  assert.ok(new Float32Array(h.queue[0].pcm).every(v => v === 0), 'selected channel stays zero');
+  assert.equal(h.queue[0].channels, 2); assert.ok(right.every(v => v > 0));
+  assert.doesNotMatch(JSON.stringify(stats), /deviceId|groupId|label|pcm/);
+  h.p.port.onmessage({ data: 'stop' });
+});
+
+test('channel metrics bound channel count, expose clipping and invalid samples without raw data', () => {
+  const h = sourceHarness();
+  h.p.process([[new Float32Array([0, 1, -1, NaN]), ...Array.from({ length: 9 }, () => new Float32Array(4))]]);
+  const stats = h.p.snapshot();
+  assert.equal(stats.channelsTruncated, true); assert.equal(stats.inputChannels.length, 8);
+  assert.equal(stats.inputChannels[0].clippedSamples, 2); assert.equal(stats.inputChannels[0].invalidSamples, 1);
+  assert.equal(stats.inputChannels[0].nearZeroPercent, 25);
+  h.p.port.onmessage({ data: 'stop' });
+});
+
+test('signal comparison returns only finite scalar whitelisted fields, not private report content', () => {
+  const result = compareSignalLevels({ rms: .01, peak: .2, nearZeroPercent: 80, clippedSamples: 1, invalidSamples: 0 },
+    { rms: .02, peak: .4, deviceId: 'private-device', pcm: 'private-audio', nearZeroPercent: 30 });
+  assert.equal(result.rmsRatio, .5); assert.equal(result.peakRatio, .5);
+  assert.equal(result.live.nearZeroPercent, 80); assert.equal(result.reference.nearZeroPercent, 30);
+  assert.doesNotMatch(JSON.stringify(result), /private|deviceId|pcm/);
+  assert.equal(compareSignalLevels({ rms: Infinity }, { rms: 0 }).rmsRatio, null);
 });

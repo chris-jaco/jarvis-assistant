@@ -1,6 +1,7 @@
 import { checkManifest, verifyBytes, ResourceScope, SpikeError } from './core.js';
 import type { Manifest } from './core.js';
 import { decodeWav } from './wav.js';
+import { compareSignalLevels } from './signal.js';
 import { canonicalBytes, compareRuns, matchWindows } from './trace.js';
 
 const button = (id: string) => document.getElementById(id) as HTMLButtonElement;
@@ -8,7 +9,7 @@ const load = button('load'), listen = button('listen'), stopButton = button('sto
 const wavButton = button('wav-test');
 const status = document.getElementById('status')!, metrics = document.getElementById('metrics')!, events = document.getElementById('events')!;
 const diagnosticView = document.getElementById('diagnostics')!;
-let diagnostic: { configuration?: unknown; worker?: unknown; transport?: unknown; failure?: unknown; capture?: unknown; wav?: unknown; comparison?: unknown; alignment?: unknown } = {};
+let diagnostic: { configuration?: unknown; worker?: unknown; transport?: unknown; failure?: unknown; capture?: unknown; wav?: unknown; comparison?: unknown; alignment?: unknown; microphoneComparison?: unknown } = {};
 let inFlight: { sequence: number; startedAt: number } | undefined;
 function showDiagnostics() { diagnosticView.textContent = JSON.stringify(diagnostic, null, 2); }
 let scope: ResourceScope | undefined, worker: Worker | undefined, worklet: AudioWorkletNode | undefined;
@@ -114,6 +115,12 @@ async function startCapture(wavMode = false) {
     } catch { diagnostic.comparison = { state: 'INVALID_REPORT' }; showDiagnostics(); void stop('COMPARISON_INVALID'); }
   };
   try {
+    const reportFile = (document.getElementById('offline-report') as HTMLInputElement).files?.[0];
+    if (reportFile) {
+      if (reportFile.size > 2 * 1024 * 1024) throw new SpikeError('OFFLINE_REPORT_INVALID');
+      offlineReport = JSON.parse(await reportFile.text());
+    }
+    if (current !== generation) return;
     if (wavMode) {
       const file = (document.getElementById('wav-file') as HTMLInputElement).files?.[0];
       if (!file || file.size > 32 * 1024 * 1024) throw new SpikeError('WAV_REQUIRED');
@@ -130,11 +137,6 @@ async function startCapture(wavMode = false) {
         source: 'MEMORY_WAV_IN_AUDIOWORKLET_NO_MICROPHONE_NO_BROWSER_RESAMPLING', appendedSilenceSamples: 0 };
       diagnostic.wav = { state: 'IN_PROGRESS', ...wavInfo };
       resources.add(() => { if (!completed) { diagnostic.wav = { state: 'INCOMPLETE', ...wavInfo, processedSamples: lastWorker?.trace?.processedSamples ?? 0 }; showDiagnostics(); } });
-      const reportFile = (document.getElementById('offline-report') as HTMLInputElement).files?.[0];
-      if (reportFile) {
-        if (reportFile.size > 2 * 1024 * 1024) throw new SpikeError('OFFLINE_REPORT_INVALID');
-        offlineReport = JSON.parse(await reportFile.text());
-      }
       const annotation = (document.getElementById('word-windows') as HTMLTextAreaElement).value.trim();
       if (annotation) {
         windows = annotation.split(/\r?\n/).map(line => line.split(',').map(Number));
@@ -159,7 +161,11 @@ async function startCapture(wavMode = false) {
     diagnostic.capture = { contextSampleRate: context.sampleRate,
       trackSampleRate: settings.sampleRate ?? null, trackChannels: settings.channelCount ?? null,
       echoCancellation: settings.echoCancellation ?? null, noiseSuppression: settings.noiseSuppression ?? null,
-      autoGainControl: settings.autoGainControl ?? null, selectedInputChannel: 0 };
+      autoGainControl: settings.autoGainControl ?? null, selectedInputChannel: 0,
+      requested: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      resampling: typeof settings.sampleRate !== 'number' ? 'INPUT_RATE_UNKNOWN'
+        : settings.sampleRate === context.sampleRate ? 'NO_REPORTED_RATE_DIFFERENCE' : 'BROWSER_RATE_CONVERSION_EXPECTED',
+      hardwareRateVerified: false };
     showDiagnostics();
     source = context.createMediaStreamSource(capture);
     capture.getAudioTracks().forEach(track => track.addEventListener('ended', () => { if (live) void stop('MICROPHONE_LOST'); }));
@@ -210,6 +216,7 @@ async function startCapture(wavMode = false) {
       if (data.type !== 'processed') return;
       inFlight = undefined; diagnostic.worker = data.diagnostics; lastWorker = data.diagnostics;
       if (data.sequence !== blocks) { void stop('AUDIO_SEQUENCE_ERROR'); return; }
+      if (!wavMode && offlineReport) diagnostic.microphoneComparison = compareSignalLevels(data.diagnostics?.signal?.aggregate, offlineReport?.result?.signal);
       blocks++; processedMs += data.engineMs; pcmMs += data.pcmMs; highWater = Math.max(highWater, data.outstanding);
       // Bounded scalar telemetry only. Never retain audio or transcripts.
       engineTimes.push(data.engineMs); deliveries.push(data.workerMs);

@@ -6,6 +6,7 @@ class AtlasPcm extends AudioWorkletProcessor {
     this.free = Array.from({ length: 4 }, () => new Float32Array(1600));
     this.buffer = null; this.offset = 0; this.sequence = 0; this.pending = new Map(); this.active = true;
     this.frames = 0; this.returned = 0; this.highWater = 0; this.returnAudioMaxMs = 0; this.returnWallMaxMs = null; this.recent = [];
+    this.wavWaitQuanta = 0; this.wavWaitFrames = 0; this.channelTotals = []; this.channelsTruncated = false;
     this.observedChannels = 0; this.blockChannels = new Set();
     this.wavMode = false; this.wavDone = false; this.wavOffset = 0; this.wav = null; this.wavArmed = false;
     this.port.onmessage = ({ data }) => {
@@ -48,7 +49,28 @@ class AtlasPcm extends AudioWorkletProcessor {
       returnAudioMaxMs: this.returnAudioMaxMs, returnWallMaxMs: this.returnWallMaxMs,
       oldestAudioMs: oldest ? (this.frames - oldest.frame) / 16 : 0,
       oldestWallMs: oldest && wall !== null && oldest.wall !== null ? Math.max(0, wall - oldest.wall) : null,
-      recent: this.recent.slice() };
+      recent: this.recent.slice(),
+      wavBackpressure: { waitQuanta: this.wavWaitQuanta, waitRenderFrames: this.wavWaitFrames,
+        waitRenderMs: this.wavWaitFrames / 16, policy: 'PAUSE_FILE_CURSOR_NO_PADDING' },
+      inputChannels: this.channelTotals.map((s, index) => ({ index, samples: s.samples,
+        rms: s.finite ? Math.sqrt(s.squares / s.finite) : null, peak: s.finite ? s.peak : null,
+        nearZeroPercent: s.samples ? 100 * s.nearZero / s.samples : 0,
+        clippedSamples: s.clipped, invalidSamples: s.invalid })), channelsTruncated: this.channelsTruncated };
+  }
+  measureChannels(channels) {
+    // Bounded scalar totals only; never retain input arrays or change channel selection.
+    if (channels.length > 8) this.channelsTruncated = true;
+    for (let i = 0; i < Math.min(8, channels.length); i++) {
+      const s = this.channelTotals[i] ??= { samples: 0, finite: 0, squares: 0, peak: 0, nearZero: 0, clipped: 0, invalid: 0 };
+      for (const v of channels[i]) {
+        s.samples++;
+        if (!Number.isFinite(v)) { s.invalid++; continue; }
+        s.finite++; s.squares += v * v; s.peak = Math.max(s.peak, Math.abs(v));
+        if (Math.abs(v) <= 1e-5) s.nearZero++;
+        if (Math.abs(v) >= .999) s.clipped++;
+        if (Math.abs(v) > 1) s.invalid++;
+      }
+    }
   }
   release() {
     this.wav?.fill(0); this.wav = null;
@@ -83,12 +105,21 @@ class AtlasPcm extends AudioWorkletProcessor {
     if (this.wavMode && this.wavDone) { this.finishWav(); return this.active; }
     const channel = this.wavMode ? this.wav.subarray(this.wavOffset, this.wavOffset + (outputs[0]?.[0]?.length ?? 128)) : inputs[0]?.[0];
     if (!channel) return true;
+    if (!this.wavMode) this.measureChannels(inputs[0]);
     this.observedChannels = this.wavMode ? 1 : inputs[0].length;
     if (!this.audioPort) { this.fail('AUDIO_PROTOCOL_ERROR'); return false; }
-    for (const sample of channel) {
+    for (let i = 0; i < channel.length; i++) {
+      const sample = channel[i];
       if (!this.buffer) {
         this.buffer = this.free.pop();
-        if (!this.buffer) { this.fail('AUDIO_OVERRUN'); return false; }
+        if (!this.buffer) {
+          if (this.wavMode) {
+            // File input is rewindable: do not consume this sample or inject silence into the decoder.
+            this.wavWaitQuanta++; this.wavWaitFrames += channel.length - i;
+            return true;
+          }
+          this.fail('AUDIO_OVERRUN'); return false;
+        }
       }
       this.blockChannels.add(this.observedChannels);
       this.buffer[this.offset++] = sample; this.frames++;
