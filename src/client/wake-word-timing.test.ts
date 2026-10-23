@@ -10,7 +10,7 @@ async function harness(infer: (h: any) => void = () => {}, wall = true) {
   let time = 0, Processor: any, disposed = 0;
   const clock = { now: () => time, timeOrigin: 1000 };
   const outgoing: any[] = [], returns: any[] = [], ui: any[] = [], controls: any[] = [];
-  const awContext = vm.createContext({ Float32Array, ArrayBuffer, sampleRate: 16000,
+  const awContext = vm.createContext({ createWasmProfiler: () => ({ wrapEngine: (e: any) => e, snapshot: () => ({}), restore() {} }), Float32Array, ArrayBuffer, sampleRate: 16000,
     currentFrame: 0, currentTime: 0, performance: wall ? clock : undefined,
     AudioWorkletProcessor: class { port = { onmessage: undefined, postMessage: (v: any) => controls.push(structuredClone(v)) }; },
     registerProcessor: (_name: string, p: any) => { Processor = p; } });
@@ -23,7 +23,7 @@ async function harness(infer: (h: any) => void = () => {}, wall = true) {
   const port = { onmessage: undefined as any, start() {}, close() {},
     postMessage(v: any, transfer: Transferable[]) { returns.push(structuredClone(v, { transfer })); } };
   let h: any;
-  const ctx = vm.createContext({ self, performance: clock, Float32Array, Uint8Array, ArrayBuffer,
+  const ctx = vm.createContext({ createWasmProfiler: () => ({ wrapEngine: (e: any) => e, snapshot: () => ({}), restore() {} }), self, performance: clock, Float32Array, Uint8Array, ArrayBuffer,
     PcmDetector: class extends PcmDetector { constructor(engine: any) { super(engine, clock.now); } }, SpikeError, PcmTrace, measurePcm, SignalTotals,
     console: { log() {}, info() {}, warn() {}, error() {}, debug() {} },
     __api: { initKWSModule: async () => ({ HEAPU8: new Uint8Array(8), FS: { writeFile() {} } }),

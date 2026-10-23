@@ -9,7 +9,7 @@ const load = button('load'), listen = button('listen'), stopButton = button('sto
 const wavButton = button('wav-test');
 const status = document.getElementById('status')!, metrics = document.getElementById('metrics')!, events = document.getElementById('events')!;
 const diagnosticView = document.getElementById('diagnostics')!;
-let diagnostic: { configuration?: unknown; worker?: unknown; transport?: unknown; failure?: unknown; capture?: unknown; wav?: unknown; comparison?: unknown; alignment?: unknown; microphoneComparison?: unknown; timing?: unknown } = {};
+let diagnostic: { configuration?: unknown; worker?: unknown; transport?: unknown; failure?: unknown; capture?: unknown; wav?: unknown; comparison?: unknown; alignment?: unknown; microphoneComparison?: unknown; timing?: unknown; wasmStage?: unknown } = {};
 let inFlight: { sequence: number; startedAt: number; inferenceEpochMs?: number | null } | undefined;
 function showDiagnostics() { diagnosticView.textContent = JSON.stringify(diagnostic, null, 2); }
 let scope: ResourceScope | undefined, worker: Worker | undefined, worklet: AudioWorkletNode | undefined;
@@ -106,7 +106,7 @@ async function startCapture(wavMode = false) {
     completed = true;
     if (lastWorker?.trace?.processedSamples !== wavInfo.samples) { diagnostic.wav = { state: 'INVALID', ...wavInfo }; showDiagnostics(); void stop('WAV_SAMPLE_MISMATCH'); return; }
     const report = { ...wavInfo, configuration: diagnostic.configuration, trace: lastWorker.trace,
-      rawHits: lastWorker.rawHits, signal: lastWorker.signal.aggregate, cooldownClock: 'EXECUTION_CLOCK' };
+      wasmProfile: lastWorker.wasmProfile, rawHits: lastWorker.rawHits, signal: lastWorker.signal.aggregate, cooldownClock: 'EXECUTION_CLOCK' };
     diagnostic.wav = { state: 'COMPLETED', ...report };
     try {
       if (offlineReport) diagnostic.comparison = compareRuns(report, offlineReport);
@@ -216,6 +216,7 @@ async function startCapture(wavMode = false) {
       if (data.type === 'capture-ready') { connectedWorker(); return; }
       if (data.type === 'error') { diagnostic.worker = data.diagnostics; showDiagnostics(); rejectConnection(new SpikeError('ENGINE_FAILED')); void stop('ENGINE_FAILED'); return; }
       if (!live) return;
+      if (data.type === 'wasm-stage') { diagnostic.wasmStage = data.event; return; }
       if (data.type === 'inference-start') {
         diagnostic.timing = data.timing;
         if (inFlight && inFlight.sequence === data.sequence) inFlight.inferenceEpochMs = data.timing?.current?.inferenceStart?.epochMs ?? null;

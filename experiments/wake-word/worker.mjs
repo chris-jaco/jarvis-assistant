@@ -1,7 +1,9 @@
 import { PcmDetector, SpikeError } from './core.js';
 import { measurePcm, SignalTotals } from './signal.js';
 import { PcmTrace } from './trace.js';
+import { createWasmProfiler } from './profile.js';
 
+let wasmProfiler;
 let detector, module, audioPort, nextSequence = 0;
 let wavTest = false;
 const trace = new PcmTrace();
@@ -46,15 +48,17 @@ self.onmessage = async ({ data }) => {
         model: { encoder: '/encoder.onnx', decoder: '/decoder.onnx', joiner: '/joiner.onnx', tokens: '/tokens.txt' }, maxActivePaths: 4,
         keywords: [{ label: 'Atlas', matches: data.keywords.map(tokens => ({ tokens })), score: 1, threshold: data.threshold }]
       });
+      wasmProfiler = createWasmProfiler(module, event => self.postMessage({ type: 'wasm-stage', event }));
+      const profiledSpotter = wasmProfiler.wrapEngine(spotter);
       detector = new PcmDetector({
         processAudio(samples, rate) {
           timingState.lastStarted = currentTiming.sequence;
           currentTiming.inferenceStart = stamp(); stage(2);
           self.postMessage({ type: 'inference-start', sequence: currentTiming.sequence, timing: diagnostics.timing });
-          try { return spotter.processAudio(samples, rate); }
+          try { return profiledSpotter.processAudio(samples, rate); }
           finally { currentTiming.inferenceEnd = stamp(); stage(3); }
         },
-        dispose() { spotter.dispose(); }
+        dispose() { profiledSpotter.dispose(); }
       });
       self.postMessage({ type: 'ready', wasmHeapBytes: module.HEAPU8.byteLength,
         config: { threshold: data.threshold, score: 1, maxActivePaths: 4, cooldownMs: 1000, keywords: data.keywords } });
@@ -91,6 +95,8 @@ self.onmessage = async ({ data }) => {
             timing: { recycleEpochMs: currentTiming.recyclePost.epochMs } }, [block.pcm]);
           const recyclePostMs = performance.now() - recycleStart;
           timingState.lastCompleted = block.sequence; stage(4);
+          // Clone optional profile telemetry only after returning the transport buffer.
+          diagnostics.wasmProfile = wasmProfiler.snapshot();
           diagnostics.completed++; diagnostics.rawHits += result.rawHits; diagnostics.suppressedHits += result.suppressedHits;
           diagnostics.engineMaxMs = Math.max(diagnostics.engineMaxMs, result.engineMs);
           diagnostics.beforeRecycleMaxMs = Math.max(diagnostics.beforeRecycleMaxMs, beforeRecycleMs);
@@ -103,6 +109,7 @@ self.onmessage = async ({ data }) => {
           self.postMessage({ type: 'processed', ...result, sequence: block.sequence, outstanding: block.outstanding,
             workerMs: performance.now() - started, wasmHeapBytes: module.HEAPU8.byteLength, diagnostics });
         } catch {
+          diagnostics.wasmProfile = wasmProfiler?.snapshot();
           stage(5);
           if (block.pcm instanceof ArrayBuffer && block.pcm.byteLength) new Uint8Array(block.pcm).fill(0);
           audioPort.close(); self.postMessage({ type: 'error', code: 'AUDIO_PROCESSING_FAILED', diagnostics });
@@ -112,6 +119,7 @@ self.onmessage = async ({ data }) => {
     } else if (data.type === 'stop') {
       audioPort?.close(); audioPort = undefined;
       detector?.stop(); detector = undefined;
+      wasmProfiler?.restore();
       module?.HEAPU8.fill(0); module = undefined;
       self.postMessage({ type: 'stopped' }); self.close();
     }

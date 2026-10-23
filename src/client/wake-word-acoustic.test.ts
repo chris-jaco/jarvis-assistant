@@ -108,7 +108,7 @@ test('offline worker blocks network, reports sanitized failures and closes all o
     const messages: any[] = [], heap = new Uint8Array([1, 2, 3]);
     const pcm = new Float32Array(1600).fill(.1);
     let context: any;
-    context = vm.createContext({
+    context = vm.createContext({ createWasmProfiler: () => ({ wrapEngine: (e: any) => e, snapshot: () => ({}), restore() {} }),
       replayPcm, Float32Array, Uint8Array,
       console: { log() {}, info() {}, warn() {}, error() {}, debug() {} },
       parentPort: { postMessage: (v: unknown) => messages.push(structuredClone(v)), close() { closed = true; } },

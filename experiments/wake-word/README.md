@@ -708,3 +708,113 @@ sólo a partir de estos números.
 Pruebas de VM con reloj inyectado reproducen inferencia lenta, Worker sin atender,
 colas de ida/vuelta, ráfagas, devoluciones fuera de orden y fallo dentro del motor.
 No constituyen medición del navegador Windows ni reconocimiento acústico.
+
+
+## Perfilado por fronteras WASM (experimental)
+
+`profile.ts` decora en memoria seis funciones exportadas del módulo del runtime
+fijado 0.3.0. No edita el JS, WASM, manifiesto ni hashes de los assets verificados.
+Rechaza exports ausentes/no escribibles; no ofrece un perfil parcial como completo.
+Los descriptores originales se restauran al disponer el motor, incluso si dispose
+falla. El adapter conserva argumentos, valores devueltos, excepciones, orden de
+llamadas y PCM. No añade warm-up, reset extra, padding ni cambios de transporte.
+La instrumentación no es una API estable de optimización del proveedor: su
+compatibilidad depende del wrapper y hashes fijados.
+
+Etapas numéricas de `wasmProfile.stages` (array, índice = etapa menos uno):
+
+| Etapa | Frontera medida |
+| --- | --- |
+| 1 | Entrada en processAudio del wrapper hasta entrada en AcceptWaveform: validación, reserva, copia y comprobaciones JS del prefijo |
+| 2 | SherpaOnnxOnlineStreamAcceptWaveform |
+| 3 | Cada SherpaOnnxIsKeywordStreamReady, incluyendo consultas falsas |
+| 4 | Cada SherpaOnnxDecodeKeywordStream |
+| 5 | GetKeywordResult hasta DestroyKeywordResult: consulta y lectura JS, excluyendo tiempo del reset anidado |
+| 6 | SherpaOnnxResetKeywordStream, sólo si el wrapper lo invoca |
+
+La etapa 1 **no separa** validación, malloc y copia ni incluye la validación previa
+que realiza PcmDetector. No atribuir todo su coste a copiar PCM. Si no se alcanza
+AcceptWaveform, preparationReachedAccept=false y el prefijo queda incompleto.
+La etapa 5 incluye liberación del resultado; no equivale sólo al coste de GetResult.
+Un bloque FAILED puede contener etapas parciales. El profiler no inspecciona
+operadores ONNX internos ni denomina a toda DecodeKeywordStream «decoder.onnx».
+
+Cada etapa informa calls, wallMs y maxWallMs. Por bloque: sequence, wallMs,
+decodeCalls, decodeWallMs, decodeMaxWallMs, heapBefore/heapAfter (bytes del heap
+lineal reservado, **no RAM residente**), rawHits, status y eventos begin/end.
+Los eventos usan phase=0 al entrar y phase=1 al salir. No incluyen argumentos,
+punteros, resultados nativos, tokens, PCM, rutas, nombres ni errores crudos.
+La salida por excepción se conserva como FAILED y el error exterior sigue cerrado.
+
+Resumen acumulado: totalWallMs, maxBlockWallMs, firstBlock, firstDecode,
+subsequentDecode y grupos decodingBlocks/nonDecodingBlocks. El primer Decode
+puede terminar con excepción; revisar status del bloque, no tratarlo como éxito.
+Todos los tiempos son de **pared**, nunca CPU. Incluyen descheduling y coste del
+observador. Las etapas de un bloque no suman necesariamente el total por el
+trabajo JS entre fronteras y la propia instrumentación.
+
+Live conserva los últimos 16 bloques; Offline hasta 3000, límite compatible con
+300 s/100 ms. Se miden todas las llamadas, pero sólo se retienen 64 eventos y se
+envían hasta 64 notificaciones por bloque. eventsTruncated/notificationsTruncated
+lo hacen explícito. La última notificación permitida marca observationLimitReached:
+si aparece, no considerar que el último evento sea el estado actual definitivo.
+`diagnostics.wasmStage` conserva el último evento entregado a UI, para observar una
+llamada que no terminó. phase=0 sin salida observada no demuestra bloqueo CPU:
+el evento de salida puede estar pendiente de entrega o el Worker desplanificado.
+La parada por overrun sigue liberando el micrófono sin esperar a terminar el motor.
+
+Offline mantiene su reloj de muestras para cooldown. Se añade un reloj independiente
+performance.now para processingTiming y para el adapter del motor: no interpretar
+el engineMs antiguo basado en muestras como tiempo real. No cambia rawHits,
+fragmentación, cola parcial, posiciones, audio ni parámetros. El fingerprint
+continúa calculándose antes de que el detector borre el bloque.
+
+### Windows: repeticiones con WAV y control
+
+Usar exactamente el WAV autorizado bajo `.local`, sin modificarlo. Cada invocación
+Offline crea un Worker, módulo, motor y stream nuevos. No se aplica warm-up.
+
+```powershell
+1..5 | ForEach-Object {
+  node --import tsx experiments/wake-word/offline.ts .local/wake-word-spike/audio/atlas-autorizado.wav --threshold 0.25
+}
+1..5 | ForEach-Object {
+  node --import tsx experiments/wake-word/offline.ts .local/wake-word-spike/audio/atlas-autorizado.wav --threshold 0.25 --silence-control
+}
+```
+
+Sólo si el ensayo de referencia requería --convert, conservar ese flag en ambas
+series. --silence-control es explícitamente SYNTHETIC_SILENCE_CONTROL: usa la
+longitud del WAV como plantilla y PCM cero en memoria. No escribe audio ni modifica
+el archivo. Conserva wavSha256 como procedencia de la plantilla; pcmSha256 y FNV
+pertenecen al control y **no deben compararse como el mismo audio de voz**. No se
+permite combinar el control con --reference-exe. No interpretar sus cero hits como
+una prueba larga de falsos positivos. La ruta normal LOCAL_WAV_WASM permanece igual.
+
+Para guardar un reporte numérico normal, hacerlo explícitamente con Set-Content
+-Encoding utf8 bajo `.local`; nunca guardar PCM. Iniciar después:
+
+```powershell
+node experiments/wake-word/server.mjs
+```
+
+En el navegador cargar .25 y motor nuevo, seleccionar el mismo WAV normal y su
+reporte normal, ejecutar WAV → AudioWorklet → Worker. Repetir cinco veces, sin
+cambiar parámetros. Comparar configuration/hashes, muestras, FNV, rawHits y posiciones.
+Revisar `wav.wasmProfile` y `worker.wasmProfile` frente a `result.wasmProfile` del
+Offline, especialmente bloque 4, primera Decode, posteriores y bloques sin Decode.
+El reporte Offline puede superar el límite de 2 MiB del picker con audios largos:
+compararlo manualmente, sin aumentar límites ni enviar contenido a servicios externos.
+
+Luego repetir micrófono en silencio, con motor nuevo, y copiar el JSON tras overrun.
+Un último wasmStage de etapa 4/phase 0 apoya demora en Decode; etapa 2 indica que
+la demora observada está en AcceptWaveform. La medición completa posterior del
+Offline permite estimar cuánto duran esas llamadas cuando llegan a terminar, pero
+no sustituye medir Windows Live. Primer pico aislado sugiere investigar arranque
+frío; picos recurrentes requieren evaluar capacidad sostenida. No introducir
+warm-up, ampliar pool o cambiar runtime antes de revisar estas repeticiones.
+
+En cloud se pudo inicializar el runtime real y verificar que las seis fronteras
+son decorables/restaurables. No están los pesos españoles ni el WAV autorizado:
+no se han medido costes reales del modelo. Tests con motor inyectado verifican el
+observador y conservación de resultados, no reconocimiento ni rendimiento real.

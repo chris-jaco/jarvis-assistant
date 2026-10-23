@@ -135,7 +135,7 @@ test('worker blocks network APIs after local initialization and clears heap on s
     postMessage: v => messages.push(v), close: () => { closed = true; }
   };
   const { SpikeError } = await import('../../experiments/wake-word/core.js');
-  const context = vm.createContext({
+  const context = vm.createContext({ createWasmProfiler: () => ({ wrapEngine: (e: any) => e, snapshot: () => ({}), restore() {} }),
     self, console: { log() {}, info() {}, warn() {}, error() {}, debug() {} },
     PcmDetector, SpikeError, PcmTrace, measurePcm, SignalTotals, Uint8Array, Float32Array, ArrayBuffer, performance,
     fetch() { network++; },
@@ -180,7 +180,7 @@ test('worker blocks network APIs after local initialization and clears heap on s
 function workletHarness(clock?: { now(): number }) {
   let Processor: any;
   const control: any[] = [], sent: any[] = [];
-  const context = vm.createContext({
+  const context = vm.createContext({ createWasmProfiler: () => ({ wrapEngine: (e: any) => e, snapshot: () => ({}), restore() {} }),
     Float32Array, ArrayBuffer, performance: clock,
     AudioWorkletProcessor: class { port = { onmessage: undefined, postMessage: (v: unknown) => control.push(v) }; },
     registerProcessor: (_name: string, processor: unknown) => { Processor = processor; }
@@ -294,7 +294,7 @@ async function browserHarness(options: { deferMicrophone?: boolean; deferClose?:
       if (v.type === 'connect') queueMicrotask(() => this.onmessage({ data: { type: 'capture-ready' } }));
     }
   }
-  const context = vm.createContext({
+  const context = vm.createContext({ createWasmProfiler: () => ({ wrapEngine: (e: any) => e, snapshot: () => ({}), restore() {} }),
     document: { getElementById: (id: string) => elements.get(id), addEventListener() {}, hidden: false },
     window: { addEventListener() {} },
     navigator: { mediaDevices: { getUserMedia() { requests++; return microphone; }, addEventListener() {} } },

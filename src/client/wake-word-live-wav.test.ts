@@ -10,7 +10,7 @@ import { replayPcm } from '../../experiments/wake-word/replay.js';
 function sourceHarness(pcm?: Float32Array) {
   let Processor: any;
   const controls: any[] = [], queue: any[] = [];
-  const context = vm.createContext({ Float32Array, ArrayBuffer, sampleRate: 16000,
+  const context = vm.createContext({ createWasmProfiler: () => ({ wrapEngine: (e: any) => e, snapshot: () => ({}), restore() {} }), Float32Array, ArrayBuffer, sampleRate: 16000,
     AudioWorkletProcessor: class { port = { onmessage: undefined, postMessage: (v: unknown) => controls.push(structuredClone(v)) }; },
     registerProcessor: (_name: string, p: any) => { Processor = p; }
   });
@@ -29,7 +29,7 @@ async function workerHarness(h: ReturnType<typeof sourceHarness>) {
     .replace(/^import .*\n/gm, '').replace("await import('/assets/runtime/core.js')", 'globalThis.__api');
   const self = { onmessage: undefined as any, postMessage: (v: unknown) => messages.push(structuredClone(v)), close() {} };
   let port: any;
-  const context = vm.createContext({ self, Float32Array, Uint8Array, ArrayBuffer, performance, PcmDetector, SpikeError, PcmTrace, measurePcm, SignalTotals,
+  const context = vm.createContext({ createWasmProfiler: () => ({ wrapEngine: (e: any) => e, snapshot: () => ({}), restore() {} }), self, Float32Array, Uint8Array, ArrayBuffer, performance, PcmDetector, SpikeError, PcmTrace, measurePcm, SignalTotals,
     console: { log() {}, info() {}, warn() {}, error() {}, debug() {} },
     __api: { initKWSModule: async () => ({ HEAPU8: new Uint8Array(16), FS: { writeFile() {} } }), createKeywordSpotter: engine }
   });
