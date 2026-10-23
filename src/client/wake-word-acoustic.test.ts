@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { measurePcm, SignalTotals } from '../../experiments/wake-word/signal.js';
 import { decodeWav } from '../../experiments/wake-word/wav.js';
 import { replayPcm } from '../../experiments/wake-word/replay.js';
+import { SpikeError } from '../../experiments/wake-word/core.js';
 
 function wav(samples: number[], rate = 16000, channels = 1, kind = 1) {
   const width = kind === 1 ? 2 : 4, bytes = Buffer.alloc(44 + samples.length * width);
@@ -109,7 +110,7 @@ test('offline worker blocks network, reports sanitized failures and closes all o
     const pcm = new Float32Array(1600).fill(.1);
     let context: any;
     context = vm.createContext({ createWasmProfiler: () => ({ wrapEngine: (e: any) => e, snapshot: () => ({}), restore() {} }),
-      replayPcm, Float32Array, Uint8Array,
+      SpikeError, replayPcm, Float32Array, Uint8Array,
       console: { log() {}, info() {}, warn() {}, error() {}, debug() {} },
       parentPort: { postMessage: (v: unknown) => messages.push(structuredClone(v)), close() { closed = true; } },
       workerData: { runtimePath: 'private-path', models: {}, keywords: [['▁a', 't', 'la', 's']], threshold: .05, pcm: pcm.buffer },

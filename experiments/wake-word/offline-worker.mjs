@@ -2,6 +2,8 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { pathToFileURL } from 'node:url';
 import { replayPcm } from './replay.ts';
 import { createWasmProfiler } from './profile.ts';
+import { prepareWarm } from './warmup.ts';
+import { SpikeError } from './core.ts';
 // All third-party logs stay in this worker and are drained without display by its parent.
 for (const key of ['log', 'info', 'warn', 'error', 'debug']) console[key] = () => {};
 let module, engine, profiler;
@@ -18,11 +20,21 @@ try {
     model: { encoder: '/encoder.onnx', decoder: '/decoder.onnx', joiner: '/joiner.onnx', tokens: '/tokens.txt' },
     keywords: [{ label: 'Atlas', matches: workerData.keywords.map(tokens => ({ tokens })), score: 1, threshold: workerData.threshold }], maxActivePaths: 4
   });
+  let preparation = { state: 'NOT_REQUESTED' };
+  if (workerData.warm) {
+    if (workerData.threshold !== .25) throw new SpikeError('ARGUMENT_INVALID');
+    parentPort.postMessage({ phase: 'WARMUP_START' });
+    preparation = prepareWarm(module, engine);
+    parentPort.postMessage({ phase: 'WARMUP_END' });
+  }
   profiler = createWasmProfiler(module, undefined, undefined, 3000); engine = profiler.wrapEngine(engine);
   const ownedEngine = engine; engine = undefined;
   const result = replayPcm(new Float32Array(workerData.pcm), ownedEngine);
-  parentPort.postMessage({ ok: true, result: { ...result, wasmProfile: profiler.snapshot() } });
-} catch { parentPort.postMessage({ ok: false, code: 'OFFLINE_ENGINE_FAILED' }); }
+  parentPort.postMessage({ ok: true, result: { ...result, experimentMode: workerData.warm ? 'WARM' : 'COLD', preparation, wasmProfile: profiler.snapshot() } });
+} catch (error) {
+  const allowed = ['WARMUP_UNSUPPORTED', 'WARMUP_LIMIT', 'WARMUP_TIMEOUT', 'WARMUP_RESET_FAILED'];
+  parentPort.postMessage({ ok: false, code: error instanceof SpikeError && allowed.includes(error.code) ? error.code : 'OFFLINE_ENGINE_FAILED' });
+}
 finally {
   try { engine?.dispose(); } catch { }
   if (workerData.pcm.byteLength) new Uint8Array(workerData.pcm).fill(0);

@@ -818,3 +818,95 @@ En cloud se pudo inicializar el runtime real y verificar que las seis fronteras
 son decorables/restaurables. No están los pesos españoles ni el WAV autorizado:
 no se han medido costes reales del modelo. Tests con motor inyectado verifican el
 observador y conservación de resultados, no reconocimiento ni rendimiento real.
+
+
+## Hito 1.2: cinco pares Cold/Warm (sólo Offline)
+
+Este experimento no habilita warm-up en el navegador, micrófono ni Atlas. Cold
+significa instancia nueva sin preparación explícita, no máquina/CPU/cachés del
+sistema operativo frías. Cada par ejecuta Cold y después Warm. El orden es fijo:
+considerar posibles efectos de temperatura, frecuencia y cachés entre ensayos.
+
+Warm prepara un stream con bloques sintéticos de 1600 ceros a 16 kHz hasta
+completar al menos dos DecodeKeywordStream. Límite: 30 bloques (3 s de audio) y
+10 s de pared. Una llamada puede completar varias decodificaciones: no se corta
+una llamada nativa a mitad para obtener exactamente dos. Se restauran los hooks
+antes de llamar **una vez** al reset() público del wrapper. Éste crea un stream
+nuevo; conserva el modelo cargado, sus sesiones y posibles cachés. No recarga ni
+modifica pesos, vocabulario, beam o parámetros para medir la parte caliente.
+
+Después se instala un profiler nuevo con secuencia cero y se procesa el WAV con
+la misma fragmentación de 100 ms y cola parcial. Ningún silencio de preparación
+entra en el stream de medición. El cooldown sigue usando posición del WAV.
+Un reset exitoso no demuestra por sí mismo ausencia de efectos internos: verificar
+huellas, resultados y posiciones con los diez ensayos antes de aceptar el método.
+
+El padre aplica un watchdog independiente de 10 s desde WARMUP_START hasta
+WARMUP_END, incluyendo reset. Esto permite terminar el Worker si WASM no retorna;
+el chequeo del propio hilo sólo puede actuar entre llamadas. El límite total por
+instancia sigue siendo 120 s, incluyendo carga, preparación y replay. En fallo se
+liberan buffers/heap/motor, se restauran hooks cuando el hilo puede ejecutar
+finally y se termina el Worker. Si está bloqueado y se termina desde fuera, se
+descarta todo su contexto; no puede esperarse que ejecute finally. No hay retries.
+
+### Comandos Windows
+
+Mantener el WAV autorizado bajo `.local`. Este experimento requiere mono/16 kHz:
+no acepta --convert, ganancia, normalización o downmix. Si el WAV original necesita
+conversión, detenerse y revisar el alcance; no convertirlo silenciosamente.
+No cambiar threshold: el runner lo fija en .25, score=1, beam=4, cooldown=1000 ms.
+
+Para probar modalidades individuales y ver el detalle completo:
+
+```powershell
+node --import tsx experiments/wake-word/offline.ts .local/wake-word-spike/audio/atlas-autorizado.wav --threshold 0.25
+node --import tsx experiments/wake-word/offline.ts .local/wake-word-spike/audio/atlas-autorizado.wav --threshold 0.25 --warm
+```
+
+Para cinco pares secuenciales con un Worker/módulo/motor nuevos en **cada una de
+las diez ejecuciones**, esperando su terminación antes de la siguiente:
+
+```powershell
+node --import tsx experiments/wake-word/warmup-pairs.ts .local/wake-word-spike/audio/atlas-autorizado.wav
+```
+
+El runner imprime un único JSON compacto en stdout, sin rutas ni PCM. Para guardar
+explícitamente ese reporte numérico (no una grabación), PowerShell:
+
+```powershell
+node --import tsx experiments/wake-word/warmup-pairs.ts .local/wake-word-spike/audio/atlas-autorizado.wav | Set-Content -Encoding utf8 .local/wake-word-spike/warmup-pairs.json
+$LASTEXITCODE
+```
+
+No escribe archivos automáticamente. Un fallo detiene el experimento sin retries
+y conserva en el JSON los pares completos anteriores; nunca se declaran cinco
+pares si no terminaron. Exit 0 sólo para GO_FOR_EXPERIMENTAL_LIVE_TEST_ONLY; NO_GO,
+base/datos incompletos o error devuelven 2. El padre sanea los errores del Worker.
+Los pesos y el WAV siguen fuera de Git y de los paquetes oficiales.
+
+### Criterios de revisión
+
+El JSON conserva configuración, SHA del WAV y PCM, FNV, conteos y eventos reales,
+preparación, primera Decode, máximo posterior, tiempos totales/por bloque y heap.
+Compara identidad entre Cold/Warm **y entre todos los pares**, no sólo hashes:
+
+- Diez ejecuciones completas, sin errores, timeout ni preparación fallida.
+- Mismo WAV/PCM, fragmentación, configuración, rawHits, detecciones, supresiones y
+  posiciones exactas en todas ellas. Tres detecciones/rawHits, cero supresiones,
+  con bloques de hit 27, 46 y 91 (índices base cero del reporte aceptado).
+- Reducción de al menos 50 % en la mediana de la primera Decode de Warm frente
+  a Cold en los cinco pares.
+- En todos los Warm: primera Decode, máximo posterior y máximo **por bloque**
+  inferiores a 200 ms, y RTF de pared de procesamiento inferior a .7.
+
+Son criterios conservadores de acceso a otra prueba, no límites universales del
+motor. 200 ms reserva margen frente a los aproximadamente 300 ms restantes cuando
+un bloque retiene un buffer. Un promedio favorable o un único ensayo no basta.
+Incluso con GO quedan scheduling y colas reales por probar; no se garantiza que
+cuatro buffers basten en Windows. Estos ensayos usan reloj de pared, nunca CPU.
+No pasar a producción ni a Live automáticamente: entregar el JSON para revisión
+antes de implementar la preparación de una captura real. Live posterior deberá
+probar silencio/voz prolongados, memoria, cleanup, cero overruns y cero pérdidas.
+
+En cloud faltan el WAV y los pesos: se valida orquestación/reset/cleanup con un
+motor inyectado, sin afirmar tres detecciones acústicas ni mejora real de latencia.
