@@ -617,3 +617,94 @@ PCM ni transcripciones. Sólo memoria de sesión; ninguna exportación automáti
 Las pruebas sintéticas verifican continuidad bajo backpressure, no reconocimiento
 acústico ni estabilidad real de Windows. Siguiente checkpoint: revisar estas
 mediciones antes de cambiar la captura o integrar wake word.
+
+
+## Traza temporal de micrófono (sin cambios de transporte)
+
+La instrumentación conserva los cuatro buffers, transferencias directas, orden de
+entrada, selección de canal 0 y parada fail-closed. No espera a la UI, no introduce
+acks, reintentos, ganancia, downmix ni muestras sintéticas. Tiene coste de medición:
+un mensaje escalar adicional por inicio de llamada al motor y snapshots acotados.
+Comparar pruebas con la misma instrumentación y mantener la pestaña visible.
+
+Por secuencia se registran estas fronteras:
+
+| Frontera | Ubicación |
+| --- | --- |
+| Envío de audio | `transport.recent` evento send / `timing.pending[].sent` |
+| Recepción en handler Worker | `worker.recent[].timing.received` |
+| Inicio de llamada síncrona al motor | `worker.recent[].timing.inferenceStart`; también mensaje inmediato `inference-start` a UI |
+| Retorno o excepción de esa llamada | `worker.recent[].timing.inferenceEnd` |
+| Inicio de postMessage de devolución | `worker.recent[].timing.recyclePost` |
+| Recepción de devolución | `transport.recent` evento recycle, campo received |
+
+`worker.timing.history` conserva hasta 64 eventos con secuencia, etapa numérica,
+localMs y epochMs. Etapas: 1=recepción, 2=inicio del motor, 3=salida del motor
+(también si lanza excepción), 4=devolución posteada/bloque completado,
+5=error de procesamiento. `lastReceived`, `lastStarted` y `lastCompleted` distinguen
+el último handler recibido, llamada iniciada y bloque completado correctamente.
+`diagnostics.timing` en UI conserva el snapshot del último inicio observado,
+independientemente del último bloque completo disponible en `diagnostics.worker`.
+El interior de WASM y los pasos individuales del decoder no se instrumentan.
+
+El transporte conserva hasta 16 eventos send/recycle, hasta cuatro envíos
+pendientes con sus timestamps, consumedSamples, producedSamples,
+producedMinusReturned, renderQuanta y firstRender/lastRender/observed. renderFrame
+y renderTimeMs vienen de currentFrame/currentTime del AudioWorklet; si no están
+expuestos son null. Son reloj de audio, **no reloj de pared**. consumedSamples
+cuenta sólo muestras aceptadas; los callbacks de render también pueden existir
+sin entrada útil o durante pausa WAV. No inferir frecuencia física del dispositivo
+sólo a partir de estos números.
+
+### Relojes y límites
+
+- localMs procede de performance.now del contexto correspondiente. Compararlo
+  sólo dentro de ese contexto. AudioWorklet puede no disponer de performance.
+- epochMs se calcula únicamente con performance.timeOrigin + performance.now
+  cuando ambos existen. Es la base de tiempo comparable entre contextos del
+  navegador; no se usa Date.now ni se inventa un offset. No se imprime el origen
+  como dato separado ni identificadores de usuario/dispositivos.
+- deliveryMs = recepción Worker menos envío worklet; returnDeliveryMs = recepción
+  worklet menos inicio de postMessage de devolución. Sólo se calculan si ambos
+  epochMs están disponibles; de lo contrario son null. Incluyen scheduling/colas
+  y coste de transferencia, no distinguen por sí solos esas causas. La resolución
+  reducida de timers puede introducir diferencias pequeñas o negativas: no se
+  recortan para simular precisión ni se interpretan como latencia física exacta.
+- `failure.inferencePendingObservedMs` mide desde el inicio del motor observado
+  hasta atender el fallo en UI. `inferencePendingAtFaultMs` usa el timestamp del
+  snapshot de fallo worklet, sólo si es comparable. Pueden ser null, estar sujetos
+  a entrega tardía o representar un inicio ya obsoleto. Ninguno mide tiempo CPU
+  ni demuestra que la llamada siguiera ejecutándose: los puertos no son atómicos.
+- Al parar no se espera a terminar una inferencia ni a drenar diagnósticos. El
+  micrófono se libera inmediatamente; los eventos no entregados pueden perderse.
+  La falta de un evento no demuestra que la operación no haya sucedido.
+
+### Procedimiento Windows
+
+1. Ejecutar `node experiments/wake-word/server.mjs`. Cargar motor nuevo a .25,
+   manteniendo modelo/keywords/parámetros originales. No abrir DevTools hasta
+   después del primer ensayo para reducir interferencias; anotar navegador/versión
+   y si DevTools estaba abierto, sin nombres ni IDs de dispositivos.
+2. Ejecutar al menos tres ensayos separados en silencio y tres con pronunciaciones
+   conocidas, sin cambiar DSP, canal o ganancia. Mantener visible la pestaña.
+3. Tras AUDIO_OVERRUN o Detener, copiar manualmente el JSON numérico completo:
+   failure, timing, transport y worker. No exportar grabaciones. Registrar si la
+   limpieza terminó correctamente. No confundir ~302 ms de UI con duración total.
+4. Para secuencias 4–7 comparar envíos pendientes, último inicio y último bloque
+   completo. Una llamada iniciada sin fin observado y con gran duración pendiente
+   prioriza llamada larga o descheduling durante ella; **no distingue CPU ocupada
+   de Worker desplanificado dentro de la llamada**.
+5. Si aumenta deliveryMs antes del inicio, priorizar cola/Worker ocupado. Si la
+   devolución fue posteada pero returnDeliveryMs aumenta, priorizar scheduling o
+   entrega hacia worklet. Sin epoch comparable, usar sólo orden, contadores y
+   duraciones locales; no restar relojes locales de contextos distintos.
+6. Comparar avance de renderFrame/renderTimeMs con tiempo de pared del worklet,
+   cuando exista. Mucho audio producido en poco tiempo de pared apoya una ráfaga.
+   Un snapshot de UI tardío por sí solo no la demuestra.
+7. Repetir control WAV con mismos parámetros y comprobar huella/orden/muestras.
+   Pausas WAV no prueban capacidad Realtime. No ampliar el pool ni cambiar
+   semántica hasta localizar qué frontera acumula demora.
+
+Pruebas de VM con reloj inyectado reproducen inferencia lenta, Worker sin atender,
+colas de ida/vuelta, ráfagas, devoluciones fuera de orden y fallo dentro del motor.
+No constituyen medición del navegador Windows ni reconocimiento acústico.

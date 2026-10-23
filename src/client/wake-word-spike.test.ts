@@ -309,6 +309,7 @@ async function browserHarness(options: { deferMicrophone?: boolean; deferClose?:
   return { elements, track,
     load: () => elements.get('load').onclick(), wav: () => elements.get('wav-test').onclick(), listen: () => elements.get('listen').onclick(),
     stop: () => vm.runInContext('stop()', context) as Promise<void>,
+    workerMessage: (data: any) => currentWorker.onmessage({ data }),
     overrun: () => node.port.onmessage({ data: { type: 'overrun', code: 'AUDIO_OVERRUN', produced: 4, outstanding: 4 } }),
     microphoneReady: () => resolveMicrophone(stream), closeReady: () => resolveClose(),
     counts: () => ({ workers, requests, closedContexts, terminated, connected })
@@ -411,4 +412,19 @@ test('stop during optional reference loading never opens a late microphone or co
   const starting = h.listen(); await h.stop(); finish('{}'); await starting;
   assert.equal(h.counts().requests, 0); assert.equal(h.counts().closedContexts, 0);
   assert.equal(h.counts().terminated, 1);
+});
+
+
+test('pending inference observation survives overrun and cleanup without asserting unavailable fault clock', async () => {
+  const h = await browserHarness(); await h.load(); await h.listen();
+  const epochMs = performance.timeOrigin + performance.now() - 302;
+  h.workerMessage({ type: 'processing', sequence: 4, startedAt: epochMs });
+  h.workerMessage({ type: 'inference-start', sequence: 4, timing: { current: { inferenceStart: { epochMs } } } });
+  h.overrun(); await tick();
+  const report = JSON.parse(h.elements.get('diagnostics').textContent);
+  assert.equal(report.failure.lastStartedSequence, 4);
+  assert.ok(report.failure.inferencePendingObservedMs >= 302);
+  assert.equal(report.failure.inferencePendingAtFaultMs, null);
+  assert.equal(h.track.readyState, 'ended'); assert.equal(h.counts().terminated, 1);
+  assert.equal(h.counts().closedContexts, 1);
 });

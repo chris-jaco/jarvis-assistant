@@ -9,8 +9,8 @@ const load = button('load'), listen = button('listen'), stopButton = button('sto
 const wavButton = button('wav-test');
 const status = document.getElementById('status')!, metrics = document.getElementById('metrics')!, events = document.getElementById('events')!;
 const diagnosticView = document.getElementById('diagnostics')!;
-let diagnostic: { configuration?: unknown; worker?: unknown; transport?: unknown; failure?: unknown; capture?: unknown; wav?: unknown; comparison?: unknown; alignment?: unknown; microphoneComparison?: unknown } = {};
-let inFlight: { sequence: number; startedAt: number } | undefined;
+let diagnostic: { configuration?: unknown; worker?: unknown; transport?: unknown; failure?: unknown; capture?: unknown; wav?: unknown; comparison?: unknown; alignment?: unknown; microphoneComparison?: unknown; timing?: unknown } = {};
+let inFlight: { sequence: number; startedAt: number; inferenceEpochMs?: number | null } | undefined;
 function showDiagnostics() { diagnosticView.textContent = JSON.stringify(diagnostic, null, 2); }
 let scope: ResourceScope | undefined, worker: Worker | undefined, worklet: AudioWorkletNode | undefined;
 let stream: MediaStream | undefined, generation = 0, live = false, preparing = false;
@@ -202,6 +202,10 @@ async function startCapture(wavMode = false) {
         diagnostic.transport = data.diagnostics;
         diagnostic.failure = { code: data.code, produced: data.produced, outstanding: data.outstanding,
           lastStartedSequence: inFlight?.sequence ?? null,
+          inferencePendingObservedMs: inFlight?.inferenceEpochMs != null ? performance.timeOrigin + performance.now() - inFlight.inferenceEpochMs : null,
+          inferencePendingAtFaultMs: inFlight?.inferenceEpochMs != null && data.diagnostics?.timing?.observed?.epochMs != null
+            ? data.diagnostics.timing.observed.epochMs - inFlight.inferenceEpochMs : null,
+          pendingDurationMeaning: 'OBSERVED_UNFINISHED_CALL_NOT_CPU_TIME; UI_AND_FAULT_SNAPSHOTS_NOT_ATOMIC',
           sinceStartObservedMs: inFlight ? Math.max(0, performance.timeOrigin + performance.now() - inFlight.startedAt) : null };
         showDiagnostics();
         void stop(data.code === 'AUDIO_OVERRUN' ? `AUDIO_OVERRUN — producidos: ${data.produced}; pendientes: ${data.outstanding}/4` : 'AUDIO_PROTOCOL_ERROR');
@@ -212,6 +216,11 @@ async function startCapture(wavMode = false) {
       if (data.type === 'capture-ready') { connectedWorker(); return; }
       if (data.type === 'error') { diagnostic.worker = data.diagnostics; showDiagnostics(); rejectConnection(new SpikeError('ENGINE_FAILED')); void stop('ENGINE_FAILED'); return; }
       if (!live) return;
+      if (data.type === 'inference-start') {
+        diagnostic.timing = data.timing;
+        if (inFlight && inFlight.sequence === data.sequence) inFlight.inferenceEpochMs = data.timing?.current?.inferenceStart?.epochMs ?? null;
+        return;
+      }
       if (data.type === 'processing') { inFlight = { sequence: data.sequence, startedAt: data.startedAt }; return; }
       if (data.type !== 'processed') return;
       inFlight = undefined; diagnostic.worker = data.diagnostics; lastWorker = data.diagnostics;

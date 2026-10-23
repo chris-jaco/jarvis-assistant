@@ -6,6 +6,7 @@ class AtlasPcm extends AudioWorkletProcessor {
     this.free = Array.from({ length: 4 }, () => new Float32Array(1600));
     this.buffer = null; this.offset = 0; this.sequence = 0; this.pending = new Map(); this.active = true;
     this.frames = 0; this.returned = 0; this.highWater = 0; this.returnAudioMaxMs = 0; this.returnWallMaxMs = null; this.recent = [];
+    this.sentSamples = 0; this.renderQuanta = 0; this.firstRender = null; this.lastRender = null;
     this.wavWaitQuanta = 0; this.wavWaitFrames = 0; this.channelTotals = []; this.channelsTruncated = false;
     this.observedChannels = 0; this.blockChannels = new Set();
     this.wavMode = false; this.wavDone = false; this.wavOffset = 0; this.wav = null; this.wavArmed = false;
@@ -31,7 +32,13 @@ class AtlasPcm extends AudioWorkletProcessor {
           this.returnAudioMaxMs = Math.max(this.returnAudioMaxMs, audioMs);
           if (wallMs !== null) this.returnWallMaxMs = Math.max(this.returnWallMaxMs ?? 0, wallMs);
           const buffer = new Float32Array(returned.pcm); buffer.fill(0); this.free.push(buffer);
-          this.record({ event: 'recycle', sequence: returned.sequence, pending: this.pending.size, audioMs, wallMs });
+          const received = this.stamp();
+          const worker = returned.timing;
+          const numeric = v => typeof v === 'number' && Number.isFinite(v) ? v : null;
+          const postedEpoch = numeric(worker?.recycleEpochMs);
+          this.record({ event: 'recycle', sequence: returned.sequence, pending: this.pending.size, audioMs, wallMs,
+            received, recycleEpochMs: postedEpoch,
+            returnDeliveryMs: received.epochMs !== null && postedEpoch !== null ? received.epochMs - postedEpoch : null });
           if (this.returned % 10 === 0) this.port.postMessage({ type: 'transport', diagnostics: this.snapshot() });
           this.finishWav();
         };
@@ -40,6 +47,13 @@ class AtlasPcm extends AudioWorkletProcessor {
       if (data === 'stop') this.release();
       if (data === 'wav-start' && this.wavMode && !this.wavDone) this.wavArmed = true;
     };
+  }
+  stamp() {
+    const localMs = this.wallNow();
+    const origin = globalThis.performance?.timeOrigin;
+    return { localMs, epochMs: localMs !== null && Number.isFinite(origin) ? origin + localMs : null,
+      renderFrame: typeof currentFrame === 'number' ? currentFrame : null,
+      renderTimeMs: typeof currentTime === 'number' ? currentTime * 1000 : null, consumedSamples: this.frames };
   }
   wallNow() { return typeof globalThis.performance?.now === 'function' ? globalThis.performance.now() : null; }
   record(event) { this.recent.push(event); if (this.recent.length > 16) this.recent.shift(); }
@@ -50,6 +64,11 @@ class AtlasPcm extends AudioWorkletProcessor {
       oldestAudioMs: oldest ? (this.frames - oldest.frame) / 16 : 0,
       oldestWallMs: oldest && wall !== null && oldest.wall !== null ? Math.max(0, wall - oldest.wall) : null,
       recent: this.recent.slice(),
+      timing: { clock: 'LOCAL_PERFORMANCE; CROSS_CONTEXT_ONLY_WHEN_BOTH_EPOCH_AVAILABLE',
+        observed: this.stamp(), firstRender: this.firstRender, lastRender: this.lastRender, renderQuanta: this.renderQuanta,
+        consumedSamples: this.frames, producedSamples: this.sentSamples,
+        pending: [...this.pending].map(([sequence, s]) => ({ sequence, sent: s.timing })),
+        producedMinusReturned: this.sequence - this.returned },
       wavBackpressure: { waitQuanta: this.wavWaitQuanta, waitRenderFrames: this.wavWaitFrames,
         waitRenderMs: this.wavWaitFrames / 16, policy: 'PAUSE_FILE_CURSOR_NO_PADDING' },
       inputChannels: this.channelTotals.map((s, index) => ({ index, samples: s.samples,
@@ -85,14 +104,15 @@ class AtlasPcm extends AudioWorkletProcessor {
     }
   }
   sendBlock() {
-    const sequence = this.sequence++;
-    this.pending.set(sequence, { frame: this.frames, wall: this.wallNow() });
+    const sequence = this.sequence++; this.sentSamples += this.offset;
+    const timing = this.stamp();
+    this.pending.set(sequence, { frame: this.frames, wall: timing.localMs, timing });
     this.highWater = Math.max(this.highWater, this.pending.size);
-    this.record({ event: 'send', sequence, pending: this.pending.size });
+    this.record({ event: 'send', sequence, pending: this.pending.size, sent: timing });
     this.audioPort.postMessage({ type: 'pcm', pcm: this.buffer.buffer, sequence, outstanding: this.pending.size,
       sampleRate: typeof sampleRate === 'number' ? sampleRate : 16000,
       channels: this.blockChannels.size === 1 ? this.observedChannels : 0,
-      validSamples: this.offset }, [this.buffer.buffer]);
+      validSamples: this.offset, timing }, [this.buffer.buffer]);
     this.blockChannels.clear(); this.buffer = null; this.offset = 0;
   }
   fail(code) {
@@ -101,6 +121,7 @@ class AtlasPcm extends AudioWorkletProcessor {
   }
   process(inputs, outputs = []) {
     if (!this.active) return false;
+    this.renderQuanta++; this.lastRender = this.stamp(); this.firstRender ??= this.lastRender;
     if (this.wavMode && !this.wavArmed) return true;
     if (this.wavMode && this.wavDone) { this.finishWav(); return this.active; }
     const channel = this.wavMode ? this.wav.subarray(this.wavOffset, this.wavOffset + (outputs[0]?.[0]?.length ?? 128)) : inputs[0]?.[0];
