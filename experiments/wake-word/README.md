@@ -411,14 +411,17 @@ instalado bibliotecas ni compilado este adaptador en este entorno**. Registrar
 revisión de sherpa-onnx/ONNX Runtime, flags y SHA-256 del ejecutable antes de usarlo.
 Una diferencia de versiones/provider/kernel puede producir diferencias numéricas.
 
-Su integración acepta sólo WAV original PCM16 mono 16 kHz, sin conversiones:
+Desde Hito 1.3 el adaptador ampliado se fija en SDK 2.0.0, threshold .25 y
+el WAV autorizado de 330411 muestras. El helper antiguo sólo resume conteos;
+para equivalencia/tiempos usar el nuevo runner descrito al final. Acepta sólo
+WAV original PCM16 mono 16 kHz, sin conversiones:
 
 ```powershell
-node --import tsx experiments/wake-word/offline.ts .local/wake-word-spike/audio/atlas-autorizado.wav --threshold 0.05 --reference-exe C:\herramientas\atlas-kws-reference.exe
+node --import tsx experiments/wake-word/offline.ts .local/wake-word-spike/audio/atlas-autorizado.wav --threshold 0.25 --reference-exe .local/wake-word-spike/native-benchmark/reference-kws.exe
 ```
 
 El helper pasa los mismos cuatro archivos verificados, las líneas
-`▁a t la s :1 #0.05 @sherpaw_0` (o las secuencias reales del manifest), CPU/un hilo,
+`▁a t la s :1 #0.25 @sherpaw_0` (o las secuencias reales del manifest), CPU/un hilo,
 80 features, maxActivePaths=4 y trailing blanks=1. El adaptador alimenta los mismos
 bloques, resetea tras hit y no añade silencio. Sólo se aceptan respuestas JSON
 acotadas con cantidad de muestras/bloques esperada; no se muestran logs crudos.
@@ -1002,3 +1005,145 @@ No se guardan PCM, grabaciones ni transcripciones. El reporte sólo vive en el p
 hasta que el usuario lo copie explícitamente. No se integra Atlas, Realtime, Tray,
 Main ni Core. Tests inyectados validan orden, fallos, watchdog, reset y cleanup;
 la estabilidad acústica/temporal real de estos doce ensayos queda para Windows.
+
+## Hito 1.3: benchmark aislado Native vs WASM (pendiente de ejecución Windows)
+
+El smoke test Windows comunicado por el propietario cargó los pesos originales
+con sherpa-onnx 2.0.0, procesó 330411 muestras/207 bloques y devolvió tres rawHits.
+Eso todavía no acredita posiciones, hashes ni equivalencia temporal. Warm Live
+sigue **sin aceptación**. Este checkpoint prepara el benchmark, no lo ejecuta
+automáticamente ni incorpora un backend a Atlas.
+
+`native-benchmark.ts` ejecuta **20 ensayos por backend y modalidad elegida**:
+40 procesos en COLD y otros 40 si después se ejecuta WARM. Alterna el orden de
+los backends entre pares, espera la terminación de cada proceso y nunca reintenta.
+Cada ensayo crea módulo/spotter/stream nuevos. COLD crea otro stream mediante reset
+sin preparación; WARM utiliza silencio sintético hasta dos Decode (máximo 30
+bloques/10 s), luego recrea el stream. Sólo se reinician contadores, no el modelo.
+No son arranques fríos del sistema operativo: la caché de archivos puede persistir.
+
+El WAV original no recibe padding, InputFinished, downmix, resampling, normalización
+ni ganancia. Se exige PCM16 mono/16 kHz, 330411 muestras, bloques de 1600 y cola
+final de 811 muestras. Threshold .25, score 1, beam 4, trailing blanks 1, feature dim
+80, cooldown 1000 ms y las keywords del manifiesto verificado son iguales.
+El silencio de preparación nunca se concatena al audio evaluado. La ruta Live y
+su pool de cuatro buffers no se modifican.
+
+### Preparación en Windows 11 x64
+
+Usar una **Developer PowerShell x64 de MSVC ya instalado** y Node compatible con
+el repositorio. No se instala nada. El SDK oficial auditado debe existir bajo
+`.local`; el script no descarga ni ejecuta los EXE incluidos en el SDK. Requiere
+headers, import library, DLL CPU auditadas y runtime VC++ /MD disponibles.
+
+Desde la raíz del repositorio (ajustar únicamente la ubicación del WAV autorizado
+si tiene otro nombre; debe permanecer bajo `.local`):
+
+```powershell
+$sdk = (Resolve-Path '.local\wake-word-spike\native-sdk\v2.0.0-win-x64-shared-MD-Release-no-tts-audit\extracted\sherpa-onnx-v2.0.0-win-x64-shared-MD-Release-no-tts').Path
+$out = Join-Path (Get-Location) '.local\wake-word-spike\native-benchmark'
+$wav = (Resolve-Path '.local\wake-word-spike\audio\atlas-autorizado.wav').Path
+& .\experiments\wake-word\build-native-reference.ps1 -SdkRoot $sdk -OutputDir $out
+if ($LASTEXITCODE -ne 0) { throw 'NATIVE_BUILD_FAILED' }
+$exe = Join-Path $out 'reference-kws.exe'
+$lock = Join-Path $out 'native-lock.json'
+node --import tsx experiments/wake-word/native-benchmark.ts $wav $exe $lock --check COLD
+if ($LASTEXITCODE -ne 0) { throw 'PREFLIGHT_FAILED' }
+```
+
+El directorio de salida debe ser nuevo: no se sobrescribe el smoke test previo.
+La compilación usa C++17, /O2 /MD /utf-8, shared C API, /MACHINE:X64, bcrypt.lib
+y psapi.lib. No modifica PATH ni el entorno global. Copia únicamente tres DLL
+auditadas al lado del EXE. Genera un lock local con SHA-256 de fuente y ejecutable.
+El lock detecta cambios locales; no es una firma del binario compilado.
+
+Se fijan SDK 2.0.0, commit `8abb7c8f87eae85b2e75f9a4115236c978980add` y artefacto
+SHA-256 `98d8cf1c0e0bfb5768042e90ffe9591203855b8f4aabdcd5c154eb39b87a0707`.
+El helper verifica header, import library y las tres DLL contra hashes de auditoría;
+el runner vuelve a verificar fuente/EXE/DLL antes de ejecutar. El adaptador consulta
+versión/git y verifica ubicación física app-local y hashes de C API/ONNX Runtime
+efectivamente cargadas antes de cargar modelos. No valida todo módulo del sistema
+ni sustituye una cadena de firma de código. Usar una carpeta local privada y estable.
+
+### Ejecución después de revisión
+
+Los siguientes comandos **sí ejecutan el benchmark completo**; no forman parte de
+la validación cloud de este checkpoint. Mantener mismo equipo, plan energético,
+alimentación y carga; registrar esas condiciones sin nombres de dispositivos.
+Cerrar otras pruebas del harness y no capturar micrófono. No elevar permisos.
+
+```powershell
+node --import tsx experiments/wake-word/native-benchmark.ts $wav $exe $lock --run COLD |
+  Set-Content -Encoding utf8 (Join-Path $out 'cold-report.json')
+if ($LASTEXITCODE -ne 0) { throw 'COLD_BENCHMARK_FAILED' }
+node --import tsx experiments/wake-word/native-benchmark.ts $wav $exe $lock --run WARM |
+  Set-Content -Encoding utf8 (Join-Path $out 'warm-report.json')
+if ($LASTEXITCODE -ne 0) { throw 'WARM_BENCHMARK_FAILED' }
+```
+
+Cada hijo tiene límite externo de 120 s y salida de 4 MiB. El límite interno de
+preparación sólo se comprueba entre llamadas síncronas: una Decode bloqueada puede
+superarlo hasta que actúe el watchdog externo. El timeout cancela el proceso del
+benchmark aislado; no interviene en procesos de Atlas. Sin reintentos ni fallback.
+
+Sólo el redireccionamiento explícito anterior guarda JSON. No hay grabación,
+almacenamiento de PCM ni envío de audio. WAV/pesos/SDK/EXE/reportes quedan ignorados
+bajo `.local`, fuera de builds oficiales. El WASM carga modelos locales en MEMFS y
+bloquea APIs de red durante inferencia; no inicia captura ni servicios externos.
+
+### Datos y lectura del reporte
+
+Cada ensayo exige el mismo hash WAV y modelos/tokens/keywords que la preparación
+verificada, y PCM SHA-256
+`ddd500ae3b79de9fa1f9af82c04142dfd1b06dd2fca5237008f0cd3af3b5138b`.
+Se vuelve a comprobar el PCM tras procesar. Exige tres hits sin supresiones en
+27/46/91, 207 bloques, 330411 muestras y cero padding. Compara además el calendario
+completo de llamadas Decode y las posiciones devueltas por cada runtime. Cualquier
+diferencia detiene la serie: no se declara equivalencia ni se cambian parámetros.
+
+`events` indica el bloque y su intervalo de muestras (índices desde cero).
+`hitPositions` conserva startTime/timestamps numéricos del resultado del motor,
+sin tokens ni transcripciones. Son tiempos de segmento del decoder: **no prueban
+la correspondencia con ocho pronunciaciones reales** sin anotación humana. La
+comparación es exacta; diferencias numéricas entre versiones requieren revisión.
+
+Se separan inicialización del spotter/stream, preparación/reset, procesamiento del
+WAV y tiempo externo desde spawn hasta cierre. El tiempo externo incluye arranque,
+Node/tsx o loader nativo, hashes, carga de modelo, JSON y cleanup; no representa
+coste puro de inferencia. La inicialización WASM del módulo ocurre antes de crear
+el spotter; no debe confundirse con ese campo de inicialización.
+
+Se registran todas las Decode y bloques con pared y CPU del hilo, así como máximos,
+total y RTF (pared de procesamiento / duración del audio). Los resúmenes contienen
+mediana, p95 por rango más próximo y máximo, con 20 observaciones: ese p95 tiene
+resolución limitada. Incluyen primera Decode, máximo posterior, máximo bloque,
+conteo Decode, inicialización/preparación/reset, CPU y memoria.
+
+Native usa QueryPerformanceCounter y GetThreadTimes (kernel+user del hilo llamador).
+WASM usa performance.now() y process.threadCpuUsage() cuando Node lo soporta;
+ausencia/fallo de CPU queda `null`, nunca cero inventado. GetThreadTimes tiene
+granularidad limitada; CPU cero en operaciones breves no demuestra espera.
+La CPU de otros hilos del runtime no está incluida: pared menos CPU del llamador
+**no equivale automáticamente a desplanificación**. Para separar espera de trabajo
+paralelo hacen falta trazas del hilo/ONNX con herramientas Windows disponibles
+(WPR/WPA/ETW); no se instalan ni se eleva para obtenerlas aquí.
+
+Native informa Working Set/PeakWorkingSet del proceso; WASM informa RSS muestreada
+por bloque, no un pico exacto, y heap WASM reservado aparte. Ambas memorias incluyen
+código/modelos/diagnósticos, no sólo el decoder. Se libera stream/spotter/wave o
+motor/heap/buffers antes de éxito y cada proceso termina antes del próximo ensayo.
+No se declara ausencia de fugas a largo plazo a partir de procesos independientes.
+
+Los backends tienen versiones y observadores diferentes: es una comparación de
+pilas completas con el mismo audio, no una atribución causal pura a WASM. Los
+wrappers numéricos también agregan coste. No hay benchmark acústico/CPU real en
+cloud sin el WAV/pesos y MSVC Windows; los tests inyectados no sustituyen esa prueba.
+
+SDK Apache-2.0; ONNX Runtime MIT y demás avisos de la auditoría siguen aplicando.
+La licencia de los pesos continúa sin verificar, sólo evaluación personal: no
+redistribuir. Ningún resultado de este benchmark aprueba distribución ni Live.
+GO únicamente para ejecutar la comparación revisada. NO-GO para integración,
+cambio de transporte/pool o aceptación de Warm Live. Antes de elegir backend:
+20 ensayos válidos por backend/modalidad, equivalencia íntegra, margen consistente
+frente al presupuesto Live y revisión de CPU/pared/memoria. No basta un promedio
+favorable ni un RTF menor que uno para garantizar ausencia de overruns.
