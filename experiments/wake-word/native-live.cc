@@ -74,7 +74,7 @@ struct ComScope {
   ComScope() { Check(CoInitializeEx(nullptr, COINIT_MULTITHREADED), "COM_INITIALIZATION_FAILED"); }
   ~ComScope() { CoUninitialize(); }
 };
-struct Microphone {
+struct WasapiCaptureSession {
   Shared &state;
   ComPtr<IMMDeviceEnumerator> enumerator;
   ComPtr<IMMDevice> device;
@@ -84,8 +84,8 @@ struct Microphone {
   Handle event;
   bool running = false;
   double startWall = 0;
-  explicit Microphone(Shared &s) : state(s) { state.captureReleased = false; }
-  ~Microphone() {
+  explicit WasapiCaptureSession(Shared &s) : state(s) { state.captureReleased = false; }
+  ~WasapiCaptureSession() {
     double cleanupStart=0;try{cleanupStart=Wall();}catch(...){state.fail("CAPTURE_CLOCK_FAILED");}
     if(running){try{state.captureWallMs=Wall()-startWall;}catch(...){state.fail("CAPTURE_CLOCK_FAILED");}
       if(FAILED(client->Stop()))state.fail("CAPTURE_STOP_FAILED");}
@@ -125,7 +125,7 @@ static void Capture(Shared &s, int seconds, Progress &progress) noexcept {
     {
       ComScope com; s.comReleased = false;
       {
-        Microphone mic(s);
+        WasapiCaptureSession mic(s);
         Check(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(mic.enumerator.GetAddressOf())), "DEVICE_ENUMERATION_FAILED");
         Check(mic.enumerator->GetDefaultAudioEndpoint(eCapture, eConsole, mic.device.GetAddressOf()), "MICROPHONE_UNAVAILABLE");
         Check(mic.device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void **>(mic.client.GetAddressOf())), "CAPTURE_ACTIVATION_FAILED");

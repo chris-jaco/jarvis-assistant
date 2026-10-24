@@ -50,6 +50,60 @@ test('portable C++ tests exercise rational clock, FIR, channels, bounded SPSC an
     assert.equal(result.state,'PASS');assert.ok(result.portableChecks>=55);assert.equal(result.hardwareValidated,false);
   }finally{await rm(dir,{recursive:true,force:true});}
 });
+test('capture RAII and Packet compile beside the Windows Microphone enumerator in C++17',async(t)=>{
+  if(process.platform!=='linux'){t.skip('Portable name-lookup regression; actual Windows headers/MSVC remain separate');return;}
+  const source=await readFile('experiments/wake-word/native-live.cc','utf8');
+  const owner=source.match(/struct \w+ \{\n  Shared &state;[\s\S]*?\n\};/)?.[0];assert.ok(owner);
+  const name=owner.match(/^struct (\w+)/)?.[1];assert.ok(name);
+  const packet=source.match(/struct Packet \{[\s\S]*?\} packet\{[^;]*\};/)?.[0];assert.ok(packet);
+  // Stub only the resource interfaces. Compile the actual owner/Packet declarations
+  // with the colliding SDK enumerator; this is not a COM ABI or hardware test.
+  const cpp=`
+#include <cstdlib>
+#include <cstring>
+enum EndpointFormFactor { Microphone = 4 };
+using HRESULT = long;
+using UINT32 = unsigned;
+#define FAILED(value) ((value) < 0)
+static int stops=0, resets=0, packets=0, frees=0;
+static bool releaseFailure=false;
+struct IMMDeviceEnumerator {};
+struct IMMDevice {};
+struct IAudioClient { HRESULT Stop(){stops++;return 0;} };
+struct IAudioCaptureClient { HRESULT ReleaseBuffer(UINT32 n){packets++;return n==480 && !releaseFailure?0:-1;} };
+template<class T> struct ComPtr { T value; T *operator->(){return &value;} T *Get(){return &value;} void Reset(){resets++;} };
+struct WAVEFORMATEX {};
+struct Handle {};
+static void CoTaskMemFree(void *p){frees++;std::free(p);}
+static double Wall(){return 100;}
+struct Shared { bool captureReleased=true;double captureWallMs=0,micReleaseWallMs=0;int failures=0;void fail(const char *){failures++;} };
+${owner}
+int main(){
+  Shared s;
+  {
+    ${name} mic(s);
+    if(s.captureReleased)return 1;
+    mic.running=true;mic.mix=static_cast<WAVEFORMATEX *>(std::malloc(sizeof(WAVEFORMATEX)));
+    UINT32 frames=480;
+    { ${packet} if(FAILED(packet.release()))return 2; }
+    if(packets!=1)return 3;
+    { ${packet} }
+    if(packets!=2)return 4;
+    releaseFailure=true;
+    { ${packet} }
+    if(packets!=3 || s.failures!=1)return 5;
+  }
+  return !s.captureReleased || stops!=1 || resets!=4 || frees!=1;
+}
+`;
+  const dir=await mkdtemp(join(tmpdir(),'atlas-live-msvc-name-'));
+  try{
+    const {writeFile}=await import('node:fs/promises');
+    const file=join(dir,'regression.cc'),exe=join(dir,'regression');await writeFile(file,cpp);
+    await promisify(execFile)('g++',['-std=c++17','-Wall','-Wextra','-Werror',file,'-o',exe],{timeout:30000});
+    await promisify(execFile)(exe,[],{timeout:30000});
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
 test('reports expose numeric channels, queue delay, CPU scope and partial acceptance without private payloads',()=>{
   const r=fixture();r.deviceId='PRIVATE_DEVICE';r.channels[0].pcm='PRIVATE_PCM';r.positions[0].transcript='PRIVATE_TEXT';r.memory.privatePath='PRIVATE_PATH';
   const clean=cleanLiveReport(r,expected,'WARM','MICROPHONE',60);
