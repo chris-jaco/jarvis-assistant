@@ -3,6 +3,18 @@
 #include "reference-kws.cc"
 #include "native-live-core.h"
 #include <thread>
+// Parse only the four authorized nominal values, before any engine/capture is created.
+static double ParseLiveThreshold(const char *value) {
+  if (!std::strcmp(value,"0.25")) return .25;
+  if (!std::strcmp(value,"0.15")) return .15;
+  if (!std::strcmp(value,"0.10") || !std::strcmp(value,"0.1")) return .10;
+  if (!std::strcmp(value,"0.05")) return .05;
+  throw Failure{"ARGUMENT_INVALID"};
+}
+static std::string LiveKeyword(double threshold) {
+  const char *text=threshold==.25?"0.25":threshold==.15?"0.15":threshold==.10?"0.1":"0.05";
+  return std::string("▁a t la s :1 #")+text+" @sherpaw_0";
+}
 #ifdef _WIN32
 #include <audioclient.h>
 #include <mmdeviceapi.h>
@@ -26,6 +38,7 @@ struct Shared {
   std::atomic<uint64_t> highWater{0};
   bool captureReleased = true, comReleased = true, engineReleased = true;
   std::atomic<bool> started{false}, captureFinished{false};
+  double thresholdFloat32 = -1;
   bool replay = false;
   std::string wavHash, pcmHash, processedPcmHash;
   live::Format format{};
@@ -246,7 +259,7 @@ class ReplayHash {
   ~ReplayHash(){if(handle)BCryptDestroyHash(handle);}
 };
 
-static void Inference(Shared &s, char **argv, bool warm, Progress &progress) noexcept {
+static void Inference(Shared &s, char **argv, bool warm, Progress &progress, const double threshold) noexcept {
   try {
     {
       const double init = Wall();
@@ -254,7 +267,8 @@ static void Inference(Shared &s, char **argv, bool warm, Progress &progress) noe
       c.feat_config.sample_rate = 16000; c.feat_config.feature_dim = 80;
       c.model_config.transducer.encoder = argv[1]; c.model_config.transducer.decoder = argv[2]; c.model_config.transducer.joiner = argv[3]; c.model_config.tokens = argv[4];
       c.model_config.num_threads = 1; c.model_config.provider = "cpu";
-      c.max_active_paths = 4; c.num_trailing_blanks = 1; c.keywords_score = 1; c.keywords_threshold = .25f;
+      c.max_active_paths = 4; c.num_trailing_blanks = 1; c.keywords_score = 1; c.keywords_threshold = static_cast<float>(threshold);
+      s.thresholdFloat32 = c.keywords_threshold;
       c.keywords_buf = argv[5]; c.keywords_buf_size = static_cast<int32_t>(std::strlen(argv[5]));
       using Spotter = std::unique_ptr<const SherpaOnnxKeywordSpotter, decltype(&SherpaOnnxDestroyKeywordSpotter)>;
       Spotter spotter(SherpaOnnxCreateKeywordSpotter(&c), SherpaOnnxDestroyKeywordSpotter);
@@ -345,7 +359,7 @@ static void PollStop(Shared &s) {
   }
 }
 static void Report(Shared &s, const std::vector<Dll> &dlls, const std::vector<std::string> &hashes,
-                   const std::string &keywordHash, bool warm, int seconds, bool detail) {
+                   const std::string &keywordHash, bool warm, int seconds, bool detail, const double threshold) {
   auto &o = std::cout; o.imbue(std::locale::classic()); o << std::setprecision(17);
   std::vector<double> decode; for (auto d : s.run.decodes) decode.push_back(d.wall);
   const char *error = s.error.load();
@@ -357,7 +371,8 @@ static void Report(Shared &s, const std::vector<Dll> &dlls, const std::vector<st
   for (size_t i=0;i<dlls.size();i++) { if(i)o<<','; o<<"{\"name\":\""<<dlls[i].name<<"\",\"sha256\":\""<<dlls[i].hash<<"\"}"; }
   o<<"]},\"wavSha256\":";if(s.wavHash.empty())o<<"null";else o<<'"'<<s.wavHash<<'"';o<<",\"pcmSha256\":";if(s.pcmHash.empty())o<<"null";else o<<'"'<<s.pcmHash<<'"';o<<",\"processedPcmSha256\":";if(s.processedPcmHash.empty())o<<"null";else o<<'"'<<s.processedPcmHash<<'"';o<<",\"modelHashes\":{"; const char *names[]{"encoder.onnx","decoder.onnx","joiner.onnx","tokens.txt"};
   for(int i=0;i<4;i++){if(i)o<<',';o<<'"'<<names[i]<<"\":\""<<hashes[i]<<'"';}
-  o<<"},\"keywordSha256\":\""<<keywordHash<<"\",\"configuration\":{\"threshold\":0.25,\"score\":1,\"maxActivePaths\":4,\"cooldownMs\":1000,\"sampleRate\":16000,\"channels\":1,\"blockSamples\":1600,\"numTrailingBlanks\":1,\"featureDim\":80},";
+  o<<"},\"keywordSha256\":\""<<keywordHash<<"\",\"configuration\":{\"threshold\":"<<threshold<<",\"score\":1,\"maxActivePaths\":4,\"cooldownMs\":1000,\"sampleRate\":16000,\"channels\":1,\"blockSamples\":1600,\"numTrailingBlanks\":1,\"featureDim\":80},";
+  o<<"\"thresholdEvidence\":{\"spotterArgumentFloat32\":";Number(o,s.thresholdFloat32);o<<"},";
   const char *kind = s.format.kind==live::Kind::pcm16?"PCM16":s.format.kind==live::Kind::pcm24?"PCM24":s.format.kind==live::Kind::pcm32?"PCM32":s.format.kind==live::Kind::float64?"FLOAT64":"FLOAT32";
   o<<"\"format\":{\"rate\":"<<s.format.rate<<",\"channels\":"<<s.format.channels<<",\"containerBits\":"<<s.format.bytes*8<<",\"validBits\":"<<s.format.validBits<<",\"kind\":\""<<kind<<"\",\"selectedChannel\":0,\"endpointBufferFrames\":"<<s.endpointFrames<<"},"
     <<"\"conversion\":{\"outputRate\":16000,\"firTaps\":"<<s.firTaps<<",\"filterDelayMs\":"<<s.filterDelayMs<<",\"outputRms\":"<<s.outputSignal.rms()<<",\"outputPeak\":"<<s.outputSignal.peak<<",\"outputClipped\":"<<s.outputSignal.clipped<<",\"appendedSamples\":0},"
@@ -384,17 +399,20 @@ static void Report(Shared &s, const std::vector<Dll> &dlls, const std::vector<st
 }
 
 static int NativeLive(int argc, char **argv, Progress &progress) {
-  const char *replay=nullptr;bool detail=false;
+  const char *replay=nullptr;bool detail=false,thresholdSpecified=false;double parsedThreshold=.25;
   for(int i=8;i<argc;i++){
     if(!std::strcmp(argv[i],"--detail")&&!detail)detail=true;
     else if(!std::strcmp(argv[i],"--replay")&&!replay&&i+1<argc)replay=argv[++i];
+    else if(!std::strcmp(argv[i],"--threshold")&&!thresholdSpecified&&i+1<argc){parsedThreshold=ParseLiveThreshold(argv[++i]);thresholdSpecified=true;}
     else throw Failure{"ARGUMENT_INVALID"};
   }
+  const double threshold=parsedThreshold;
+  if(replay && threshold!=.25)throw Failure{"ARGUMENT_INVALID"};
   if(argc<8)throw Failure{"ARGUMENT_INVALID"};
   const bool warm = !std::strcmp(argv[6],"WARM");
   if (!warm && std::strcmp(argv[6],"COLD")) throw Failure{"ARGUMENT_INVALID"};
   char *end = nullptr; const long seconds = std::strtol(argv[7],&end,10);
-  if (!end || *end || seconds<1 || seconds>120 || std::strcmp(argv[5],"▁a t la s :1 #0.25 @sherpaw_0")) throw Failure{"ARGUMENT_INVALID"};
+  if (!end || *end || seconds<1 || seconds>120 || std::strcmp(argv[5],LiveKeyword(threshold).c_str())) throw Failure{"ARGUMENT_INVALID"};
   const auto dlls = LoadedDlls();
   const std::string version=SherpaOnnxGetVersionStr(),git=SherpaOnnxGetGitSha1();
   if(version!="2.0.0" || git.substr(0,8)!="8abb7c8f")throw Failure{"RUNTIME_VERSION_MISMATCH"};
@@ -408,7 +426,7 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
   std::thread inference;
   std::thread capture;
   try {
-    inference=std::thread([&]{Inference(s,argv,warm,progress);});
+    inference=std::thread([&]{Inference(s,argv,warm,progress,threshold);});
     const double begin=Wall();
     DWORD readyWait=0;
     while((readyWait=WaitForSingleObject(s.ready.h,20))==WAIT_TIMEOUT && !stopped(s)){
@@ -425,7 +443,7 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
   s.abandonedBlocks=s.queue.pending();s.queue.wipeAfterJoin();s.tail.wipe();
   try{s.cleanupWallMs=Wall()-cleanup;}catch(...){s.fail("CAPTURE_CLOCK_FAILED");}s.memoryAfterCleanup=Mem();
   if(!s.error.load() && (s.frames!=s.convertedFrames || (s.format.rate && s.emitted!=s.frames*16000/s.format.rate) || s.emitted!=uint64_t(s.run.samples)))s.fail("AUDIO_ACCOUNTING_FAILED");
-  Report(s,dlls,hashes,keywordHash,warm,static_cast<int>(seconds),detail);
+  Report(s,dlls,hashes,keywordHash,warm,static_cast<int>(seconds),detail,threshold);
   return s.error.load()?2:s.cancelled.load()?130:0;
 }
 int wmain(int argc,wchar_t **wide) {

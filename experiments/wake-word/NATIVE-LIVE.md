@@ -5,6 +5,12 @@ Realtime, Core, Tray ni lifecycle. Warm Live WASM sigue sin aceptación. Las cif
 Offline comunicadas por el propietario justifican esta prueba; no prueban Live.
 No hay permiso para distribuir los pesos de licencia aún no verificada.
 
+Desde Hito 1.4, la [calibración de sensibilidad](NATIVE-SENSITIVITY.md) permite
+--threshold .25/.15/.10/.05 con escritura decimal completa (por ejemplo 0.15).
+El valor por defecto, los comandos anteriores y el replay siguen siendo .25.
+El contrato añade evidencia float32 y hash de keyword específico del umbral;
+requiere recompilar y generar un lock nuevo. No cambian otros parámetros ni audio.
+
 ## Arquitectura y límites
 
 - Un proceso por ensayo. El hilo de inferencia crea y posee spotter/stream.

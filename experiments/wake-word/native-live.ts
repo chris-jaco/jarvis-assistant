@@ -5,8 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { artifactSha256, runtimeCommit } from './native-benchmark.js';
-import { configuration, input, localPath, sdkHashes, sha, validateTrial } from './benchmark-contract.js';
+import { input, localPath, sdkHashes, sha, validateTrial } from './benchmark-contract.js';
 import { SpikeError } from './core.js';
+import { liveConfiguration, liveKeyword, parseLiveFlags } from './native-live-config.js';
 
 const codes = new Set(['DIAGNOSTIC_CHANNEL_UNAVAILABLE','CAPTURE_COMPLETED','CAPTURE_INCOMPLETE','ARGUMENT_INVALID','EVENT_FAILED','WALL_CLOCK_FAILED',
   'DLL_LOCATION_FAILED','DLL_LOCATION_MISMATCH','SDK_HASH_MISMATCH','RUNTIME_VERSION_MISMATCH','HASH_FAILED','INPUT_FILE_INVALID',
@@ -29,13 +30,20 @@ function nums(value: any, keys: string[]) {
 }
 const bools=(value:any,keys:string[])=>Object.fromEntries(keys.map(key=>{if(typeof value?.[key]!=='boolean')reject();return[key,value[key]];}));
 const same=(a:any,b:any)=>JSON.stringify(Object.entries(a??{}).sort())===JSON.stringify(Object.entries(b??{}).sort());
-export function cleanLiveReport(r:any, expected:any, mode:'COLD'|'WARM', source:'MICROPHONE'|'REPLAY', seconds:number) {
+export function cleanLiveReport(r:any, expected:any, mode:'COLD'|'WARM', source:'MICROPHONE'|'REPLAY', seconds:number, threshold=.25) {
+  const effectiveConfiguration=liveConfiguration(threshold);
   if(r?.schema!==1 || !['COMPLETED','CANCELLED','FAILED'].includes(r.state))reject();
   if(r.state==='FAILED' && !r.backend)return {schema:1,state:'FAILED',code:codes.has(r.code)?r.code:'NATIVE_LIVE_FAILED'};
-  if(r.backend!=='NATIVE_LIVE' || r.mode!==mode || r.source!==source || !same(r.configuration,configuration)
+  if(r.backend!=='NATIVE_LIVE' || r.mode!==mode || r.source!==source || !same(r.configuration,effectiveConfiguration)
     || !same(r.modelHashes,expected.modelHashes) || r.keywordSha256!==expected.keywordSha256
     || r.runtime?.version!=='2.0.0' || !Array.isArray(r.runtime.dlls) || r.runtime.dlls.length!==2
     || ['sherpa-onnx-c-api.dll','onnxruntime.dll'].some(name=>!r.runtime.dlls.some((d:any)=>d.name===name && d.sha256===sdkHashes[name])))reject();
+  let thresholdEvidence=null;
+  if(r.thresholdEvidence!==undefined){
+    const value=r.thresholdEvidence?.spotterArgumentFloat32;
+    if(!(value===null && r.state!=='COMPLETED') && value!==Math.fround(threshold))reject();
+    thresholdEvidence={spotterArgumentFloat32:value};
+  }else if(threshold!==.25)reject();
   const format=nums(r.format,['rate','channels','containerBits','validBits','selectedChannel','endpointBufferFrames']);
   if(!['PCM16','PCM24','PCM32','FLOAT32','FLOAT64'].includes(r.format.kind) || format.selectedChannel!==0 || Number(format.channels)>8)reject();
   const capture=nums(r.capture,['requestedSeconds','wallMs','framesReceived','framesConverted','unconvertedFrames','resampledSamples','enqueuedBlocks','processedSamples','processedBlocks','silentFrames','unprocessedSamples','overflows','discontinuities','initialDiscontinuities','sequenceErrors']);
@@ -81,7 +89,7 @@ export function cleanLiveReport(r:any, expected:any, mode:'COLD'|'WARM', source:
   if(source==='REPLAY' && r.state==='COMPLETED' && r.processedPcmSha256!==expected.pcmSha256)reject();
   const technicalThresholdsMet=r.state==='COMPLETED' && source==='MICROPHONE' && seconds>=60 && Number(inference.decodeCalls)>0
     && inference.firstDecodeWallMs!==null && Number(inference.firstDecodeWallMs)<200 && Number(inference.maxBlockWallMs)<200 && inference.rtf!==null && Number(inference.rtf)<.7;
-  return {schema:1,backend:'NATIVE_LIVE',state:r.state,code:codes.has(r.code)?r.code:'NATIVE_LIVE_FAILED',source,mode,configuration,
+  return {schema:1,backend:'NATIVE_LIVE',state:r.state,code:codes.has(r.code)?r.code:'NATIVE_LIVE_FAILED',source,mode,configuration:effectiveConfiguration,thresholdEvidence,
     runtime:{version:'2.0.0',dllHashes:sdkHashes},modelHashes:expected.modelHashes,keywordSha256:expected.keywordSha256,
     wavSha256:source==='REPLAY'?r.wavSha256:null,pcmSha256:source==='REPLAY'?r.pcmSha256:null,processedPcmSha256:source==='REPLAY'?r.processedPcmSha256:null,format:{...format,kind:r.format.kind},conversion,
     capture,buffer,preparation,inference,recognition,channels,memory:{...memory,residentWindows10s},cleanup,positions,details,
@@ -89,7 +97,8 @@ export function cleanLiveReport(r:any, expected:any, mode:'COLD'|'WARM', source:
     latencyScope:'LAST_INPUT_SAMPLE_OF_DETECTION_BLOCK_NOT_ACOUSTIC_LATENCY'};
 }
 
-export async function livePreflight(executable:string,lockPath:string,replay?:string){
+export async function livePreflight(executable:string,lockPath:string,replay?:string,threshold=.25){
+  liveConfiguration(threshold);if(replay && threshold!==.25)throw new SpikeError('REPLAY_THRESHOLD_UNSUPPORTED');
   const exe=await localPath(executable),lock=JSON.parse(await readFile(await localPath(lockPath),'utf8'));
   if(lock.schema!==1||lock.kind!=='NATIVE_LIVE'||lock.version!=='2.0.0'||lock.commit!==runtimeCommit||lock.artifactSha256!==artifactSha256
     || lock.executableSha256!==sha(await readFile(exe)))throw new SpikeError('NATIVE_LOCK_MISMATCH');
@@ -100,7 +109,7 @@ export async function livePreflight(executable:string,lockPath:string,replay?:st
   const assets=await loadAssets().catch(()=>{throw new SpikeError('MODEL_ASSETS_UNAVAILABLE');});
   if(JSON.stringify(assets.manifest.keywords)!==JSON.stringify([['▁a','t','la','s']]))throw new SpikeError('KEYWORDS_INVALID');
   const modelHashes=Object.fromEntries(['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].map(name=>[name,sha(assets.files.get('/assets/model/'+name))]));
-  const keyword='▁a t la s :1 #0.25 @sherpaw_0';
+  const keyword=liveKeyword(threshold);
   const expected:any={modelHashes,keywordSha256:sha(keyword)};
   let wav:string|undefined;
   if(replay){const data=await input(replay);data.pcm.fill(0);wav=data.wavPath;expected.wavSha256=data.wavSha256;expected.pcmSha256=data.pcmSha256;}
@@ -153,17 +162,15 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   try{
     const [exe,lock,mode,duration,...flags]=process.argv.slice(2),seconds=Number(duration);
     if(process.platform!=='win32'||process.arch!=='x64'||!exe||!lock||!['COLD','WARM'].includes(mode??'')||!Number.isInteger(seconds)||seconds<1||seconds>120)throw Error();
-    let check=false,detail=false,replay:string|undefined;
-    for(let i=0;i<flags.length;i++){if(flags[i]==='--check'&&!check)check=true;else if(flags[i]==='--detail'&&!detail)detail=true;
-      else if(flags[i]==='--replay'&&!replay&&flags[i+1])replay=flags[++i];else throw Error();}
-    const ready=await livePreflight(exe,lock,replay);
-    if(check)console.log(JSON.stringify({state:'PREFLIGHT_OK',mode,seconds,source:replay?'REPLAY':'MICROPHONE',...ready.expected}));
+    const {check,detail,replay,threshold,thresholdSpecified}=parseLiveFlags(flags);
+    const ready=await livePreflight(exe,lock,replay,threshold);
+    if(check)console.log(JSON.stringify({state:'PREFLIGHT_OK',mode,seconds,source:replay?'REPLAY':'MICROPHONE',configuration:liveConfiguration(threshold),...ready.expected}));
     else{
       process.on('SIGINT',stop);lines=createInterface({input:process.stdin});lines.on('line',stop);
       console.error('INITIALIZING — Enter o Ctrl+C solicita Stop; esperar CAPTURE_STARTED o REPLAY_STARTED.');
       const args=['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].map(name=>resolve(ready.root,'model',name));
-      const result=await runLiveChild(ready.exe,[...args,ready.keyword,mode!,String(seconds),...(detail||replay?['--detail']:[]),...(ready.wav?['--replay',ready.wav]:[])],seconds,controller.signal,stage=>console.error(stage));
-      const report=cleanLiveReport(result.report,ready.expected,mode as 'COLD'|'WARM',replay?'REPLAY':'MICROPHONE',seconds);
+      const result=await runLiveChild(ready.exe,[...args,ready.keyword,mode!,String(seconds),...(thresholdSpecified?['--threshold',String(threshold)]:[]),...(detail||replay?['--detail']:[]),...(ready.wav?['--replay',ready.wav]:[])],seconds,controller.signal,stage=>console.error(stage));
+      const report=cleanLiveReport(result.report,ready.expected,mode as 'COLD'|'WARM',replay?'REPLAY':'MICROPHONE',seconds,threshold);
       let equivalence:any=null;
       if(replay && report.state==='COMPLETED'){
         // Separate process: the WASM adapter can wipe its entire own heap safely.
@@ -172,7 +179,7 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
       }
       console.log(JSON.stringify({...report,equivalence}));process.exitCode=result.exitCode??2;
     }
-  }catch(error){const allowed=['MODEL_ASSETS_UNAVAILABLE','NATIVE_LOCK_MISMATCH','SDK_HASH_MISMATCH','KEYWORDS_INVALID','NATIVE_LIVE_REPORT_INVALID','REPLAY_EQUIVALENCE_FAILED','NATIVE_LIVE_TIMEOUT','NATIVE_LIVE_STOP_TIMEOUT','NATIVE_LIVE_OUTPUT_LIMIT','NATIVE_LIVE_CHILD_FAILED'];
+  }catch(error){const allowed=['THRESHOLD_INVALID','ARGUMENT_INVALID','REPLAY_THRESHOLD_UNSUPPORTED','MODEL_ASSETS_UNAVAILABLE','NATIVE_LOCK_MISMATCH','SDK_HASH_MISMATCH','KEYWORDS_INVALID','NATIVE_LIVE_REPORT_INVALID','REPLAY_EQUIVALENCE_FAILED','NATIVE_LIVE_TIMEOUT','NATIVE_LIVE_STOP_TIMEOUT','NATIVE_LIVE_OUTPUT_LIMIT','NATIVE_LIVE_CHILD_FAILED'];
     console.log(JSON.stringify({state:'FAILED',code:error instanceof SpikeError && allowed.includes(error.code)?error.code:'NATIVE_LIVE_PREFLIGHT_FAILED',acceptance:'NOT_ESTABLISHED'}));process.exitCode=2;
   }finally{process.removeListener('SIGINT',stop);lines?.close();}
 }
