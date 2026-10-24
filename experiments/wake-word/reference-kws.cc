@@ -198,6 +198,7 @@ static int RunReference(int argc,char **argv) {
   o<<"],\"memory\":{\"residentStartBytes\":";if(before.available)o<<before.rss;else o<<"null";o<<",\"residentEndBytes\":";if(after.available)o<<after.rss;else o<<"null";o<<",\"residentPeakBytes\":";if(after.available)o<<after.peak;else o<<"null";o<<",\"peakKind\":\"OS_PEAK\",\"wasmHeapBytes\":null},\"cleanupCompleted\":true}"<<std::endl;
   return 0;
 }
+#ifndef ATLAS_REFERENCE_LIBRARY
 static int SafeMain(int argc,char **argv) {
 #ifdef _WIN32
   std::freopen("NUL","w",stderr);
@@ -217,3 +218,5 @@ int wmain(int argc,wchar_t **wide) {
 #else
 int main(int argc,char **argv){return SafeMain(argc,argv);}
 #endif
+
+#endif  // ATLAS_REFERENCE_LIBRARY

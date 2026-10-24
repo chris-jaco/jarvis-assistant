@@ -1147,3 +1147,11 @@ cambio de transporte/pool o aceptación de Warm Live. Antes de elegir backend:
 20 ensayos válidos por backend/modalidad, equivalencia íntegra, margen consistente
 frente al presupuesto Live y revisión de CPU/pared/memoria. No basta un promedio
 favorable ni un RTF menor que uno para garantizar ausencia de overruns.
+
+## Native Live experimental
+
+El [harness Native Live](NATIVE-LIVE.md) agrega WASAPI compartido, canal 0,
+resampling FIR explícito y cola acotada en un ejecutable separado. Conserva
+reconocimiento, transporte/pool WASM y Atlas productivo. Incluye comandos Windows,
+contrato JSON, replay del WAV autorizado y matriz de aceptación pendiente.
+La implementación portable en Linux no acredita compilación MSVC ni hardware.

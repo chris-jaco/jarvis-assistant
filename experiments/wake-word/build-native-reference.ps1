@@ -1,5 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$SdkRoot,
-      [Parameter(Mandatory=$true)][string]$OutputDir)
+      [Parameter(Mandatory=$true)][string]$OutputDir,
+      [switch]$Live)
 # Run in an existing MSVC x64 developer PowerShell. No installation or native execution.
 $ErrorActionPreference = 'Stop'
 try {
@@ -36,11 +37,12 @@ try {
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file).Hash.ToLowerInvariant() -ne $entry.Value) { throw 'SDK_HASH_MISMATCH' }
   }
   New-Item -ItemType Directory -Path $out | Out-Null
-  $source = Join-Path $PSScriptRoot 'reference-kws.cc'
-  $exe = Join-Path $out 'reference-kws.exe'
+  $stem = if ($Live) { 'native-live' } else { 'reference-kws' }
+  $source = Join-Path $PSScriptRoot "$stem.cc"
+  $exe = Join-Path $out "$stem.exe"
   & $compiler /nologo /EHsc /O2 /MD /std:c++17 /utf-8 /DSHERPA_ONNX_BUILD_SHARED_LIBS=1 /D_WIN32_WINNT=0x0A00 /DNOMINMAX `
-    "/I$(Join-Path $sdk 'include')" $source "/Fe:$exe" "/Fo:$(Join-Path $out 'reference-kws.obj')" `
-    /link /MACHINE:X64 (Join-Path $sdk 'lib/sherpa-onnx-c-api.lib') bcrypt.lib psapi.lib
+    "/I$(Join-Path $sdk 'include')" $source "/Fe:$exe" "/Fo:$(Join-Path $out "$stem.obj")" `
+    /link /MACHINE:X64 (Join-Path $sdk 'lib/sherpa-onnx-c-api.lib') bcrypt.lib psapi.lib ole32.lib uuid.lib
   if ($LASTEXITCODE -ne 0) { throw 'BUILD_FAILED' }
   foreach ($name in @('sherpa-onnx-c-api.dll','onnxruntime.dll','onnxruntime_providers_shared.dll')) {
     Copy-Item -LiteralPath (Join-Path $sdk "lib/$name") -Destination (Join-Path $out $name)
@@ -49,6 +51,13 @@ try {
     artifactSha256='98d8cf1c0e0bfb5768042e90ffe9591203855b8f4aabdcd5c154eb39b87a0707';
     sourceSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash.ToLowerInvariant();
     executableSha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()}
-  $lock | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $out 'native-lock.json') -Encoding ASCII
+  $lockName = 'native-lock.json'
+  if ($Live) {
+    $lock.kind = 'NATIVE_LIVE'
+    $lock.referenceSourceSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'reference-kws.cc')).Hash.ToLowerInvariant()
+    $lock.coreSourceSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'native-live-core.h')).Hash.ToLowerInvariant()
+    $lockName = 'native-live-lock.json'
+  }
+  $lock | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $out $lockName) -Encoding ASCII
   Write-Output 'BUILD_COMPLETE_NOT_EXECUTED'
 } catch { Write-Error 'NATIVE_BUILD_FAILED'; exit 2 }
