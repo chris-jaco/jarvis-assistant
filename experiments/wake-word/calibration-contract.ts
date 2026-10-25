@@ -1,0 +1,108 @@
+// Calibration-only numeric contract. Never records or reconstructs audio.
+import { sha } from './benchmark-contract.js';
+import { cleanLiveReport } from './native-live.js';
+import { validateFnDiagnostics,fnPolicy } from './native-fn-diagnostics.js';
+import { liveKeyword } from './native-live-config.js';
+import { SpikeError } from './core.js';
+export const calibrationThresholds=[.15,.10,.05] as const;
+export const maxCalibrationSamples=64*16000;
+export const retentionMs=7*24*60*60*1000;
+export const calibrationFormat={encoding:'F32LE',sampleRate:16000,channels:1,blockSamples:1600,domain:'POST_FIR',paddingSamples:0,normalization:false} as const;
+export type Kind='POSITIVE'|'SILENCE'|'SIMILAR';
+export const fail=(code:string):never=>{throw new SpikeError(code);};
+export const digest=(v:any)=>sha(JSON.stringify(v));
+export const same=(a:any,b:any)=>digest(a)===digest(b);
+export function checkedKind(v:string):Kind{if(!['POSITIVE','SILENCE','SIMILAR'].includes(v))fail('CAL_KIND_INVALID');return v as Kind;}
+export function checkHash(v:any){if(typeof v!=='string'||!/^[a-f0-9]{64}$/.test(v))fail('CAL_HASH_INVALID');return v as string;}
+export function retention(created:string,expires:string,now=Date.now()){
+  const c=Date.parse(created),e=Date.parse(expires);
+  if(!Number.isFinite(c)||!Number.isFinite(e)||new Date(c).toISOString()!==created||new Date(e).toISOString()!==expires||e-c!==retentionMs||c>now)fail('CAL_RETENTION_INVALID');
+  return now>=e?'EXPIRED':'WITHIN_RETENTION';
+}
+export function validatePcm(bytes:Uint8Array,expected:string,samples:number){
+  checkHash(expected);
+  if(!Number.isSafeInteger(samples)||samples<1||samples>maxCalibrationSamples||bytes.byteLength!==samples*4)fail('CAL_PCM_LENGTH_INVALID');
+  if(sha(bytes)!==expected)fail('CAL_PCM_HASH_MISMATCH');
+  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  for(let at=0;at<bytes.byteLength;at+=4)if(!Number.isFinite(view.getFloat32(at,true)))fail('CAL_PCM_INVALID');
+}
+export function bindCalibrationWindows(report:any,kind:Kind){
+  checkedKind(kind);
+  if(report.state!=='COMPLETED'||report.source!=='MICROPHONE'||report.mode!=='COLD'||report.configuration?.threshold!==.15)fail('CAL_CAPTURE_INCOMPLETE');
+  const d=validateFnDiagnostics(report.fnDiagnostics,report,report.fnDiagnostics?.trialId,report.fnDiagnostics?.hostMarkers);
+  if(!d||!d.channelHealthy||d.blocks.length===0)fail('CAL_ALIGNMENT_AMBIGUOUS');
+  if(kind==='SILENCE'){
+    if(d.markers.length||d.hostMarkers.length)fail('CAL_ALIGNMENT_AMBIGUOUS');return [];
+  }
+  if(d.markers.length!==40||d.hostMarkers.length!==40)fail('CAL_ALIGNMENT_AMBIGUOUS');
+  function point(i:number){
+    const marker=d.markers[i],host=d.hostMarkers[i];
+    if(!host.acknowledged||host.roundTripMs>fnPolicy.markerRttMs)fail('CAL_ALIGNMENT_AMBIGUOUS');
+    const low=marker.qpcMs-host.roundTripMs-fnPolicy.clockGapMs,high=marker.qpcMs+fnPolicy.clockGapMs;
+    const blocks=d.blocks.filter((b:any)=>b.qpcEndMs>=low&&b.qpcStartMs<=high);
+    if(!blocks.length||blocks[0].qpcStartMs>low||blocks.at(-1).qpcEndMs<high)fail('CAL_ALIGNMENT_AMBIGUOUS');
+    let end=blocks[0].qpcStartMs;
+    const limits:number[]=[];
+    for(const b of blocks){
+      if(!b.completed||b.invalid||Math.abs(b.qpcStartMs-end)>fnPolicy.clockGapMs)fail('CAL_ALIGNMENT_AMBIGUOUS');
+      limits.push(b.sampleStart+(Math.max(low,b.qpcStartMs)-b.qpcStartMs)*16,b.sampleStart+(Math.min(high,b.qpcEndMs)-b.qpcStartMs)*16);end=b.qpcEndMs;
+    }
+    const lower=Math.floor(Math.min(...limits)),upper=Math.ceil(Math.max(...limits));
+    return {lower,upper,qpcMs:marker.qpcMs,roundTripMs:host.roundTripMs,uncertaintySamples:upper-lower,
+      offsetLowerMs:marker.qpcMs-upper/16,offsetUpperMs:marker.qpcMs-lower/16};
+  }
+  const windows:any[]=Array.from({length:20},(_,i)=>({id:i+1,begin:point(i*2),end:point(i*2+1)}));
+  let previous=-1;
+  for(const w of windows){
+    if(w.begin.upper>=w.end.lower||w.begin.lower<4000||w.end.upper+16000>report.capture.processedSamples
+      ||w.begin.lower-4000<=previous)fail('CAL_ALIGNMENT_AMBIGUOUS');
+    previous=w.end.upper+16000;
+    const relevant=d.blocks.filter((b:any)=>b.sampleEnd>w.begin.lower-4000&&b.sampleStart<w.end.upper+16000);
+    for(let i=0;i<relevant.length;i++)if(!relevant[i].completed||relevant[i].invalid||(i&&Math.abs(relevant[i].qpcStartMs-relevant[i-1].qpcEndMs)>fnPolicy.clockGapMs))fail('CAL_ALIGNMENT_AMBIGUOUS');
+  }
+  return windows;
+}
+export function validateCalReplay(raw:any,expected:any,session:any,threshold:number){
+  if(!calibrationThresholds.some(t=>t===threshold))fail('CAL_THRESHOLD_INVALID');
+  const c=raw?.calibration;
+  if(c?.schema!==1||c.mode!=='REPLAY'||c.persisted!==false||c.samples!==session.samples||c.sha256!==session.pcmSha256)fail('CAL_REPLAY_CONTRACT_INVALID');
+  const r=cleanLiveReport(raw,{...expected,wavSha256:null,pcmSha256:session.pcmSha256},'COLD','REPLAY',60,threshold);
+  if(r.state!=='COMPLETED'||r.capture.processedSamples!==session.samples||r.capture.processedBlocks!==Math.ceil(session.samples/1600)
+    ||r.format.kind!=='FLOAT32'||r.format.rate!==16000||r.format.channels!==1||r.conversion.firTaps!==1||r.conversion.filterDelayMs!==0
+    ||!same(r.modelHashes,session.modelHashes)||!r.details||r.details.blocks.length!==r.capture.processedBlocks
+    ||r.positions.length!==r.recognition.rawHits||r.details.decodes.length!==r.inference.decodeCalls)fail('CAL_REPLAY_CONTRACT_INVALID');
+  for(let i=0;i<r.details.blocks.length;i++){
+    const b=r.details.blocks[i];if(b.sequence!==i||b.decodeCalls!==r.details.decodes.filter((d:any)=>d.block===i).length
+      ||b.rawHits!==r.positions.filter((p:any)=>p.block===i).length||typeof b.wallMs!=='number')fail('CAL_REPLAY_CONTRACT_INVALID');
+  }
+  let decoded=-1;for(const d of r.details.decodes){if(!Number.isSafeInteger(d.block)||d.block<decoded||d.block<0||d.block>=r.capture.processedBlocks||typeof d.wallMs!=='number')fail('CAL_REPLAY_CONTRACT_INVALID');decoded=d.block;}
+  let previous=-1;for(const p of r.positions){if(!Number.isInteger(p.block)||p.block<previous||p.block<0||!p.blockCompleted
+    ||p.block>=r.capture.processedBlocks||p.audioSampleEnd!==Math.min(session.samples,(p.block+1)*1600))fail('CAL_REPLAY_CONTRACT_INVALID');previous=p.block;}
+  return r;
+}
+export function associateCalibration(r:any,session:any){
+  const target=session.kind==='POSITIVE',windows=session.windows.map((w:any)=>({...w,accepted:0,raw:0}));
+  const events:any[]=[];let last=-Infinity,accepted=0,suppressed=0,rawOutside=0,outside=0;
+  for(const p of r.positions){
+    const take=p.block*100-last>=1000;if(take){last=p.block*100;accepted++;}else suppressed++;
+    const possible=windows.filter((w:any)=>p.audioSampleEnd>=w.begin.lower-4000&&p.audioSampleEnd<=w.end.upper+16000);
+    const w=possible.length===1?possible[0]:undefined;
+    if(possible.length>1||(w&&(p.audioSampleEnd<w.begin.upper-4000||p.audioSampleEnd>w.end.lower+16000)))fail('CAL_HIT_AMBIGUOUS');
+    if(w){w.raw++;if(take)w.accepted++;}else{rawOutside++;if(take)outside++;}
+    events.push({block:p.block,audioSampleEnd:p.audioSampleEnd,accepted:take,windowId:w?.id??null,
+      audioEndDifferenceMs:w?{lower:(p.audioSampleEnd-w.end.upper)/16,upper:(p.audioSampleEnd-w.end.lower)/16}:null,
+      deliveryFromBlockEndMs:p.latencyFromBlockEndMs,acousticLatencyMs:null});
+  }
+  if(accepted!==r.recognition.detections||suppressed!==r.recognition.suppressedHits)fail('CAL_HIT_ACCOUNTING_INVALID');
+  const matched=target?windows.filter((w:any)=>w.accepted>0).length:null;
+  return {kind:session.kind,threshold:r.configuration.threshold,rawHits:r.positions.length,detections:accepted,suppressedHits:suppressed,
+    associatedPronunciations:matched,omissions:target?20-matched!:null,sensitivity:target?matched!/20:null,
+    duplicates:target?windows.reduce((s:number,w:any)=>s+Math.max(0,w.accepted-1),0):0,
+    falsePositives:target?outside:accepted,rawFalsePositives:target?rawOutside:r.positions.length,
+    falsePositivesPerHour:(target?outside:accepted)*16000*3600/session.samples,events,
+    recognitionSignature:digest({samples:session.samples,pcmSha256:session.pcmSha256,annotationSha256:session.annotationSha256,
+      modelHashes:r.modelHashes,configuration:r.configuration,keywordSha256:r.keywordSha256,
+      recognition:r.recognition,positions:r.positions.map((p:any)=>({block:p.block,sampleEnd:p.audioSampleEnd,start:p.startTimeSec,timestamps:p.timestampsSec})),
+      decodeBlocks:r.details.decodes.map((d:any)=>d.block)}),
+    performance:r.inference,buffer:r.buffer,memory:r.memory,cleanup:r.cleanup};
+}

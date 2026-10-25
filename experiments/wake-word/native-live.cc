@@ -3,7 +3,9 @@
 #include "reference-kws.cc"
 #include "native-live-core.h"
 #include "native-fn-core.h"
+#include "native-calibration-core.h"
 #include <thread>
+#include <cwctype>
 // Parse only the four authorized nominal values, before any engine/capture is created.
 static double ParseLiveThreshold(const char *value) {
   if (!std::strcmp(value,"0.25")) return .25;
@@ -48,6 +50,8 @@ struct Shared {
   std::vector<atlas_fn::Decode> diagnosticDecodes;
   double thresholdFloat32 = -1;
   bool replay = false;
+  bool calReplay=false,calSave=false,calPersisted=false;
+  size_t calSamples=0;std::string calPath,calHash;atlas_cal::Buffer recording;
   std::string wavHash, pcmHash, processedPcmHash;
   live::Format format{};
   live::Continuity continuity;
@@ -284,6 +288,69 @@ static void Replay(Shared &s, const char *path, Progress &progress) noexcept {
   s.captureFinished.store(true,std::memory_order_release);SetEvent(s.captureDone.h);SetEvent(s.data.h);progress.write("REPLAY_STOPPED\n");
 }
 
+// All disk access is outside the WASAPI thread. Reject reparse ancestors and overwrite.
+static std::filesystem::path CalPath(const std::string &text) {
+  auto path=std::filesystem::u8path(text);if(!path.is_absolute()||path.filename()!=L"capture.f32le")throw Failure{"CALIBRATION_PATH_INVALID"};
+  if(GetDriveTypeW(path.root_path().c_str())!=DRIVE_FIXED)throw Failure{"CALIBRATION_PATH_INVALID"};
+  for(const auto &part:path)if(part==L".."||part==L".")throw Failure{"CALIBRATION_PATH_INVALID"};
+  bool local=false;
+  for(auto p=path.parent_path();!p.empty();p=p.parent_path()){
+    const auto attributes=GetFileAttributesW(p.c_str());
+    if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&FILE_ATTRIBUTE_REPARSE_POINT))throw Failure{"CALIBRATION_PATH_INVALID"};
+    auto name=p.filename().wstring();std::transform(name.begin(),name.end(),name.begin(),[](wchar_t c){return static_cast<wchar_t>(std::towlower(c));});if(name==L".local")local=true;
+    if(p==p.parent_path())break;
+  }
+  if(!local)throw Failure{"CALIBRATION_PATH_INVALID"};return path;
+}
+static std::vector<unsigned char> CalRead(const std::filesystem::path &path){
+  std::ifstream file(path,std::ios::binary|std::ios::ate);
+  if(!file||file.tellg()<=0||file.tellg()>static_cast<std::streamoff>(atlas_cal::maxSamples*4))throw Failure{"CALIBRATION_PCM_INVALID"};
+  const auto n=static_cast<size_t>(file.tellg());std::vector<unsigned char> bytes(n);file.seekg(0);
+  if(!file.read(reinterpret_cast<char *>(bytes.data()),static_cast<std::streamsize>(n))){
+    volatile unsigned char *p=bytes.data();for(size_t i=0;i<bytes.size();i++)p[i]=0;throw Failure{"CALIBRATION_PCM_INVALID"};
+  }
+  return bytes;
+}
+static std::string CalFileHash(const std::filesystem::path &path){
+  auto bytes=CalRead(path);struct Wipe{std::vector<unsigned char>&b;~Wipe(){volatile unsigned char*p=b.data();for(size_t i=0;i<b.size();i++)p[i]=0;}}wipe{bytes};
+  if(bytes.size()>atlas_cal::maxSamples*4)throw Failure{"CALIBRATION_PCM_INVALID"};return Hash(bytes.data(),bytes.size());
+}
+static void SaveCalibration(Shared &s){
+  const auto path=CalPath(s.calPath);static_assert(sizeof(float)==4,"F32 required");
+  HANDLE file=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+  if(file==INVALID_HANDLE_VALUE)throw Failure{"CALIBRATION_WRITE_FAILED"};
+  const DWORD n=static_cast<DWORD>(s.recording.size()*4);DWORD written=0;
+  const bool ok=WriteFile(file,s.recording.data(),n,&written,nullptr)&&written==n&&FlushFileBuffers(file);
+  const bool closed=CloseHandle(file)!=FALSE;if(!ok||!closed)throw Failure{"CALIBRATION_WRITE_FAILED"};
+  s.calHash=Hash(reinterpret_cast<const unsigned char *>(s.recording.data()),n);
+  if(CalFileHash(path)!=s.calHash)throw Failure{"PCM_HASH_MISMATCH"};s.calSamples=s.recording.size();s.calPersisted=true;
+}
+static void CalibrationReplay(Shared &s,Progress &progress) noexcept {
+  try{
+    const auto path=CalPath(s.calPath);const auto attributes=GetFileAttributesW(path.c_str());
+    if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY)))throw Failure{"CALIBRATION_PATH_INVALID"};
+    if(std::filesystem::file_size(path)!=s.calSamples*4)throw Failure{"CALIBRATION_PCM_INVALID"};
+    auto bytes=CalRead(path);struct Wipe{std::vector<unsigned char>&b;~Wipe(){volatile unsigned char *p=b.data();for(size_t i=0;i<b.size();i++)p[i]=0;}}wipe{bytes};
+    if(bytes.size()!=s.calSamples*4||Hash(bytes.data(),bytes.size())!=s.calHash)throw Failure{"PCM_HASH_MISMATCH"};
+    s.pcmHash=s.calHash;s.format={16000,1,4,32,live::Kind::float32};s.firTaps=1;
+    live::Assembler assembler;const double start=Wall();s.started.store(true);progress.write("REPLAY_STARTED\n");
+    for(size_t at=0;at<s.calSamples&&!stopped(s);at+=1600){
+      const size_t n=std::min<size_t>(1600,s.calSamples-at);
+      while(!stopped(s)&&Wall()<start+(at+n)/16.0)WaitForSingleObject(s.stop.h,1);
+      if(stopped(s))break;s.frames+=n;
+      for(size_t i=0;i<n;i++){
+        float value=0;std::memcpy(&value,bytes.data()+(at+i)*4,4);if(!std::isfinite(value))throw Failure{"CALIBRATION_PCM_INVALID"};
+        s.signal[0].add(value);s.outputSignal.add(value);s.convertedFrames++;s.emitted++;
+        assembler.accept(value,start+(at+i+1)/16.0,[&](const live::Block &b){uint64_t pending=0;
+          if(!s.queue.push(b,&pending)){s.overflows++;return false;}s.enqueued++;s.highWater.store(std::max(s.highWater.load(),pending));SetEvent(s.data.h);return true;});
+      }
+    }
+    s.tail=assembler.tail();s.captureWallMs=Wall()-start;
+    if(CalFileHash(path)!=s.calHash)throw Failure{"PCM_HASH_MISMATCH"};
+  }catch(const Failure&e){s.fail(e.code);}catch(const live::Error&e){s.fail(e.code);}catch(...){s.fail("CALIBRATION_REPLAY_FAILED");}
+  s.captureFinished.store(true,std::memory_order_release);SetEvent(s.captureDone.h);SetEvent(s.data.h);progress.write("REPLAY_STOPPED\n");
+}
+
 // Hash only authorized replay PCM at the actual Feed boundary, never microphone audio.
 class ReplayHash {
   BCRYPT_HASH_HANDLE handle=nullptr;
@@ -333,6 +400,7 @@ static void Inference(Shared &s, char **argv, bool warm, Progress &progress, con
       auto process = [&](live::Block &block) {
         struct Wipe { live::Block &b; ~Wipe() { b.wipe(); } } wipe{block};
         if (block.sequence != sequence++ || !block.size || block.size > 1600) { s.sequenceErrors++; throw Failure{"AUDIO_SEQUENCE_ERROR"}; }
+        if(s.calSave)s.recording.append(block.pcm.data(),block.size,s.run.samples);
         if(replayHash)replayHash->add(block.pcm.data(),block.size);
         atlas_fn::Block *diagnostic=nullptr;
         if(s.fnEnabled){
@@ -378,6 +446,7 @@ static void Inference(Shared &s, char **argv, bool warm, Progress &progress, con
     }
     s.engineReleased = true;
   } catch (const Failure &e) { s.fail(e.code); s.engineReleased = true; }
+    catch (const atlas_cal::Error &e) {s.fail(e.code);s.engineReleased=true;}
     catch (...) { s.fail("INFERENCE_FAILED"); s.engineReleased = true; }
   s.memoryAfterCleanup = Mem(); SetEvent(s.ready.h); SetEvent(s.inferenceDone.h);
 }
@@ -430,7 +499,7 @@ static void Report(Shared &s, const std::vector<Dll> &dlls, const std::vector<st
   auto &o = std::cout; o.imbue(std::locale::classic()); o << std::setprecision(17);
   std::vector<double> decode; for (auto d : s.run.decodes) decode.push_back(d.wall);
   const char *error = s.error.load();
-  const bool complete = !error && !s.cancelled.load() && s.started && (s.replay ? s.run.samples == 330411 : s.captureWallMs >= seconds * 1000.0)
+  const bool complete = !error && !s.cancelled.load() && s.started && (s.replay ? s.run.samples == (s.calReplay?static_cast<int>(s.calSamples):330411) : s.captureWallMs >= seconds * 1000.0)
     && s.emitted == static_cast<uint64_t>(s.run.samples) && s.captureReleased && s.comReleased && s.engineReleased;
   o << "{\"schema\":1,\"backend\":\"NATIVE_LIVE\",\"source\":\""<<(s.replay?"REPLAY":"MICROPHONE")<<"\",\"state\":\"" << (error ? "FAILED" : complete ? "COMPLETED" : "CANCELLED")
     << "\",\"code\":\"" << (error ? error : complete ? "CAPTURE_COMPLETED" : "CAPTURE_INCOMPLETE") << "\",\"mode\":\"" << (warm ? "WARM" : "COLD")
@@ -462,6 +531,7 @@ static void Report(Shared &s, const std::vector<Dll> &dlls, const std::vector<st
   o<<"],\"details\":";
   if(!detail)o<<"null";else{o<<"{\"decodes\":[";for(size_t i=0;i<s.run.decodes.size();i++){if(i)o<<',';auto d=s.run.decodes[i];o<<"{\"block\":"<<d.block<<",\"wallMs\":"<<d.wall<<",\"threadCpuMs\":";Number(o,d.cpu);o<<'}';}o<<"],\"blocks\":[";
     for(size_t i=0;i<s.run.blocks.size();i++){if(i)o<<',';auto b=s.run.blocks[i];o<<"{\"sequence\":"<<b.sequence<<",\"wallMs\":"<<b.wall<<",\"decodeCalls\":"<<b.calls<<",\"rawHits\":"<<b.hits<<'}';}o<<"]}";}
+  if(s.calSave||s.calReplay)o<<",\"calibration\":{\"schema\":1,\"mode\":\""<<(s.calSave?"CAPTURE":"REPLAY")<<"\",\"samples\":"<<s.calSamples<<",\"sha256\":\""<<s.calHash<<"\",\"persisted\":"<<(s.calPersisted?"true":"false")<<'}';
   if(s.fnEnabled){
     o<<",\"fnDiagnostics\":{\"schema\":1,\"trialId\":\""<<s.trialId<<"\",\"clock\":\"QPC_RELATIVE_MS\",\"signalDomain\":\"POST_FIR_MONO_16000\",\"channelHealthy\":"<<(s.fnChannelHealthy?"true":"false")<<",\"blocks\":[";
     for(size_t i=0;i<s.diagnosticBlocks.size();i++){if(i)o<<',';const auto &b=s.diagnosticBlocks[i];const auto &m=b.signal;
@@ -477,10 +547,15 @@ static void Report(Shared &s, const std::vector<Dll> &dlls, const std::vector<st
 }
 
 static int NativeLive(int argc, char **argv, Progress &progress) {
-  const char *replay=nullptr,*trial=nullptr;bool detail=false,thresholdSpecified=false;double parsedThreshold=.25;
+  const char *replay=nullptr,*trial=nullptr,*calReplay=nullptr,*calSave=nullptr,*calCount=nullptr,*calSha=nullptr,*consent=nullptr;bool detail=false,thresholdSpecified=false;double parsedThreshold=.25;
   for(int i=8;i<argc;i++){
     if(!std::strcmp(argv[i],"--detail")&&!detail)detail=true;
     else if(!std::strcmp(argv[i],"--replay")&&!replay&&i+1<argc)replay=argv[++i];
+    else if(!std::strcmp(argv[i],"--calibration-replay")&&!calReplay&&i+1<argc)calReplay=argv[++i];
+    else if(!std::strcmp(argv[i],"--calibration-save")&&!calSave&&i+1<argc)calSave=argv[++i];
+    else if(!std::strcmp(argv[i],"--calibration-samples")&&!calCount&&i+1<argc)calCount=argv[++i];
+    else if(!std::strcmp(argv[i],"--calibration-sha")&&!calSha&&i+1<argc)calSha=argv[++i];
+    else if(!std::strcmp(argv[i],"--capture-consent")&&!consent&&i+1<argc)consent=argv[++i];
     else if(!std::strcmp(argv[i],"--diagnostic-windows")&&!trial&&i+1<argc)trial=argv[++i];
     else if(!std::strcmp(argv[i],"--threshold")&&!thresholdSpecified&&i+1<argc){parsedThreshold=ParseLiveThreshold(argv[++i]);thresholdSpecified=true;}
     else throw Failure{"ARGUMENT_INVALID"};
@@ -493,6 +568,14 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
   char *end = nullptr; const long seconds = std::strtol(argv[7],&end,10);
   if (!end || *end || seconds<1 || seconds>120 || std::strcmp(argv[5],LiveKeyword(threshold).c_str())) throw Failure{"ARGUMENT_INVALID"};
   if(trial&&(!atlas_fn::trialId(trial)||warm||replay||threshold!=.15||seconds!=60))throw Failure{"ARGUMENT_INVALID"};
+  size_t calSamples=0;
+  if(calReplay){
+    if(replay||calSave||trial||consent||warm||threshold==.25||!calCount||!calSha||std::strlen(calSha)!=64||std::strspn(calSha,"0123456789abcdef")!=64)throw Failure{"ARGUMENT_INVALID"};
+    char *tail=nullptr;const unsigned long n=std::strtoul(calCount,&tail,10);
+    if(!n||n>atlas_cal::maxSamples||!tail||*tail||std::to_string(n)!=calCount)throw Failure{"ARGUMENT_INVALID"};calSamples=n;CalPath(calReplay);
+  }else if(calCount||calSha)throw Failure{"ARGUMENT_INVALID"};
+  if(calSave&&(!trial||!consent||std::strcmp(consent,trial)||warm||replay||calReplay||threshold!=.15||seconds!=60))throw Failure{"ARGUMENT_INVALID"};
+  if(consent&&!calSave)throw Failure{"ARGUMENT_INVALID"};
   const auto dlls = LoadedDlls();
   const std::string version=SherpaOnnxGetVersionStr(),git=SherpaOnnxGetGitSha1();
   if(version!="2.0.0" || git.substr(0,8)!="8abb7c8f")throw Failure{"RUNTIME_VERSION_MISMATCH"};
@@ -500,7 +583,9 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
   if(dlls.size()!=2 || dlls[0].hash!=expected[0] || dlls[1].hash!=expected[1])throw Failure{"SDK_HASH_MISMATCH"};
   std::vector<std::string> hashes;for(int i=1;i<=4;i++)hashes.push_back(FileHash(std::filesystem::u8path(argv[i])));
   const std::string keyword=argv[5],keywordHash=Hash(reinterpret_cast<const unsigned char *>(keyword.data()),keyword.size());
-  Shared s;s.replay=replay!=nullptr;
+  Shared s;s.replay=replay!=nullptr||calReplay!=nullptr;
+  if(calSave){CalPath(calSave);s.calSave=true;s.calPath=calSave;s.recording.prepare();}
+  if(calReplay){s.calReplay=true;s.calPath=calReplay;s.calSamples=calSamples;s.calHash=calSha;}
   if(trial){s.fnEnabled=true;s.trialId=trial;s.fnOrigin=Wall();s.markers.reserve(40);s.diagnosticBlocks.reserve(1300);s.diagnosticDecodes.reserve(10000);progress.startAsync();}controlState.store(&s);
   if(!SetConsoleCtrlHandler(Control,TRUE)){controlState.store(nullptr);throw Failure{"CONTROL_HANDLER_FAILED"};}
   struct ControlGuard {~ControlGuard(){controlState.store(nullptr);SetConsoleCtrlHandler(Control,FALSE);while(controlCalls.load())std::this_thread::yield();}} controlGuard;
@@ -514,7 +599,7 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
       PollStop(s,&progress);if(Wall()-begin>30000)s.fail("PREPARATION_TIMEOUT");
     }
     if(readyWait==WAIT_FAILED)s.fail("CONTROL_WAIT_FAILED");
-    if(!stopped(s))capture=std::thread([&]{if(replay)Replay(s,replay,progress);else Capture(s,static_cast<int>(seconds),progress);});
+    if(!stopped(s))capture=std::thread([&]{if(calReplay)CalibrationReplay(s,progress);else if(replay)Replay(s,replay,progress);else Capture(s,static_cast<int>(seconds),progress);});
     else {s.captureFinished.store(true,std::memory_order_release);SetEvent(s.captureDone.h);}
     DWORD doneWait=0;while((doneWait=WaitForSingleObject(s.inferenceDone.h,20))==WAIT_TIMEOUT)PollStop(s,&progress);
     if(doneWait==WAIT_FAILED)s.fail("CONTROL_WAIT_FAILED");
@@ -526,6 +611,11 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
   try{s.cleanupWallMs=Wall()-cleanup;}catch(...){s.fail("CAPTURE_CLOCK_FAILED");}s.memoryAfterCleanup=Mem();
   if(!s.error.load() && (s.frames!=s.convertedFrames || (s.format.rate && s.emitted!=s.frames*16000/s.format.rate) || s.emitted!=uint64_t(s.run.samples)))s.fail("AUDIO_ACCOUNTING_FAILED");
   if(s.fnEnabled){s.fnChannelHealthy=progress.finish();if(!s.fnChannelHealthy)s.fail("DIAGNOSTIC_CHANNEL_FAILED");}
+  if(s.calSave&&!s.error.load()&&!s.cancelled.load()&&s.captureWallMs>=seconds*1000.0&&s.captureReleased&&s.comReleased&&s.engineReleased){
+    try{if(s.recording.size()!=static_cast<size_t>(s.run.samples))throw Failure{"CALIBRATION_SEQUENCE_INVALID"};SaveCalibration(s);}
+    catch(const Failure&e){s.fail(e.code);}catch(...){s.fail("CALIBRATION_WRITE_FAILED");}
+  }
+  s.recording.wipe();if(s.calSave)s.memoryAfterCleanup=Mem();
   Report(s,dlls,hashes,keywordHash,warm,static_cast<int>(seconds),detail,threshold);
   return s.error.load()?2:s.cancelled.load()?130:0;
 }

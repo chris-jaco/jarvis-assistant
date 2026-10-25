@@ -11,7 +11,7 @@ import { input, localPath, sdkHashes, sha, validateTrial } from './benchmark-con
 import { SpikeError } from './core.js';
 import { liveConfiguration, liveKeyword, parseLiveFlags } from './native-live-config.js';
 
-const codes = new Set(['DIAGNOSTIC_CHANNEL_UNAVAILABLE','DIAGNOSTIC_CHANNEL_FAILED','DIAGNOSTIC_LIMIT','MARKER_PROTOCOL_INVALID','MARKER_NOT_ACTIVE','CAPTURE_COMPLETED','CAPTURE_INCOMPLETE','ARGUMENT_INVALID','EVENT_FAILED','WALL_CLOCK_FAILED',
+const codes = new Set(['CALIBRATION_SEQUENCE_INVALID','CALIBRATION_PCM_INVALID','CALIBRATION_WRITE_FAILED','CALIBRATION_PATH_INVALID','CALIBRATION_REPLAY_FAILED','DIAGNOSTIC_CHANNEL_UNAVAILABLE','DIAGNOSTIC_CHANNEL_FAILED','DIAGNOSTIC_LIMIT','MARKER_PROTOCOL_INVALID','MARKER_NOT_ACTIVE','CAPTURE_COMPLETED','CAPTURE_INCOMPLETE','ARGUMENT_INVALID','EVENT_FAILED','WALL_CLOCK_FAILED',
   'DLL_LOCATION_FAILED','DLL_LOCATION_MISMATCH','SDK_HASH_MISMATCH','RUNTIME_VERSION_MISMATCH','HASH_FAILED','INPUT_FILE_INVALID',
   'COM_INITIALIZATION_FAILED','DEVICE_ENUMERATION_FAILED','MICROPHONE_UNAVAILABLE','CAPTURE_ACTIVATION_FAILED',
   'CAPTURE_FORMAT_FAILED','CAPTURE_FORMAT_UNSUPPORTED','CAPTURE_INITIALIZATION_FAILED','CAPTURE_BUFFER_FAILED',
@@ -105,7 +105,7 @@ export async function livePreflight(executable:string,lockPath:string,replay?:st
   const exe=await localPath(executable),lock=JSON.parse(await readFile(await localPath(lockPath),'utf8'));
   if(lock.schema!==1||lock.kind!=='NATIVE_LIVE'||lock.version!=='2.0.0'||lock.commit!==runtimeCommit||lock.artifactSha256!==artifactSha256
     || lock.executableSha256!==sha(await readFile(exe)))throw new SpikeError('NATIVE_LOCK_MISMATCH');
-  for(const [name,key] of [['native-live.cc','sourceSha256'],['reference-kws.cc','referenceSourceSha256'],['native-live-core.h','coreSourceSha256'],['native-fn-core.h','diagnosticSourceSha256']])
+  for(const [name,key] of [['native-live.cc','sourceSha256'],['reference-kws.cc','referenceSourceSha256'],['native-live-core.h','coreSourceSha256'],['native-fn-core.h','diagnosticSourceSha256'],['native-calibration-core.h','calibrationSourceSha256']])
     if(lock[key!]!==sha(await readFile(new URL(name!,import.meta.url))))throw new SpikeError('NATIVE_LOCK_MISMATCH');
   for(const [name,hash] of Object.entries(sdkHashes))if(sha(await readFile(await localPath(resolve(dirname(exe),name))))!==hash)throw new SpikeError('SDK_HASH_MISMATCH');
   const {loadAssets,defaultRoot}=await import(new URL('./server.mjs',import.meta.url).href);

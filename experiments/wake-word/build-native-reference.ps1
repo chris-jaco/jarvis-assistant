@@ -54,6 +54,7 @@ try {
   $lockName = 'native-lock.json'
   if ($Live) {
     $lock.kind = 'NATIVE_LIVE'
+    $lock.calibrationSourceSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'native-calibration-core.h')).Hash.ToLowerInvariant()
     $lock.diagnosticSourceSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'native-fn-core.h')).Hash.ToLowerInvariant()
     $lock.referenceSourceSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'reference-kws.cc')).Hash.ToLowerInvariant()
     $lock.coreSourceSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $PSScriptRoot 'native-live-core.h')).Hash.ToLowerInvariant()
