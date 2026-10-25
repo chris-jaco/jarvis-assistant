@@ -3,13 +3,15 @@ import { readFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { NativeMarkers, validateFnDiagnostics, type HostMarker } from './native-fn-diagnostics.js';
 import { createInterface } from 'node:readline';
 import { artifactSha256, runtimeCommit } from './native-benchmark.js';
 import { input, localPath, sdkHashes, sha, validateTrial } from './benchmark-contract.js';
 import { SpikeError } from './core.js';
 import { liveConfiguration, liveKeyword, parseLiveFlags } from './native-live-config.js';
 
-const codes = new Set(['DIAGNOSTIC_CHANNEL_UNAVAILABLE','CAPTURE_COMPLETED','CAPTURE_INCOMPLETE','ARGUMENT_INVALID','EVENT_FAILED','WALL_CLOCK_FAILED',
+const codes = new Set(['DIAGNOSTIC_CHANNEL_UNAVAILABLE','DIAGNOSTIC_CHANNEL_FAILED','DIAGNOSTIC_LIMIT','MARKER_PROTOCOL_INVALID','MARKER_NOT_ACTIVE','CAPTURE_COMPLETED','CAPTURE_INCOMPLETE','ARGUMENT_INVALID','EVENT_FAILED','WALL_CLOCK_FAILED',
   'DLL_LOCATION_FAILED','DLL_LOCATION_MISMATCH','SDK_HASH_MISMATCH','RUNTIME_VERSION_MISMATCH','HASH_FAILED','INPUT_FILE_INVALID',
   'COM_INITIALIZATION_FAILED','DEVICE_ENUMERATION_FAILED','MICROPHONE_UNAVAILABLE','CAPTURE_ACTIVATION_FAILED',
   'CAPTURE_FORMAT_FAILED','CAPTURE_FORMAT_UNSUPPORTED','CAPTURE_INITIALIZATION_FAILED','CAPTURE_BUFFER_FAILED',
@@ -30,7 +32,7 @@ function nums(value: any, keys: string[]) {
 }
 const bools=(value:any,keys:string[])=>Object.fromEntries(keys.map(key=>{if(typeof value?.[key]!=='boolean')reject();return[key,value[key]];}));
 const same=(a:any,b:any)=>JSON.stringify(Object.entries(a??{}).sort())===JSON.stringify(Object.entries(b??{}).sort());
-export function cleanLiveReport(r:any, expected:any, mode:'COLD'|'WARM', source:'MICROPHONE'|'REPLAY', seconds:number, threshold=.25) {
+export function cleanLiveReport(r:any, expected:any, mode:'COLD'|'WARM', source:'MICROPHONE'|'REPLAY', seconds:number, threshold=.25, diagnostic?:{trialId:string;host:HostMarker[]}):any {
   const effectiveConfiguration=liveConfiguration(threshold);
   if(r?.schema!==1 || !['COMPLETED','CANCELLED','FAILED'].includes(r.state))reject();
   if(r.state==='FAILED' && !r.backend)return {schema:1,state:'FAILED',code:codes.has(r.code)?r.code:'NATIVE_LIVE_FAILED'};
@@ -89,11 +91,12 @@ export function cleanLiveReport(r:any, expected:any, mode:'COLD'|'WARM', source:
   if(source==='REPLAY' && r.state==='COMPLETED' && r.processedPcmSha256!==expected.pcmSha256)reject();
   const technicalThresholdsMet=r.state==='COMPLETED' && source==='MICROPHONE' && seconds>=60 && Number(inference.decodeCalls)>0
     && inference.firstDecodeWallMs!==null && Number(inference.firstDecodeWallMs)<200 && Number(inference.maxBlockWallMs)<200 && inference.rtf!==null && Number(inference.rtf)<.7;
+  const fnDiagnostics=validateFnDiagnostics(r.fnDiagnostics,{state:r.state,capture,inference,positions},diagnostic?.trialId,diagnostic?.host??r.fnDiagnostics?.hostMarkers??[]);
   return {schema:1,backend:'NATIVE_LIVE',state:r.state,code:codes.has(r.code)?r.code:'NATIVE_LIVE_FAILED',source,mode,configuration:effectiveConfiguration,thresholdEvidence,
     runtime:{version:'2.0.0',dllHashes:sdkHashes},modelHashes:expected.modelHashes,keywordSha256:expected.keywordSha256,
     wavSha256:source==='REPLAY'?r.wavSha256:null,pcmSha256:source==='REPLAY'?r.pcmSha256:null,processedPcmSha256:source==='REPLAY'?r.processedPcmSha256:null,format:{...format,kind:r.format.kind},conversion,
     capture,buffer,preparation,inference,recognition,channels,memory:{...memory,residentWindows10s},cleanup,positions,details,
-    technicalThresholdsMet,acceptance:'MANUAL_REVIEW_REQUIRED',cpuScope:'CALLING_INFERENCE_THREAD_NOT_PROCESS',
+    ...(fnDiagnostics?{fnDiagnostics}:{}),technicalThresholdsMet,acceptance:'MANUAL_REVIEW_REQUIRED',cpuScope:'CALLING_INFERENCE_THREAD_NOT_PROCESS',
     latencyScope:'LAST_INPUT_SAMPLE_OF_DETECTION_BLOCK_NOT_ACOUSTIC_LATENCY'};
 }
 
@@ -102,7 +105,7 @@ export async function livePreflight(executable:string,lockPath:string,replay?:st
   const exe=await localPath(executable),lock=JSON.parse(await readFile(await localPath(lockPath),'utf8'));
   if(lock.schema!==1||lock.kind!=='NATIVE_LIVE'||lock.version!=='2.0.0'||lock.commit!==runtimeCommit||lock.artifactSha256!==artifactSha256
     || lock.executableSha256!==sha(await readFile(exe)))throw new SpikeError('NATIVE_LOCK_MISMATCH');
-  for(const [name,key] of [['native-live.cc','sourceSha256'],['reference-kws.cc','referenceSourceSha256'],['native-live-core.h','coreSourceSha256']])
+  for(const [name,key] of [['native-live.cc','sourceSha256'],['reference-kws.cc','referenceSourceSha256'],['native-live-core.h','coreSourceSha256'],['native-fn-core.h','diagnosticSourceSha256']])
     if(lock[key!]!==sha(await readFile(new URL(name!,import.meta.url))))throw new SpikeError('NATIVE_LOCK_MISMATCH');
   for(const [name,hash] of Object.entries(sdkHashes))if(sha(await readFile(await localPath(resolve(dirname(exe),name))))!==hash)throw new SpikeError('SDK_HASH_MISMATCH');
   const {loadAssets,defaultRoot}=await import(new URL('./server.mjs',import.meta.url).href);
@@ -119,7 +122,7 @@ export async function livePreflight(executable:string,lockPath:string,replay?:st
 // Abort requests cooperative Stop first. The watchdog may terminate only this owned
 // experimental child if a synchronous DLL call never returns; never claim clean release then.
 export function runLiveChild(exe:string,args:string[],seconds:number,signal:AbortSignal,progress:(stage:string)=>void=()=>{},
-  launch:(file:string,args:string[])=>ChildProcess=(file,args)=>spawn(file,args,{shell:false,windowsHide:true,stdio:['pipe','pipe','pipe']}), watchdogMs=(seconds+60)*1000) {
+  launch:(file:string,args:string[])=>ChildProcess=(file,args)=>spawn(file,args,{shell:false,windowsHide:true,stdio:['pipe','pipe','pipe']}), watchdogMs=(seconds+60)*1000, markers?:NativeMarkers) {
   return new Promise<{report:any;exitCode:number|null}>((resolveResult,rejectResult)=>{
     let child:ChildProcess;
     try{child=launch(exe,args);}catch{rejectResult(new SpikeError('NATIVE_LIVE_CHILD_FAILED'));return;}
@@ -128,12 +131,16 @@ export function runLiveChild(exe:string,args:string[],seconds:number,signal:Abor
       killTimer??=setTimeout(()=>{failure??='NATIVE_LIVE_STOP_TIMEOUT';child.kill();},5000);};
     const timer=setTimeout(()=>{failure='NATIVE_LIVE_TIMEOUT';stop();},watchdogMs);
     const abort=()=>stop();signal.addEventListener('abort',abort,{once:true});
+    markers?.attach(value=>{if(!closed&&!stopSent)child.stdin?.write(value);});
     child.stdin?.on('error',()=>{});
     child.stdout?.on('data',(chunk:Buffer)=>{if(closed)return;if(stdout.length+chunk.length>4*1024*1024){failure='NATIVE_LIVE_OUTPUT_LIMIT';stop();}else stdout+=chunk.toString('utf8');});
     child.stderr?.on('data',(chunk:Buffer)=>{if(closed)return;stderr=(stderr+chunk.toString('utf8')).slice(-1024);let at:number;
-      while((at=stderr.indexOf('\n'))>=0){const stage=stderr.slice(0,at).trim();stderr=stderr.slice(at+1);if(stages.has(stage))try{progress(stage);}catch{failure='NATIVE_LIVE_PROGRESS_FAILED';stop();}}});
+      while((at=stderr.indexOf('\n'))>=0){const stage=stderr.slice(0,at).trim();stderr=stderr.slice(at+1);
+        try{if(markers&&stage.startsWith('ACK ')){const ack=markers.ack(stage);progress(`MARKER_ACK ${ack.id} ${ack.kind} ${ack.alignmentUsable?'ALIGNED':'AMBIGUOUS'}`);}
+          else if(stages.has(stage)){markers?.stage(stage);progress(stage);}}
+        catch{failure='NATIVE_LIVE_PROGRESS_FAILED';stop();}}});
     child.on('error',()=>{failure='NATIVE_LIVE_CHILD_FAILED';});
-    child.once('close',(code:number|null)=>{closed=true;
+    child.once('close',(code:number|null)=>{closed=true;markers?.close();
       clearTimeout(timer);if(killTimer)clearTimeout(killTimer);signal.removeEventListener('abort',abort);child.stdin?.destroy();
       if(failure){rejectResult(new SpikeError(failure));return;}
       try{const report=JSON.parse(stdout);if(![0,2,130].includes(code??-1) || (code===0 && report.state!=='COMPLETED') || (code===130 && report.state!=='CANCELLED'))reject();resolveResult({report,exitCode:code});}
@@ -162,15 +169,21 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   try{
     const [exe,lock,mode,duration,...flags]=process.argv.slice(2),seconds=Number(duration);
     if(process.platform!=='win32'||process.arch!=='x64'||!exe||!lock||!['COLD','WARM'].includes(mode??'')||!Number.isInteger(seconds)||seconds<1||seconds>120)throw Error();
-    const {check,detail,replay,threshold,thresholdSpecified}=parseLiveFlags(flags);
+    const {check,detail,replay,threshold,thresholdSpecified,diagnosticWindows=false}=parseLiveFlags(flags);
+    if(diagnosticWindows&&(mode!=='COLD'||threshold!==.15||seconds!==60||replay))throw new SpikeError('ARGUMENT_INVALID');
     const ready=await livePreflight(exe,lock,replay,threshold);
     if(check)console.log(JSON.stringify({state:'PREFLIGHT_OK',mode,seconds,source:replay?'REPLAY':'MICROPHONE',configuration:liveConfiguration(threshold),...ready.expected}));
     else{
-      process.on('SIGINT',stop);lines=createInterface({input:process.stdin});lines.on('line',stop);
+      const markers=diagnosticWindows?new NativeMarkers(randomBytes(16).toString('hex')):undefined;
+      process.on('SIGINT',stop);lines=createInterface({input:process.stdin});lines.on('line',line=>{
+        if(markers&&(line==='b'||line==='e')){try{if(!markers.mark(line==='b'?'B':'E'))console.error('MARKER_NOT_READY');}
+          catch{console.error('MARKER_INPUT_FAILED');stop();}}
+        else stop();
+      });
       console.error('INITIALIZING — Enter o Ctrl+C solicita Stop; esperar CAPTURE_STARTED o REPLAY_STARTED.');
       const args=['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].map(name=>resolve(ready.root,'model',name));
-      const result=await runLiveChild(ready.exe,[...args,ready.keyword,mode!,String(seconds),...(thresholdSpecified?['--threshold',String(threshold)]:[]),...(detail||replay?['--detail']:[]),...(ready.wav?['--replay',ready.wav]:[])],seconds,controller.signal,stage=>console.error(stage));
-      const report=cleanLiveReport(result.report,ready.expected,mode as 'COLD'|'WARM',replay?'REPLAY':'MICROPHONE',seconds,threshold);
+      const result=await runLiveChild(ready.exe,[...args,ready.keyword,mode!,String(seconds),...(markers?['--diagnostic-windows',markers.trialId]:[]),...(thresholdSpecified?['--threshold',String(threshold)]:[]),...(detail||replay||markers?['--detail']:[]),...(ready.wav?['--replay',ready.wav]:[])],seconds,controller.signal,stage=>console.error(stage),undefined,undefined,markers);
+      const report=cleanLiveReport(result.report,ready.expected,mode as 'COLD'|'WARM',replay?'REPLAY':'MICROPHONE',seconds,threshold,markers?{trialId:markers.trialId,host:markers.snapshot()}:undefined);
       let equivalence:any=null;
       if(replay && report.state==='COMPLETED'){
         // Separate process: the WASM adapter can wipe its entire own heap safely.
@@ -179,7 +192,7 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
       }
       console.log(JSON.stringify({...report,equivalence}));process.exitCode=result.exitCode??2;
     }
-  }catch(error){const allowed=['THRESHOLD_INVALID','ARGUMENT_INVALID','REPLAY_THRESHOLD_UNSUPPORTED','MODEL_ASSETS_UNAVAILABLE','NATIVE_LOCK_MISMATCH','SDK_HASH_MISMATCH','KEYWORDS_INVALID','NATIVE_LIVE_REPORT_INVALID','REPLAY_EQUIVALENCE_FAILED','NATIVE_LIVE_TIMEOUT','NATIVE_LIVE_STOP_TIMEOUT','NATIVE_LIVE_OUTPUT_LIMIT','NATIVE_LIVE_CHILD_FAILED'];
+  }catch(error){const allowed=['NATIVE_LIVE_PROGRESS_FAILED','FN_DIAGNOSTICS_INVALID','THRESHOLD_INVALID','ARGUMENT_INVALID','REPLAY_THRESHOLD_UNSUPPORTED','MODEL_ASSETS_UNAVAILABLE','NATIVE_LOCK_MISMATCH','SDK_HASH_MISMATCH','KEYWORDS_INVALID','NATIVE_LIVE_REPORT_INVALID','REPLAY_EQUIVALENCE_FAILED','NATIVE_LIVE_TIMEOUT','NATIVE_LIVE_STOP_TIMEOUT','NATIVE_LIVE_OUTPUT_LIMIT','NATIVE_LIVE_CHILD_FAILED'];
     console.log(JSON.stringify({state:'FAILED',code:error instanceof SpikeError && allowed.includes(error.code)?error.code:'NATIVE_LIVE_PREFLIGHT_FAILED',acceptance:'NOT_ESTABLISHED'}));process.exitCode=2;
   }finally{process.removeListener('SIGINT',stop);lines?.close();}
 }

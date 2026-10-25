@@ -13,15 +13,16 @@ export function parseThreshold(text: string): number {
 export const liveConfiguration=(threshold=.25)=>({...configuration,threshold:checkedThreshold(threshold)});
 export const liveKeyword=(threshold=.25)=>`▁a t la s :1 #${checkedThreshold(threshold)} @sherpaw_0`;
 export function parseLiveFlags(flags:string[]){
-  let check=false,detail=false,replay:string|undefined,threshold=.25,thresholdSpecified=false;
+  let check=false,detail=false,replay:string|undefined,threshold=.25,thresholdSpecified=false,diagnosticWindows=false;
   for(let i=0;i<flags.length;i++){
     if(flags[i]==='--check'&&!check)check=true;
     else if(flags[i]==='--detail'&&!detail)detail=true;
+    else if(flags[i]==='--diagnostic-windows'&&!diagnosticWindows)diagnosticWindows=true;
     else if(flags[i]==='--replay'&&!replay&&flags[i+1]&&!flags[i+1]!.startsWith('--'))replay=flags[++i];
     else if(flags[i]==='--threshold'&&!thresholdSpecified&&flags[i+1]){threshold=parseThreshold(flags[++i]!);thresholdSpecified=true;}
     else throw new SpikeError('ARGUMENT_INVALID');
   }
   // The published WASM/Offline equivalence contract stays pinned to .25.
   if(replay && threshold!==.25)throw new SpikeError('REPLAY_THRESHOLD_UNSUPPORTED');
-  return {check,detail,replay,threshold,thresholdSpecified};
+  return {check,detail,replay,threshold,thresholdSpecified,...(diagnosticWindows?{diagnosticWindows:true}:{})};
 }

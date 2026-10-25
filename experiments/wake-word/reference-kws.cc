@@ -112,13 +112,14 @@ struct Run {
   std::vector<Position> positions; std::vector<Decode> decodes; std::vector<Block> blocks; std::vector<Hit> events;
 };
 using ResultPtr=std::unique_ptr<const SherpaOnnxKeywordResult,decltype(&SherpaOnnxDestroyKeywordResult)>;
-static void Feed(const SherpaOnnxKeywordSpotter *spotter,const SherpaOnnxOnlineStream *stream,const float *pcm,int n,int at,Run &r) {
+static void Feed(const SherpaOnnxKeywordSpotter *spotter,const SherpaOnnxOnlineStream *stream,const float *pcm,int n,int at,Run &r, void (*observe)(void *,int,double,double)=nullptr, void *context=nullptr) {
   const double start=Wall(), cpu=Cpu(); const int block=at/1600; int hits=0, calls=0;
   SherpaOnnxOnlineStreamAcceptWaveform(stream,16000,pcm,n);
   while (SherpaOnnxIsKeywordStreamReady(spotter,stream)) {
     if (++r.calls>10000) throw Failure{"DECODE_LIMIT"}; calls++;
     const double d=Wall(), c=Cpu(); SherpaOnnxDecodeKeywordStream(spotter,stream);
-    const double elapsed=Wall()-d, used=Delta(c); r.decodes.push_back({block,elapsed,used});
+    const double end=Wall(), elapsed=end-d, used=Delta(c); r.decodes.push_back({block,elapsed,used});
+    if(observe)observe(context,block,d,end);
     ResultPtr result(SherpaOnnxGetKeywordResult(spotter,stream),SherpaOnnxDestroyKeywordResult);
     if (!result) throw Failure{"RESULT_FAILED"};
     if (result->keyword && result->keyword[0]) {

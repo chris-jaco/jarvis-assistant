@@ -1,5 +1,9 @@
 # Hito 1.4 — sensibilidad Native Live (preparado, pendiente de Windows)
 
+Para el diagnóstico de omisiones con marcadores Native + ACK y métricas por
+bloque usar [Hito 1.5](NATIVE-FALSE-NEGATIVES.md). El anotador independiente de
+este documento no aporta por sí mismo alineación suficiente para Hito 1.5.
+
 Sólo harness experimental. El propietario comunicó Native Warm 14 detecciones,
 Cold 12 detecciones sobre 20 intentos, cero overruns y RTF ~.089/.088 en 60 s.
 Son conteos provisionales; sin ventanas temporales no prueban sensibilidad.

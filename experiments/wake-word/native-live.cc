@@ -2,6 +2,7 @@
 #define ATLAS_REFERENCE_LIBRARY
 #include "reference-kws.cc"
 #include "native-live-core.h"
+#include "native-fn-core.h"
 #include <thread>
 // Parse only the four authorized nominal values, before any engine/capture is created.
 static double ParseLiveThreshold(const char *value) {
@@ -38,6 +39,13 @@ struct Shared {
   std::atomic<uint64_t> highWater{0};
   bool captureReleased = true, comReleased = true, engineReleased = true;
   std::atomic<bool> started{false}, captureFinished{false};
+  bool fnEnabled=false, fnChannelHealthy=true;
+  std::string trialId, markerInput;
+  double fnOrigin=0;
+  atlas_fn::Receiver receiver;
+  std::vector<atlas_fn::Marker> markers;
+  std::vector<atlas_fn::Block> diagnosticBlocks;
+  std::vector<atlas_fn::Decode> diagnosticDecodes;
   double thresholdFloat32 = -1;
   bool replay = false;
   std::string wavHash, pcmHash, processedPcmHash;
@@ -73,15 +81,43 @@ static bool stopped(Shared &s) { return WaitForSingleObject(s.stop.h, 0) == WAIT
 static void Check(HRESULT result, const char *stage) { if (FAILED(result)) throw Failure{stage}; }
 
 struct Progress {
-  HANDLE handle = nullptr;
-  bool muted = false;
+  HANDLE handle = nullptr, wake=nullptr;
+  bool muted=false, asynchronous=false;
+  atlas_fn::LogQueue messages;
+  std::atomic<bool> failed{false}, finishing{false};
+  std::thread writer;
   Progress() {
-    const HANDLE original = GetStdHandle(STD_ERROR_HANDLE);
-    if (original && original != INVALID_HANDLE_VALUE) DuplicateHandle(GetCurrentProcess(), original, GetCurrentProcess(), &handle, 0, FALSE, DUPLICATE_SAME_ACCESS);
-    muted = std::freopen("NUL", "w", stderr) != nullptr;  // Fail before SDK if redirection fails.
+    const HANDLE original=GetStdHandle(STD_ERROR_HANDLE);
+    if(original&&original!=INVALID_HANDLE_VALUE)DuplicateHandle(GetCurrentProcess(),original,GetCurrentProcess(),&handle,0,FALSE,DUPLICATE_SAME_ACCESS);
+    muted=std::freopen("NUL","w",stderr)!=nullptr;
   }
-  void write(const char *stage) { if (handle) { DWORD written = 0; WriteFile(handle, stage, static_cast<DWORD>(std::strlen(stage)), &written, nullptr); } }
-  ~Progress() { if (handle) CloseHandle(handle); }
+  void startAsync(){
+    wake=CreateEventW(nullptr,FALSE,FALSE,nullptr);if(!wake)throw Failure{"EVENT_FAILED"};
+    asynchronous=true;
+    writer=std::thread([this]{
+      std::array<char,128> text{};
+      for(;;){
+        while(messages.pop(text)){if(failed.load())return;DWORD written=0;const auto n=static_cast<DWORD>(std::strlen(text.data()));
+          if(!WriteFile(handle,text.data(),n,&written,nullptr)||written!=n){failed.store(true);return;}}
+        if(finishing.load())return;
+        if(WaitForSingleObject(wake,100)==WAIT_FAILED){failed.store(true);return;}
+      }
+    });
+  }
+  void write(const char *stage){
+    if(asynchronous){if(!messages.push(stage))failed.store(true);SetEvent(wake);return;}
+    if(handle){DWORD written=0;WriteFile(handle,stage,static_cast<DWORD>(std::strlen(stage)),&written,nullptr);}
+  }
+  bool finish(){
+    if(writer.joinable()){
+      finishing.store(true);SetEvent(wake);
+      // Main/control only, after audio threads joined. Never wait in capture.
+      if(WaitForSingleObject(writer.native_handle(),500)!=WAIT_OBJECT_0){failed.store(true);CancelSynchronousIo(writer.native_handle());SetEvent(wake);}
+      writer.join();if(!messages.drained())failed.store(true);
+    }
+    return !failed.load();
+  }
+  ~Progress(){finish();if(wake)CloseHandle(wake);if(handle)CloseHandle(handle);}
 };
 struct ComScope {
   ComScope() { Check(CoInitializeEx(nullptr, COINIT_MULTITHREADED), "COM_INITIALIZATION_FAILED"); }
@@ -298,9 +334,22 @@ static void Inference(Shared &s, char **argv, bool warm, Progress &progress, con
         struct Wipe { live::Block &b; ~Wipe() { b.wipe(); } } wipe{block};
         if (block.sequence != sequence++ || !block.size || block.size > 1600) { s.sequenceErrors++; throw Failure{"AUDIO_SEQUENCE_ERROR"}; }
         if(replayHash)replayHash->add(block.pcm.data(),block.size);
+        atlas_fn::Block *diagnostic=nullptr;
+        if(s.fnEnabled){
+          if(s.diagnosticBlocks.size()>=1300)throw Failure{"DIAGNOSTIC_LIMIT"};
+          const double statsStart=Wall();atlas_fn::Block d;
+          d.sequence=block.sequence;d.sampleStart=s.run.samples;d.sampleEnd=d.sampleStart+block.size;
+          d.qpcEndMs=block.captureEndWallMs-s.fnOrigin;d.qpcStartMs=d.qpcEndMs-block.size/16.0;
+          for(unsigned i=0;i<block.size;i++)d.signal.add(block.pcm[i]);
+          d.metricsWallMs=Wall()-statsStart;s.diagnosticBlocks.push_back(d);diagnostic=&s.diagnosticBlocks.back();
+        }
         const double start = Wall(), cpu = Cpu();
         s.maxQueueAgeMs = std::max(s.maxQueueAgeMs, start - block.captureEndWallMs);
-        Feed(spotter.get(), stream, block.pcm.data(), block.size, s.run.samples, s.run);
+        Feed(spotter.get(), stream, block.pcm.data(), block.size, s.run.samples, s.run,
+          s.fnEnabled?+[](void *context,int sequence,double begin,double end){auto &state=*static_cast<Shared *>(context);
+            if(state.diagnosticDecodes.size()>=10000)throw Failure{"DIAGNOSTIC_LIMIT"};
+            state.diagnosticDecodes.push_back({sequence,begin-state.fnOrigin,end-state.fnOrigin});}:nullptr,&s);
+        if(diagnostic){diagnostic->completed=true;diagnostic->decodeCalls=s.run.blocks.back().calls;diagnostic->rawHits=s.run.blocks.back().hits;}
         const double elapsed = Wall() - start, used = Delta(cpu);
         s.processWallMs += elapsed; if (used < 0) cpuAvailable = false; else cpuTotal += used;
         const double latency = Wall() - block.captureEndWallMs;
@@ -339,7 +388,8 @@ static double Percentile(std::vector<double> values, double fraction) {
   if (fraction == .5 && values.size() % 2 == 0) return (values[values.size()/2-1] + values[values.size()/2]) / 2;
   return values[static_cast<size_t>(std::ceil(values.size() * fraction)) - 1];
 }
-static void PollStop(Shared &s) {
+static void PollStop(Shared &s, Progress *progress=nullptr) {
+  if(s.fnEnabled&&progress&&progress->failed.load())s.fail("DIAGNOSTIC_CHANNEL_FAILED");
   const HANDLE input = GetStdHandle(STD_INPUT_HANDLE); if (!input || input == INVALID_HANDLE_VALUE) return;
   DWORD mode = 0;
   if (GetConsoleMode(input, &mode)) {
@@ -351,6 +401,23 @@ static void PollStop(Shared &s) {
     DWORD bytes = 0; if (!PeekNamedPipe(input, nullptr, 0, nullptr, &bytes, nullptr)) {
       const auto pipeError=GetLastError();
       if(GetFileType(input)==FILE_TYPE_PIPE && pipeError==ERROR_BROKEN_PIPE){s.cancelled.store(true);SetEvent(s.stop.h);}return;
+    }
+    if(bytes && s.fnEnabled && progress){
+      char payload[256]{};DWORD count=0;
+      if(!ReadFile(input,payload,std::min<DWORD>(bytes,256),&count,nullptr))throw Failure{"MARKER_PROTOCOL_INVALID"};
+      for(DWORD i=0;i<count;i++){
+        const char c=payload[i];
+        if(c=='S'){s.cancelled.store(true);SetEvent(s.stop.h);s.markerInput.clear();return;}
+        if(c=='\n'){
+          if(!s.started.load()||s.captureFinished.load())throw Failure{"MARKER_NOT_ACTIVE"};
+          atlas_fn::Marker marker;
+          try{marker=s.receiver.accept(s.markerInput,s.trialId,Wall()-s.fnOrigin);}catch(const atlas_fn::Error &e){throw Failure{e.code};}
+          s.markerInput.clear();s.markers.push_back(marker);
+          std::ostringstream ack;ack.imbue(std::locale::classic());ack<<std::setprecision(17)<<"ACK "<<s.trialId<<' '<<marker.id<<' '<<marker.kind<<' '<<marker.qpcMs<<'\n';
+          progress->write(ack.str().c_str());
+        }else{if(c<' '||c>'~'||s.markerInput.size()>=80)throw Failure{"MARKER_PROTOCOL_INVALID"};s.markerInput+=c;}
+      }
+      return;
     }
     if (bytes) {
       char command = 0; DWORD count = 0;
@@ -395,14 +462,26 @@ static void Report(Shared &s, const std::vector<Dll> &dlls, const std::vector<st
   o<<"],\"details\":";
   if(!detail)o<<"null";else{o<<"{\"decodes\":[";for(size_t i=0;i<s.run.decodes.size();i++){if(i)o<<',';auto d=s.run.decodes[i];o<<"{\"block\":"<<d.block<<",\"wallMs\":"<<d.wall<<",\"threadCpuMs\":";Number(o,d.cpu);o<<'}';}o<<"],\"blocks\":[";
     for(size_t i=0;i<s.run.blocks.size();i++){if(i)o<<',';auto b=s.run.blocks[i];o<<"{\"sequence\":"<<b.sequence<<",\"wallMs\":"<<b.wall<<",\"decodeCalls\":"<<b.calls<<",\"rawHits\":"<<b.hits<<'}';}o<<"]}";}
+  if(s.fnEnabled){
+    o<<",\"fnDiagnostics\":{\"schema\":1,\"trialId\":\""<<s.trialId<<"\",\"clock\":\"QPC_RELATIVE_MS\",\"signalDomain\":\"POST_FIR_MONO_16000\",\"channelHealthy\":"<<(s.fnChannelHealthy?"true":"false")<<",\"blocks\":[";
+    for(size_t i=0;i<s.diagnosticBlocks.size();i++){if(i)o<<',';const auto &b=s.diagnosticBlocks[i];const auto &m=b.signal;
+      o<<"{\"sequence\":"<<b.sequence<<",\"sampleStart\":"<<b.sampleStart<<",\"sampleEnd\":"<<b.sampleEnd<<",\"qpcStartMs\":"<<b.qpcStartMs<<",\"qpcEndMs\":"<<b.qpcEndMs
+       <<",\"samples\":"<<m.samples<<",\"sumSquares\":"<<m.sumSquares<<",\"rms\":"<<m.rms()<<",\"peak\":"<<m.peak<<",\"nearZero\":"<<m.nearZero<<",\"clipped\":"<<m.clipped<<",\"invalid\":"<<m.invalid
+       <<",\"metricsWallMs\":"<<b.metricsWallMs<<",\"completed\":"<<(b.completed?"true":"false")<<",\"decodeCalls\":"<<b.decodeCalls<<",\"rawHits\":"<<b.rawHits<<'}';}
+    o<<"],\"decodes\":[";
+    for(size_t i=0;i<s.diagnosticDecodes.size();i++){if(i)o<<',';const auto &d=s.diagnosticDecodes[i];o<<"{\"block\":"<<d.block<<",\"startMs\":"<<d.startMs<<",\"endMs\":"<<d.endMs<<'}';}
+    o<<"],\"markers\":[";
+    for(size_t i=0;i<s.markers.size();i++){if(i)o<<',';const auto &m=s.markers[i];o<<"{\"id\":"<<m.id<<",\"kind\":\""<<m.kind<<"\",\"qpcMs\":"<<m.qpcMs<<'}';}o<<"]}";
+  }
   o<<'}'<<std::endl;
 }
 
 static int NativeLive(int argc, char **argv, Progress &progress) {
-  const char *replay=nullptr;bool detail=false,thresholdSpecified=false;double parsedThreshold=.25;
+  const char *replay=nullptr,*trial=nullptr;bool detail=false,thresholdSpecified=false;double parsedThreshold=.25;
   for(int i=8;i<argc;i++){
     if(!std::strcmp(argv[i],"--detail")&&!detail)detail=true;
     else if(!std::strcmp(argv[i],"--replay")&&!replay&&i+1<argc)replay=argv[++i];
+    else if(!std::strcmp(argv[i],"--diagnostic-windows")&&!trial&&i+1<argc)trial=argv[++i];
     else if(!std::strcmp(argv[i],"--threshold")&&!thresholdSpecified&&i+1<argc){parsedThreshold=ParseLiveThreshold(argv[++i]);thresholdSpecified=true;}
     else throw Failure{"ARGUMENT_INVALID"};
   }
@@ -413,6 +492,7 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
   if (!warm && std::strcmp(argv[6],"COLD")) throw Failure{"ARGUMENT_INVALID"};
   char *end = nullptr; const long seconds = std::strtol(argv[7],&end,10);
   if (!end || *end || seconds<1 || seconds>120 || std::strcmp(argv[5],LiveKeyword(threshold).c_str())) throw Failure{"ARGUMENT_INVALID"};
+  if(trial&&(!atlas_fn::trialId(trial)||warm||replay||threshold!=.15||seconds!=60))throw Failure{"ARGUMENT_INVALID"};
   const auto dlls = LoadedDlls();
   const std::string version=SherpaOnnxGetVersionStr(),git=SherpaOnnxGetGitSha1();
   if(version!="2.0.0" || git.substr(0,8)!="8abb7c8f")throw Failure{"RUNTIME_VERSION_MISMATCH"};
@@ -420,7 +500,8 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
   if(dlls.size()!=2 || dlls[0].hash!=expected[0] || dlls[1].hash!=expected[1])throw Failure{"SDK_HASH_MISMATCH"};
   std::vector<std::string> hashes;for(int i=1;i<=4;i++)hashes.push_back(FileHash(std::filesystem::u8path(argv[i])));
   const std::string keyword=argv[5],keywordHash=Hash(reinterpret_cast<const unsigned char *>(keyword.data()),keyword.size());
-  Shared s;s.replay=replay!=nullptr;controlState.store(&s);
+  Shared s;s.replay=replay!=nullptr;
+  if(trial){s.fnEnabled=true;s.trialId=trial;s.fnOrigin=Wall();s.markers.reserve(40);s.diagnosticBlocks.reserve(1300);s.diagnosticDecodes.reserve(10000);progress.startAsync();}controlState.store(&s);
   if(!SetConsoleCtrlHandler(Control,TRUE)){controlState.store(nullptr);throw Failure{"CONTROL_HANDLER_FAILED"};}
   struct ControlGuard {~ControlGuard(){controlState.store(nullptr);SetConsoleCtrlHandler(Control,FALSE);while(controlCalls.load())std::this_thread::yield();}} controlGuard;
   std::thread inference;
@@ -430,19 +511,21 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
     const double begin=Wall();
     DWORD readyWait=0;
     while((readyWait=WaitForSingleObject(s.ready.h,20))==WAIT_TIMEOUT && !stopped(s)){
-      PollStop(s);if(Wall()-begin>30000)s.fail("PREPARATION_TIMEOUT");
+      PollStop(s,&progress);if(Wall()-begin>30000)s.fail("PREPARATION_TIMEOUT");
     }
     if(readyWait==WAIT_FAILED)s.fail("CONTROL_WAIT_FAILED");
     if(!stopped(s))capture=std::thread([&]{if(replay)Replay(s,replay,progress);else Capture(s,static_cast<int>(seconds),progress);});
     else {s.captureFinished.store(true,std::memory_order_release);SetEvent(s.captureDone.h);}
-    DWORD doneWait=0;while((doneWait=WaitForSingleObject(s.inferenceDone.h,20))==WAIT_TIMEOUT)PollStop(s);
+    DWORD doneWait=0;while((doneWait=WaitForSingleObject(s.inferenceDone.h,20))==WAIT_TIMEOUT)PollStop(s,&progress);
     if(doneWait==WAIT_FAILED)s.fail("CONTROL_WAIT_FAILED");
-  }catch(...){s.fail("THREAD_OR_CONTROL_FAILED");if(!capture.joinable()){s.captureFinished.store(true,std::memory_order_release);SetEvent(s.captureDone.h);}}
+  }catch(const Failure &e){s.fail(e.code);if(!capture.joinable()){s.captureFinished.store(true,std::memory_order_release);SetEvent(s.captureDone.h);}}
+  catch(...){s.fail("THREAD_OR_CONTROL_FAILED");if(!capture.joinable()){s.captureFinished.store(true,std::memory_order_release);SetEvent(s.captureDone.h);}}
   double cleanup=0;try{cleanup=Wall();}catch(...){s.fail("CAPTURE_CLOCK_FAILED");}SetEvent(s.stop.h);SetEvent(s.data.h);
   if(capture.joinable())capture.join();if(inference.joinable())inference.join();
   s.abandonedBlocks=s.queue.pending();s.queue.wipeAfterJoin();s.tail.wipe();
   try{s.cleanupWallMs=Wall()-cleanup;}catch(...){s.fail("CAPTURE_CLOCK_FAILED");}s.memoryAfterCleanup=Mem();
   if(!s.error.load() && (s.frames!=s.convertedFrames || (s.format.rate && s.emitted!=s.frames*16000/s.format.rate) || s.emitted!=uint64_t(s.run.samples)))s.fail("AUDIO_ACCOUNTING_FAILED");
+  if(s.fnEnabled){s.fnChannelHealthy=progress.finish();if(!s.fnChannelHealthy)s.fail("DIAGNOSTIC_CHANNEL_FAILED");}
   Report(s,dlls,hashes,keywordHash,warm,static_cast<int>(seconds),detail,threshold);
   return s.error.load()?2:s.cancelled.load()?130:0;
 }
