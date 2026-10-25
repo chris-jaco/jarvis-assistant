@@ -547,7 +547,7 @@ static void Report(Shared &s, const std::vector<Dll> &dlls, const std::vector<st
 }
 
 static int NativeLive(int argc, char **argv, Progress &progress) {
-  const char *replay=nullptr,*trial=nullptr,*calReplay=nullptr,*calSave=nullptr,*calCount=nullptr,*calSha=nullptr,*consent=nullptr;bool detail=false,thresholdSpecified=false;double parsedThreshold=.25;
+  const char *replay=nullptr,*trial=nullptr,*calReplay=nullptr,*calSave=nullptr,*calCount=nullptr,*calSha=nullptr,*consent=nullptr,*calKind=nullptr;bool detail=false,thresholdSpecified=false;double parsedThreshold=.25;
   for(int i=8;i<argc;i++){
     if(!std::strcmp(argv[i],"--detail")&&!detail)detail=true;
     else if(!std::strcmp(argv[i],"--replay")&&!replay&&i+1<argc)replay=argv[++i];
@@ -555,6 +555,7 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
     else if(!std::strcmp(argv[i],"--calibration-save")&&!calSave&&i+1<argc)calSave=argv[++i];
     else if(!std::strcmp(argv[i],"--calibration-samples")&&!calCount&&i+1<argc)calCount=argv[++i];
     else if(!std::strcmp(argv[i],"--calibration-sha")&&!calSha&&i+1<argc)calSha=argv[++i];
+    else if(!std::strcmp(argv[i],"--calibration-kind")&&!calKind&&i+1<argc)calKind=argv[++i];
     else if(!std::strcmp(argv[i],"--capture-consent")&&!consent&&i+1<argc)consent=argv[++i];
     else if(!std::strcmp(argv[i],"--diagnostic-windows")&&!trial&&i+1<argc)trial=argv[++i];
     else if(!std::strcmp(argv[i],"--threshold")&&!thresholdSpecified&&i+1<argc){parsedThreshold=ParseLiveThreshold(argv[++i]);thresholdSpecified=true;}
@@ -567,14 +568,19 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
   if (!warm && std::strcmp(argv[6],"COLD")) throw Failure{"ARGUMENT_INVALID"};
   char *end = nullptr; const long seconds = std::strtol(argv[7],&end,10);
   if (!end || *end || seconds<1 || seconds>120 || std::strcmp(argv[5],LiveKeyword(threshold).c_str())) throw Failure{"ARGUMENT_INVALID"};
-  if(trial&&(!atlas_fn::trialId(trial)||warm||replay||threshold!=.15||seconds!=60))throw Failure{"ARGUMENT_INVALID"};
+  if(trial&&(!atlas_fn::trialId(trial)||warm||replay||threshold!=.15||(seconds!=60&&!(calSave&&seconds==120))))throw Failure{"ARGUMENT_INVALID"};
   size_t calSamples=0;
   if(calReplay){
     if(replay||calSave||trial||consent||warm||threshold==.25||!calCount||!calSha||std::strlen(calSha)!=64||std::strspn(calSha,"0123456789abcdef")!=64)throw Failure{"ARGUMENT_INVALID"};
     char *tail=nullptr;const unsigned long n=std::strtoul(calCount,&tail,10);
     if(!n||n>atlas_cal::maxSamples||!tail||*tail||std::to_string(n)!=calCount)throw Failure{"ARGUMENT_INVALID"};calSamples=n;CalPath(calReplay);
   }else if(calCount||calSha)throw Failure{"ARGUMENT_INVALID"};
-  if(calSave&&(!trial||!consent||std::strcmp(consent,trial)||warm||replay||calReplay||threshold!=.15||seconds!=60))throw Failure{"ARGUMENT_INVALID"};
+  if(calSave&&(!trial||!consent||std::strcmp(consent,trial)||warm||replay||calReplay||threshold!=.15||(seconds!=60&&seconds!=120)))throw Failure{"ARGUMENT_INVALID"};
+  if(calKind&&!calSave)throw Failure{"ARGUMENT_INVALID"};
+  if(calSave){
+    if(calKind){try{if(seconds!=atlas_cal::captureSeconds(calKind))throw Failure{"ARGUMENT_INVALID"};}catch(const atlas_cal::Error &){throw Failure{"ARGUMENT_INVALID"};}}
+    else if(seconds!=60)throw Failure{"ARGUMENT_INVALID"};
+  }
   if(consent&&!calSave)throw Failure{"ARGUMENT_INVALID"};
   const auto dlls = LoadedDlls();
   const std::string version=SherpaOnnxGetVersionStr(),git=SherpaOnnxGetGitSha1();
@@ -584,7 +590,7 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
   std::vector<std::string> hashes;for(int i=1;i<=4;i++)hashes.push_back(FileHash(std::filesystem::u8path(argv[i])));
   const std::string keyword=argv[5],keywordHash=Hash(reinterpret_cast<const unsigned char *>(keyword.data()),keyword.size());
   Shared s;s.replay=replay!=nullptr||calReplay!=nullptr;
-  if(calSave){CalPath(calSave);s.calSave=true;s.calPath=calSave;s.recording.prepare();}
+  if(calSave){CalPath(calSave);s.calSave=true;s.calPath=calSave;s.recording.prepare(seconds==120?atlas_cal::maxSamples:atlas_cal::shortMaxSamples);}
   if(calReplay){s.calReplay=true;s.calPath=calReplay;s.calSamples=calSamples;s.calHash=calSha;}
   if(trial){s.fnEnabled=true;s.trialId=trial;s.fnOrigin=Wall();s.markers.reserve(40);s.diagnosticBlocks.reserve(1300);s.diagnosticDecodes.reserve(10000);progress.startAsync();}controlState.store(&s);
   if(!SetConsoleCtrlHandler(Control,TRUE)){controlState.store(nullptr);throw Failure{"CONTROL_HANDLER_FAILED"};}

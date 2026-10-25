@@ -21,8 +21,10 @@ micrófono ni identificadores del dispositivo. Su longitud es `4 × muestras`.
 
 No cambian WASAPI, FIR, canal 0, transporte, colas/pool ni Feed/decodificador.
 El tap vive en inferencia, antes de Feed, y conserva bits (incluido −0) en memoria
-acotada a 1.024.000 muestras / 4.096.000 bytes (64 s). Sólo habilitado para una
-toma COLD/.15 de 60 s. La copia no espera al disco ni asigna memoria por bloque;
+acotada a 1.984.000 muestras / 7.936.000 bytes (124 s) para POSITIVE/SIMILAR
+de 120 s. SILENCE conserva 60 s y su límite de 1.024.000 muestras / 4.096.000
+bytes (64 s). Los cuatro segundos de capacidad adicional son margen finito de
+contabilidad, no padding ni tiempo extra de micrófono. Sólo en tomas COLD/.15. La copia no espera al disco ni asigna memoria por bloque;
 la reserva ocurre antes de iniciar los hilos. Es coste adicional del observador.
 Si falta espacio o se pierde orden, falla explícitamente. Una toma incompleta,
 fallida o cancelada no se acepta; su memoria se limpia.
@@ -86,17 +88,19 @@ La carpeta de salida debe ser **nueva**. No descargar SDK/modelos ni instalar na
 
 ```powershell
 $sdk = (Resolve-Path '.local\wake-word-spike\native-sdk\v2.0.0-win-x64-shared-MD-Release-no-tts-audit\extracted\sherpa-onnx-v2.0.0-win-x64-shared-MD-Release-no-tts').Path
-$out = Join-Path (Get-Location) '.local\wake-word-spike\native-calibration-h16'
+$out = Join-Path (Get-Location) '.local\wake-word-spike\native-calibration-h16-120s'
 & .\experiments\wake-word\build-native-reference.ps1 -SdkRoot $sdk -OutputDir $out -Live
 if ($LASTEXITCODE -ne 0) { throw 'BUILD_FAILED' }
 $exe = Join-Path $out 'native-live.exe'
 $lock = Join-Path $out 'native-live-lock.json'
-node --import tsx experiments/wake-word/native-live.ts $exe $lock COLD 60 --threshold 0.15 --diagnostic-windows --check
+node --import tsx experiments/wake-word/native-live.ts $exe $lock COLD 120 --threshold 0.15 --check
 if ($LASTEXITCODE -ne 0) { throw 'PREFLIGHT_FAILED' }
 node --import tsx experiments/wake-word/calibration-session.ts status
 ```
 
-El preflight no activa micrófono. Revisa el SDK/DLL y fuentes verificadas,
+El preflight de 120 s no activa micrófono. No usar aquí `--diagnostic-windows`: el
+CLI histórico Hito 1.5 continúa fijado a 60 s. La excepción Native de 120 s
+requiere el supervisor de calibración y un kind POSITIVE/SIMILAR válido. Revisa el SDK/DLL y fuentes verificadas,
 ejecutable, manifiesto/modelos/tokens y configuración. La captura añade
 verificación de privacidad del directorio. No ejecutar el EXE directamente:
 los flags `--calibration-*` son internos del supervisor con consentimiento.
@@ -104,7 +108,8 @@ los flags `--calibration-*` son internos del supervisor con consentimiento.
 ## Tres tomas, un consentimiento independiente por toma
 
 Mantener micrófono, distancia, entorno y carga. Cada comando pide escribir
-`CAPTURAR <KIND> <nonce>` exactamente; sólo después puede iniciar el micrófono.
+`CAPTURAR <KIND> <nonce>` exactamente; el aviso informa la duración (120/60 s).
+Sólo después puede iniciar el micrófono.
 Asegurarse de no grabar a otras personas sin consentimiento.
 
 ```powershell
@@ -120,16 +125,35 @@ $similar = 'REEMPLAZAR_POR_32_HEX'
 ```
 
 - POSITIVE: veinte «Atlas» naturales; empezar ~2 s después de CAPTURE_STARTED,
-  separar inicios ~2.5 s y dejar >1 s al final. Antes de cada pronunciación `b`
+  separar inicios ~4–5 s y completar los veinte pares antes de ~115 s.
+  Dejar siempre >1 s de contexto posterior dentro de la captura. Antes de cada pronunciación `b`
   + Enter, esperar `MARKER_ACK ... B ALIGNED`, hablar; después `e` + Enter y
   esperar ACK E. Exactamente veinte pares, nunca ajustar después para lograr hits.
 - SILENCE: sesenta segundos sin hablar, sin marcadores y **sin pulsar Enter**.
 - SIMILAR: veinte expresiones predefinidas sin «Atlas» (por ejemplo «altas»,
-  «alas», «atleta», «atrás»), misma cadencia y B/E. No guardar las frases en JSON.
+  «alas», «atleta», «atrás»), 120 s, misma cadencia y veinte pares B/E. No guardar las frases en JSON.
 
+Después del ACK 40, **seguir esperando**: no hay cierre anticipado. POSITIVE y
+SIMILAR terminan automáticamente a los 120 s; SILENCE a los 60 s. El audio
+ambiental sigue almacenándose hasta ese final, aunque ya estén los veinte pares.
 En todas: esperar final automático; Enter vacío o Ctrl+C solicita Stop, invalida
 la toma como dataset. Cada toma usa proceso/spotter/stream COLD nuevos, .15 como
 referencia. No reutilizar capturas independientes como si fueran el mismo PCM.
+
+La duración se fija en consentimiento, manifest y validación del reporte como
+`requestedSeconds`. Datasets válidos anteriores de 60 s siguen legibles; ausencia
+del campo significa únicamente contrato anterior de 60 s. SILENCE de 120 s,
+duraciones arbitrarias y desacuerdos entre consentimiento/manifest/reporte se
+rechazan. Las nuevas tomas POSITIVE/SIMILAR siempre solicitan 120 s, no 60.
+
+Auditoría de límites: Native general ya admitía 120 s; no cambia Capture/WASAPI.
+El límite diagnóstico existente de 1.300 bloques cubre hasta 124 s; no se amplía.
+Tampoco cambia el límite de 40 ACK, ni los 20 pares B/E, ni 10.000 Decode, ni los
+4 buffers de audio. El supervisor conserva la fórmula duración+60 s: timeout
+180 s para capturas de 120, 120 s para SILENCE de 60. En replay se contempla
+además el número real de muestras (máximo 184 s de presupuesto), sin truncarlas.
+Completar ventanas no envía Stop: cambiarlo confundiría cancelación con éxito y
+requeriría un protocolo nuevo de drenaje. Se conserva la finalización automática.
 
 ## Nueve evaluaciones y repetición de consistencia
 
@@ -153,6 +177,8 @@ node --import tsx experiments/wake-word/calibration-session.ts compare "$root\ru
 if ($LASTEXITCODE -ne 0) { throw 'RESULTS_INCONSISTENT' }
 ```
 
+Con POSITIVE/SIMILAR de 120 s y SILENCE de 60 s, cada matriz tarda aproximadamente
+15 minutos de audio más inicialización y cleanup.
 La segunda matriz son otras nueve ejecuciones de los mismos datasets, sin nuevas
 capturas. Nunca comparar una matriz consigo misma como prueba de independencia.
 Resultados bajo `runs/<runId>/`: nueve JSON y matrix.json con .15 como referencia,
@@ -175,6 +201,10 @@ El margen continúa −250/+1000 ms (4000/16000 muestras). Un hit debe quedar de
 para **todo** el intervalo incierto y pertenecer a una sola ventana; de lo
 contrario falla como ambiguo. El hash de ventanas queda fijado al terminar la toma,
 antes del barrido, y vuelve a derivarse del reporte original al abrir el dataset.
+
+El analizador histórico Hito 1.5 conserva su contrato de 60 s. Para datasets de
+120 s se utiliza el validador de calibración, que reaplica identidad de runtime,
+modelos, keyword, diagnóstico QPC y contabilidad con la duración declarada.
 
 El punto del hit es el final del bloque que produjo el resultado (granularidad
 hasta 100 ms), no onset acústico. Los límites manuales y 2 ms de tolerancia no

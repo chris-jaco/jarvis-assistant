@@ -9,9 +9,8 @@ import { promisify } from 'node:util';
 import { sha } from './benchmark-contract.js';
 import { livePreflight,runLiveChild,cleanLiveReport } from './native-live.js';
 import { NativeMarkers } from './native-fn-diagnostics.js';
-import { falseNegativeReport } from './native-fn.js';
 import { bindCalibrationWindows,validatePcm,retention,retentionMs,maxCalibrationSamples,checkedKind,checkHash,calibrationThresholds,calibrationFormat,
-  associateCalibration,validateCalReplay,digest,same,fail,type Kind } from './calibration-contract.js';
+  associateCalibration,validateCalReplay,validateCalCapture,captureSeconds,sessionSeconds,replaySeconds,digest,same,fail,type Kind } from './calibration-contract.js';
 export const calibrationRoot=resolve(import.meta.dirname,'../../.local/wake-word-spike/calibration');
 const localRoot=resolve(import.meta.dirname,'../../.local');
 function id(value:string){if(!/^[a-f0-9]{32}$/.test(value))fail('CAL_ID_INVALID');return value;}
@@ -35,7 +34,7 @@ async function json(path:string){
 async function saveJson(path:string,value:any){await safeLocal(path,true);await writeFile(path,JSON.stringify(value)+'\n',{flag:'wx',mode:0o600});}
 function validateConsent(c:any,session:string,now=Date.now()){
   if(c?.schema!==1||c.contract!=='ATLAS_CALIBRATION_F32LE_V1'||c.trialId!==id(session)||c.consent!=='EXPLICIT_PER_CAPTURE')fail('CAL_CONSENT_INVALID');
-  checkedKind(c.kind);return retention(c.createdAtUtc,c.expiresAtUtc,now);
+  sessionSeconds(c);return retention(c.createdAtUtc,c.expiresAtUtc,now);
 }
 export async function retentionStatus(now=Date.now()){
   const root=join(calibrationRoot,'captures');await safeLocal(root,true);if(!await exists(root))return [];
@@ -64,11 +63,12 @@ export async function loadCalibrationSession(session:string,now=Date.now()){
   if(validateConsent(consent,session,now)!=='WITHIN_RETENTION')fail('CAL_RETENTION_EXPIRED');
   const m=await json(join(dir,'session.json'));
   if(m?.schema!==1||m.contract!==consent.contract||m.trialId!==session||m.kind!==consent.kind||m.createdAtUtc!==consent.createdAtUtc
-    ||m.expiresAtUtc!==consent.expiresAtUtc||m.state!=='COMPLETE'||!same(m.format,calibrationFormat)||!Number.isSafeInteger(m.samples)||m.samples<1||m.samples>maxCalibrationSamples)fail('CAL_SESSION_INVALID');
+    ||m.expiresAtUtc!==consent.expiresAtUtc||m.state!=='COMPLETE'||sessionSeconds(m)!==sessionSeconds(consent)||!same(m.format,calibrationFormat)||!Number.isSafeInteger(m.samples)||m.samples<1||m.samples>maxCalibrationSamples)fail('CAL_SESSION_INVALID');
+  replaySeconds(m);
   for(const key of ['pcmSha256','reportSha256','annotationSha256','lockSha256'])checkHash(m[key]);
   const reportPath=await safeLocal(join(dir,'capture.json')),bytes=await readFile(reportPath);
   if(sha(bytes)!==m.reportSha256)fail('CAL_REPORT_HASH_MISMATCH');
-  const r=await json(reportPath);falseNegativeReport(r); // Reapply published identity/integrity validation, not its positive-only interpretation.
+  const r=await json(reportPath);validateCalCapture(r,m.kind,sessionSeconds(m)); // Calibration duration only; published Hito 1.5 remains pinned to 60 s.
   if(r.capture.processedSamples!==m.samples||!same(r.modelHashes,m.modelHashes)||r.fnDiagnostics.trialId!==session)fail('CAL_SESSION_INVALID');
   if(r.calibration?.schema!==1||r.calibration.mode!=='CAPTURE'||r.calibration.persisted!==true||r.calibration.sha256!==m.pcmSha256||r.calibration.samples!==m.samples)fail('CAL_SESSION_INVALID');
   const windows=bindCalibrationWindows(r,m.kind);
@@ -85,20 +85,20 @@ async function prompt(text:string){
 }
 export async function requireConsent(kind:Kind,trial:string,ask:(text:string)=>Promise<string>=prompt){
   const expected=`CAPTURAR ${kind} ${id(trial)}`;
-  const answer=await ask(`Se conservarán 60 s de PCM privado hasta 7 días. Sin envío externo. Escribí ${expected}: `);
+  const answer=await ask(`Se conservarán ${captureSeconds(kind)} s de PCM privado hasta 7 días. Sin envío externo. Escribí ${expected}: `);
   if(answer!==expected)fail('CAL_CAPTURE_CONSENT_REQUIRED');
 }
 async function capture(exe:string,lock:string,kind:Kind){
   if(process.platform!=='win32'||process.arch!=='x64')fail('CAL_WINDOWS_REQUIRED');
   const statuses=await retentionStatus();if(statuses.some(s=>s.warning))fail('CAL_RETENTION_REVIEW_REQUIRED');
-  const ready=await livePreflight(exe,lock,undefined,.15),trial=randomBytes(16).toString('hex');
+  const seconds=captureSeconds(kind),ready=await livePreflight(exe,lock,undefined,.15),trial=randomBytes(16).toString('hex');
   await requireConsent(kind,trial);
   const dir=folder(trial);await safeLocal(dir,true);await mkdir(dir,{recursive:true,mode:0o700});
   // Windows ignores POSIX mode bits. Verify inherited ACLs before any audio is captured.
   try{await promisify(execFile)(join(process.env.SystemRoot??'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'),
     ['-NoProfile','-NonInteractive','-File',fileURLToPath(new URL('./calibration-private-directory.ps1',import.meta.url)),'-Directory',dir],{timeout:10000,maxBuffer:4096});}
   catch{fail('CAL_PRIVATE_DIRECTORY_UNVERIFIED');}
-  const now=Date.now(),consent={schema:1,contract:'ATLAS_CALIBRATION_F32LE_V1',trialId:trial,kind,consent:'EXPLICIT_PER_CAPTURE',
+  const now=Date.now(),consent={schema:1,contract:'ATLAS_CALIBRATION_F32LE_V1',trialId:trial,kind,requestedSeconds:seconds,consent:'EXPLICIT_PER_CAPTURE',
     createdAtUtc:new Date(now).toISOString(),expiresAtUtc:new Date(now+retentionMs).toISOString()};
   await saveJson(join(dir,'consent.json'),consent);
   const markers=new NativeMarkers(trial),controller=new AbortController(),stop=()=>controller.abort();
@@ -108,9 +108,9 @@ async function capture(exe:string,lock:string,kind:Kind){
   let cleanupVerified=false;
   try{
     const args=['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].map(n=>resolve(ready.root,'model',n));
-    const raw=await runLiveChild(ready.exe,[...args,ready.keyword,'COLD','60','--threshold','0.15','--detail','--diagnostic-windows',trial,
-      '--calibration-save',join(dir,'capture.f32le'),'--capture-consent',trial],60,controller.signal,stage=>console.error(stage),undefined,undefined,markers);
-    const r=cleanLiveReport(raw.report,ready.expected,'COLD','MICROPHONE',60,.15,{trialId:trial,host:markers.snapshot()});
+    const raw=await runLiveChild(ready.exe,[...args,ready.keyword,'COLD',String(seconds),'--threshold','0.15','--detail','--diagnostic-windows',trial,
+      '--calibration-save',join(dir,'capture.f32le'),'--calibration-kind',kind,'--capture-consent',trial],seconds,controller.signal,stage=>console.error(stage),undefined,undefined,markers);
+    const r=cleanLiveReport(raw.report,ready.expected,'COLD','MICROPHONE',seconds,.15,{trialId:trial,host:markers.snapshot()});
     cleanupVerified=r.cleanup?.microphoneReleased===true&&r.cleanup?.comReleased===true&&r.cleanup?.engineReleased===true&&r.cleanup?.threadsJoined===true;
     const c=raw.report.calibration;
     if(raw.exitCode!==0||r.state!=='COMPLETED'){await saveJson(join(dir,'incomplete-capture.json'),r);fail('CAL_CAPTURE_INCOMPLETE');}
@@ -132,8 +132,8 @@ async function replay(exe:string,lock:string,sessionId:string,threshold:number,s
   const ready=await livePreflight(exe,lock,undefined,threshold);
   if(!same(ready.expected.modelHashes,m.modelHashes)||sha(await readFile(await safeLocal(lock)))!==m.lockSha256)fail('CAL_IDENTITY_MISMATCH');
   const args=['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].map(n=>resolve(ready.root,'model',n));
-  const raw=await runLiveChild(ready.exe,[...args,ready.keyword,'COLD','60','--threshold',String(threshold),'--detail',
-    '--calibration-replay',pcm,'--calibration-samples',String(m.samples),'--calibration-sha',m.pcmSha256],60,signal);
+  const raw=await runLiveChild(ready.exe,[...args,ready.keyword,'COLD',String(sessionSeconds(m)),'--threshold',String(threshold),'--detail',
+    '--calibration-replay',pcm,'--calibration-samples',String(m.samples),'--calibration-sha',m.pcmSha256],replaySeconds(m),signal);
   const r=validateCalReplay(raw.report,ready.expected,m,threshold);if(raw.exitCode!==0)fail('CAL_REPLAY_INCOMPLETE');
   if(digest((await loadCalibrationSession(sessionId)).manifest)!==frozen)fail('CAL_SESSION_CHANGED'); // Revalidate after the actual Feed-boundary hash.
   return {manifest:m,report:r,summary:associateCalibration(r,m)};
@@ -152,7 +152,7 @@ async function matrix(exe:string,lock:string,positive:string,silence:string,simi
     const result=await replay(exe,lock,s.id,t,controller.signal,frozen.get(s.id)!);
     const identity=digest(result.manifest.modelHashes);if(modelIdentity&&modelIdentity!==identity)fail('CAL_IDENTITY_MISMATCH');modelIdentity=identity;
     await saveJson(join(out,`${s.kind}-${t}.json`),{schema:1,sessionId:s.id,pcmSha256:result.manifest.pcmSha256,report:result.report,summary:result.summary});
-    rows.push({sessionId:s.id,pcmSha256:result.manifest.pcmSha256,samples:result.manifest.samples,annotationSha256:result.manifest.annotationSha256,...result.summary});
+    rows.push({sessionId:s.id,pcmSha256:result.manifest.pcmSha256,samples:result.manifest.samples,requestedSeconds:sessionSeconds(result.manifest),annotationSha256:result.manifest.annotationSha256,...result.summary});
   }}finally{process.removeListener('SIGINT',stop);}
   for(const row of rows){const reference=rows.find(r=>r.kind===row.kind&&r.threshold===.15)!;
     row.deltaFromReference={associatedPronunciations:row.associatedPronunciations===null?null:row.associatedPronunciations-reference.associatedPronunciations,
@@ -172,6 +172,7 @@ export function compareCalibrationMatrices(a:any,b:any){
   for(let i=0;i<9;i++){
     const x=a.rows[i],y=b.rows[i],key=`${x.kind}-${x.threshold}`;
     checkedKind(x.kind);if(!calibrationThresholds.includes(x.threshold)||keys.has(key))fail('CAL_MATRIX_INVALID');keys.add(key);
+    replaySeconds(x);replaySeconds(y);if(sessionSeconds(x)!==sessionSeconds(y))fail('CAL_RESULTS_INCONSISTENT');
     id(x.sessionId);for(const k of ['samples','rawHits','detections','suppressedHits','duplicates','falsePositives'])if(!Number.isSafeInteger(x[k])||x[k]<0)fail('CAL_MATRIX_INVALID');
     if(x.rawHits!==x.detections+x.suppressedHits||x.samples<1||x.samples>maxCalibrationSamples)fail('CAL_MATRIX_INVALID');
     for(const k of ['sessionId','kind','threshold','pcmSha256','samples','annotationSha256','recognitionSignature','rawHits','detections','suppressedHits','associatedPronunciations','omissions','duplicates','falsePositives'])

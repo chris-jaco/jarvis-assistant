@@ -5,14 +5,24 @@
 #include <cmath>
 #include <cstdint>
 namespace atlas_cal {
-constexpr size_t maxSamples=64*16000;
+constexpr size_t shortMaxSamples=64*16000;
+constexpr size_t maxSamples=124*16000;
 struct Error {const char *code;};
+inline int captureSeconds(const char *kind){
+  if(kind&&!std::strcmp(kind,"SILENCE"))return 60;
+  if(kind&&(!std::strcmp(kind,"POSITIVE")||!std::strcmp(kind,"SIMILAR")))return 120;
+  throw Error{"CALIBRATION_KIND_INVALID"};
+}
 class Buffer {
   std::vector<float> values;
+  size_t limit=shortMaxSamples;
  public:
-  void prepare(){values.reserve(maxSamples);}
+  void prepare(size_t maximum=shortMaxSamples){
+    if(maximum!=shortMaxSamples&&maximum!=maxSamples)throw Error{"CALIBRATION_SEQUENCE_INVALID"};
+    limit=maximum;values.reserve(limit);
+  }
   void append(const float *pcm,size_t count,size_t offset){
-    if(offset!=values.size()||!count||count>1600||values.size()+count>maxSamples)throw Error{"CALIBRATION_SEQUENCE_INVALID"};
+    if(offset!=values.size()||!count||count>1600||values.size()+count>limit)throw Error{"CALIBRATION_SEQUENCE_INVALID"};
     for(size_t i=0;i<count;i++)if(!std::isfinite(pcm[i]))throw Error{"CALIBRATION_PCM_INVALID"};
     const auto begin=values.size();values.resize(begin+count);std::memcpy(values.data()+begin,pcm,count*sizeof(float));
   }

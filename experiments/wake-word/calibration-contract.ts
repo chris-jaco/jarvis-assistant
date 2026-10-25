@@ -1,11 +1,12 @@
 // Calibration-only numeric contract. Never records or reconstructs audio.
-import { sha } from './benchmark-contract.js';
+import { sha,sdkHashes } from './benchmark-contract.js';
 import { cleanLiveReport } from './native-live.js';
 import { validateFnDiagnostics,fnPolicy } from './native-fn-diagnostics.js';
 import { liveKeyword } from './native-live-config.js';
 import { SpikeError } from './core.js';
 export const calibrationThresholds=[.15,.10,.05] as const;
-export const maxCalibrationSamples=64*16000;
+export const shortCalibrationSamples=64*16000;
+export const maxCalibrationSamples=124*16000;
 export const retentionMs=7*24*60*60*1000;
 export const calibrationFormat={encoding:'F32LE',sampleRate:16000,channels:1,blockSamples:1600,domain:'POST_FIR',paddingSamples:0,normalization:false} as const;
 export type Kind='POSITIVE'|'SILENCE'|'SIMILAR';
@@ -13,6 +14,36 @@ export const fail=(code:string):never=>{throw new SpikeError(code);};
 export const digest=(v:any)=>sha(JSON.stringify(v));
 export const same=(a:any,b:any)=>digest(a)===digest(b);
 export function checkedKind(v:string):Kind{if(!['POSITIVE','SILENCE','SIMILAR'].includes(v))fail('CAL_KIND_INVALID');return v as Kind;}
+export function captureSeconds(kind:Kind){return checkedKind(kind)==='SILENCE'?60:120;}
+// Missing duration identifies the already published 60-second calibration contract.
+export function sessionSeconds(session:any){
+  const kind=checkedKind(session.kind),seconds=session.requestedSeconds===undefined?60:session.requestedSeconds;
+  if(seconds!==60&&!(seconds===120&&kind!=='SILENCE'))fail('CAL_DURATION_INVALID');return seconds as number;
+}
+export function replaySeconds(session:any){
+  const seconds=sessionSeconds(session);
+  if(!Number.isSafeInteger(session.samples)||session.samples<1||session.samples>(seconds===60?shortCalibrationSamples:maxCalibrationSamples))fail('CAL_PCM_LENGTH_INVALID');
+  return Math.max(seconds,Math.ceil(session.samples/16000));
+}
+export function validateCalCapture(report:any,kind:Kind,seconds:number){
+  sessionSeconds({kind,requestedSeconds:seconds});
+  if(report?.runtime?.version!=='2.0.0'||JSON.stringify(Object.entries(report.runtime.dllHashes??{}).sort())!==JSON.stringify(Object.entries(sdkHashes).sort())
+    ||!report.modelHashes||Object.keys(report.modelHashes).length!==4||!/^[a-f0-9]{32}$/.test(report.fnDiagnostics?.trialId??'')
+    ||!Array.isArray(report.fnDiagnostics?.hostMarkers))fail('CAL_SESSION_INVALID');
+  for(const name of ['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'])checkHash(report.modelHashes[name]);
+  const r=cleanLiveReport({...report,runtime:{version:'2.0.0',dlls:['sherpa-onnx-c-api.dll','onnxruntime.dll'].map(name=>({name,sha256:sdkHashes[name]}))}},
+    {modelHashes:report.modelHashes,keywordSha256:sha(liveKeyword(.15))},'COLD','MICROPHONE',seconds,.15,
+    {trialId:report.fnDiagnostics?.trialId,host:report.fnDiagnostics?.hostMarkers});
+  // Preserve the Hito 1.5 hit/cooldown accounting without relaxing its 60 s entry point.
+  if(r.positions.length!==r.recognition.rawHits)fail('CAL_HIT_ACCOUNTING_INVALID');
+  let last=-Infinity,previous=-1,accepted=0;
+  for(const p of r.positions){
+    if(!Number.isSafeInteger(p.block)||p.block<previous)fail('CAL_HIT_ACCOUNTING_INVALID');previous=p.block;
+    if(p.block*100-last>=1000){last=p.block*100;accepted++;}
+  }
+  if(accepted!==r.recognition.detections||r.positions.length-accepted!==r.recognition.suppressedHits)fail('CAL_HIT_ACCOUNTING_INVALID');
+  return r;
+}
 export function checkHash(v:any){if(typeof v!=='string'||!/^[a-f0-9]{64}$/.test(v))fail('CAL_HASH_INVALID');return v as string;}
 export function retention(created:string,expires:string,now=Date.now()){
   const c=Date.parse(created),e=Date.parse(expires);
@@ -28,6 +59,7 @@ export function validatePcm(bytes:Uint8Array,expected:string,samples:number){
 }
 export function bindCalibrationWindows(report:any,kind:Kind){
   checkedKind(kind);
+  sessionSeconds({kind,requestedSeconds:report.capture?.requestedSeconds});
   if(report.state!=='COMPLETED'||report.source!=='MICROPHONE'||report.mode!=='COLD'||report.configuration?.threshold!==.15)fail('CAL_CAPTURE_INCOMPLETE');
   const d=validateFnDiagnostics(report.fnDiagnostics,report,report.fnDiagnostics?.trialId,report.fnDiagnostics?.hostMarkers);
   if(!d||!d.channelHealthy||d.blocks.length===0)fail('CAL_ALIGNMENT_AMBIGUOUS');
@@ -66,7 +98,8 @@ export function validateCalReplay(raw:any,expected:any,session:any,threshold:num
   if(!calibrationThresholds.some(t=>t===threshold))fail('CAL_THRESHOLD_INVALID');
   const c=raw?.calibration;
   if(c?.schema!==1||c.mode!=='REPLAY'||c.persisted!==false||c.samples!==session.samples||c.sha256!==session.pcmSha256)fail('CAL_REPLAY_CONTRACT_INVALID');
-  const r=cleanLiveReport(raw,{...expected,wavSha256:null,pcmSha256:session.pcmSha256},'COLD','REPLAY',60,threshold);
+  replaySeconds(session);
+  const r=cleanLiveReport(raw,{...expected,wavSha256:null,pcmSha256:session.pcmSha256},'COLD','REPLAY',sessionSeconds(session),threshold);
   if(r.state!=='COMPLETED'||r.capture.processedSamples!==session.samples||r.capture.processedBlocks!==Math.ceil(session.samples/1600)
     ||r.format.kind!=='FLOAT32'||r.format.rate!==16000||r.format.channels!==1||r.conversion.firTaps!==1||r.conversion.filterDelayMs!==0
     ||!same(r.modelHashes,session.modelHashes)||!r.details||r.details.blocks.length!==r.capture.processedBlocks
