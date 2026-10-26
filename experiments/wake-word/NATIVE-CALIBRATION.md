@@ -21,8 +21,9 @@ micrófono ni identificadores del dispositivo. Su longitud es `4 × muestras`.
 
 No cambian WASAPI, FIR, canal 0, transporte, colas/pool ni Feed/decodificador.
 El tap vive en inferencia, antes de Feed, y conserva bits (incluido −0) en memoria
-acotada a 1.984.000 muestras / 7.936.000 bytes (124 s) para POSITIVE/SIMILAR
-de 120 s. SILENCE conserva 60 s y su límite de 1.024.000 muestras / 4.096.000
+acotada a 2.944.000 muestras / 11.776.000 bytes (184 s) para POSITIVE/SIMILAR
+de 180 s. El contrato histórico de 120 s conserva 1.984.000 muestras /
+7.936.000 bytes (124 s); no se amplía su límite. SILENCE conserva 60 s y su límite de 1.024.000 muestras / 4.096.000
 bytes (64 s). Los cuatro segundos de capacidad adicional son margen finito de
 contabilidad, no padding ni tiempo extra de micrófono. Sólo en tomas COLD/.15. La copia no espera al disco ni asigna memoria por bloque;
 la reserva ocurre antes de iniciar los hilos. Es coste adicional del observador.
@@ -88,18 +89,18 @@ La carpeta de salida debe ser **nueva**. No descargar SDK/modelos ni instalar na
 
 ```powershell
 $sdk = (Resolve-Path '.local\wake-word-spike\native-sdk\v2.0.0-win-x64-shared-MD-Release-no-tts-audit\extracted\sherpa-onnx-v2.0.0-win-x64-shared-MD-Release-no-tts').Path
-$out = Join-Path (Get-Location) '.local\wake-word-spike\native-calibration-h16-120s'
+$out = Join-Path (Get-Location) '.local\wake-word-spike\native-calibration-h16-180s'
 & .\experiments\wake-word\build-native-reference.ps1 -SdkRoot $sdk -OutputDir $out -Live
 if ($LASTEXITCODE -ne 0) { throw 'BUILD_FAILED' }
 $exe = Join-Path $out 'native-live.exe'
 $lock = Join-Path $out 'native-live-lock.json'
-node --import tsx experiments/wake-word/native-live.ts $exe $lock COLD 120 --threshold 0.15 --check
+node --import tsx experiments/wake-word/native-live.ts $exe $lock COLD 180 --threshold 0.15 --check
 if ($LASTEXITCODE -ne 0) { throw 'PREFLIGHT_FAILED' }
 node --import tsx experiments/wake-word/calibration-session.ts status
 ```
 
-El preflight de 120 s no activa micrófono. No usar aquí `--diagnostic-windows`: el
-CLI histórico Hito 1.5 continúa fijado a 60 s. La excepción Native de 120 s
+El preflight de 180 s no activa micrófono. No usar aquí `--diagnostic-windows`: el
+CLI histórico Hito 1.5 continúa fijado a 60 s. La excepción Native de 180 s
 requiere el supervisor de calibración y un kind POSITIVE/SIMILAR válido. Revisa el SDK/DLL y fuentes verificadas,
 ejecutable, manifiesto/modelos/tokens y configuración. La captura añade
 verificación de privacidad del directorio. No ejecutar el EXE directamente:
@@ -108,7 +109,7 @@ los flags `--calibration-*` son internos del supervisor con consentimiento.
 ## Tres tomas, un consentimiento independiente por toma
 
 Mantener micrófono, distancia, entorno y carga. Cada comando pide escribir
-`CAPTURAR <KIND> <nonce>` exactamente; el aviso informa la duración (120/60 s).
+`CAPTURAR <KIND> <nonce>` exactamente; el aviso informa la duración (180/60 s).
 Sólo después puede iniciar el micrófono.
 Asegurarse de no grabar a otras personas sin consentimiento.
 
@@ -125,35 +126,39 @@ $similar = 'REEMPLAZAR_POR_32_HEX'
 ```
 
 - POSITIVE: veinte «Atlas» naturales; empezar ~2 s después de CAPTURE_STARTED,
-  separar inicios ~4–5 s y completar los veinte pares antes de ~115 s.
+  separar inicios ~7–8 s y completar los veinte pares antes de ~175 s.
   Dejar siempre >1 s de contexto posterior dentro de la captura. Antes de cada pronunciación `b`
   + Enter, esperar `MARKER_ACK ... B ALIGNED`, hablar; después `e` + Enter y
   esperar ACK E. Exactamente veinte pares, nunca ajustar después para lograr hits.
 - SILENCE: sesenta segundos sin hablar, sin marcadores y **sin pulsar Enter**.
 - SIMILAR: veinte expresiones predefinidas sin «Atlas» (por ejemplo «altas»,
-  «alas», «atleta», «atrás»), 120 s, misma cadencia y veinte pares B/E. No guardar las frases en JSON.
+  «alas», «atleta», «atrás»), 180 s, misma cadencia y veinte pares B/E. No guardar las frases en JSON.
 
 Después del ACK 40, **seguir esperando**: no hay cierre anticipado. POSITIVE y
-SIMILAR terminan automáticamente a los 120 s; SILENCE a los 60 s. El audio
+SIMILAR terminan automáticamente a los 180 s; SILENCE a los 60 s. El audio
 ambiental sigue almacenándose hasta ese final, aunque ya estén los veinte pares.
 En todas: esperar final automático; Enter vacío o Ctrl+C solicita Stop, invalida
 la toma como dataset. Cada toma usa proceso/spotter/stream COLD nuevos, .15 como
 referencia. No reutilizar capturas independientes como si fueran el mismo PCM.
 
 La duración se fija en consentimiento, manifest y validación del reporte como
-`requestedSeconds`. Datasets válidos anteriores de 60 s siguen legibles; ausencia
-del campo significa únicamente contrato anterior de 60 s. SILENCE de 120 s,
-duraciones arbitrarias y desacuerdos entre consentimiento/manifest/reporte se
-rechazan. Las nuevas tomas POSITIVE/SIMILAR siempre solicitan 120 s, no 60.
+`requestedSeconds`. Datasets válidos anteriores de 60 y 120 s siguen legibles;
+ausencia del campo significa únicamente contrato anterior de 60 s. SILENCE sólo
+admite 60 s. Las nuevas tomas POSITIVE/SIMILAR solicitan 180 s. Se rechazan duraciones
+arbitrarias y desacuerdos entre consentimiento/manifest/reporte. El formato F32LE,
+los hashes y el algoritmo de asociación no cambian.
 
-Auditoría de límites: Native general ya admitía 120 s; no cambia Capture/WASAPI.
-El límite diagnóstico existente de 1.300 bloques cubre hasta 124 s; no se amplía.
-Tampoco cambia el límite de 40 ACK, ni los 20 pares B/E, ni 10.000 Decode, ni los
-4 buffers de audio. El supervisor conserva la fórmula duración+60 s: timeout
-180 s para capturas de 120, 120 s para SILENCE de 60. En replay se contempla
-además el número real de muestras (máximo 184 s de presupuesto), sin truncarlas.
-Completar ventanas no envía Stop: cambiarlo confundiría cancelación con éxito y
-requeriría un protocolo nuevo de drenaje. Se conserva la finalización automática.
+Límites por contrato: PCM 64/124/184 s para duraciones 60/120/180 respectivamente;
+diagnósticos históricos conservan 1.300 bloques, y únicamente 180 s admite 1.840.
+No se amplían 40 ACK, 20 pares B/E, 10.000 Decode, 1.000 hits, 32 timestamps/hit,
+los cuatro buffers de audio ni el límite JSON de 4 MiB. Native rechaza 180 s fuera
+de calibración con consentimiento o replay específico; el CLI general sólo permite
+180 en preflight COLD/.15/--check sin micrófono. Hito 1.5 continúa fijado a 60 s.
+
+El supervisor conserva duración+60 s: 240 s para captura de 180, 180 s para 120,
+120 s para SILENCE de 60. Replay contempla las muestras reales hasta 184 s y un
+presupuesto máximo de 244 s, sin truncarlas. Completar ventanas no envía Stop:
+se conserva la finalización automática y el protocolo de drenaje existente.
 
 ## Nueve evaluaciones y repetición de consistencia
 
@@ -177,8 +182,8 @@ node --import tsx experiments/wake-word/calibration-session.ts compare "$root\ru
 if ($LASTEXITCODE -ne 0) { throw 'RESULTS_INCONSISTENT' }
 ```
 
-Con POSITIVE/SIMILAR de 120 s y SILENCE de 60 s, cada matriz tarda aproximadamente
-15 minutos de audio más inicialización y cleanup.
+Con POSITIVE/SIMILAR de 180 s y SILENCE de 60 s, cada matriz tarda aproximadamente
+21 minutos de audio más inicialización y cleanup.
 La segunda matriz son otras nueve ejecuciones de los mismos datasets, sin nuevas
 capturas. Nunca comparar una matriz consigo misma como prueba de independencia.
 Resultados bajo `runs/<runId>/`: nueve JSON y matrix.json con .15 como referencia,
@@ -203,7 +208,7 @@ contrario falla como ambiguo. El hash de ventanas queda fijado al terminar la to
 antes del barrido, y vuelve a derivarse del reporte original al abrir el dataset.
 
 El analizador histórico Hito 1.5 conserva su contrato de 60 s. Para datasets de
-120 s se utiliza el validador de calibración, que reaplica identidad de runtime,
+120/180 s se utiliza el validador de calibración, que reaplica identidad de runtime,
 modelos, keyword, diagnóstico QPC y contabilidad con la duración declarada.
 
 El punto del hit es el final del bloque que produjo el resultado (granularidad
@@ -330,22 +335,68 @@ comprobación del siguiente B, no promesa sobre fallos futuros. Hasta aprobar es
 contrato de observación/sincronización, la asistencia queda NO-GO. El diagnóstico
 final seguirá siendo obligatorio y ningún aviso podrá convertir un rechazo en PASS.
 
-No hay cambios C++ en este checkpoint: no hace falta recompilar el EXE auditado.
-Si se requiere una compilación nueva, usar los comandos anteriores con un directorio
-nuevo, por ejemplo `.local\wake-word-spike\native-calibration-window-audit`.
-Ejecutar el preflight de 120 s con el EXE y lock de esa misma salida. Después,
+La ampliación a 180 s requiere recompilar C++ y generar un lock nuevo mediante
+el script, en un directorio de salida nuevo. No editar los hashes manualmente.
+Usar los comandos de compilación anteriores y el EXE/lock de esa misma salida. Después,
 sólo con consentimiento explícito por toma:
 
 ```powershell
-node --import tsx experiments/wake-word/native-live.ts $exe $lock COLD 120 --threshold 0.15 --check
+node --import tsx experiments/wake-word/native-live.ts $exe $lock COLD 180 --threshold 0.15 --check
 if ($LASTEXITCODE -ne 0) { throw 'PREFLIGHT_FAILED' }
 node --import tsx experiments/wake-word/calibration-session.ts status
 node --import tsx experiments/wake-word/calibration-session.ts capture $exe $lock POSITIVE
 ```
 
-Se mantienen 20 pares B/E y final automático a 120 s sin Enter adicional. Para una
-repetición manual, empezar ~2 s después de CAPTURE_STARTED, separar inicios ~4–5 s,
-dejar al menos ~2 s entre ACK E y el próximo B y finalizar antes de ~115 s. Son
+Se mantienen 20 pares B/E y final automático a 180 s sin Enter adicional. Para una
+repetición manual, empezar ~2 s después de CAPTURE_STARTED, separar inicios ~7–8 s,
+dejar al menos ~2 s entre ACK E y el próximo B y finalizar antes de ~175 s. Son
 pautas operativas conservadoras, no READY ni garantía de validez: analizar los
 JSON antes de repetir si una captura falla. No modificar marcas ni regenerar
 session.json para convertir una sesión rechazada en dataset.
+
+
+## Límites de JSON, memoria y RSS — ampliación a 180 s
+
+Sólo crecen el buffer privado de retención y la capacidad de registros diagnósticos
+para el nuevo contrato; WASAPI, resampler/FIR, cola, pool, Feed, modelo y parámetros
+permanecen iguales. No hay telemetría nueva ni READY_FOR_NEXT_WINDOW.
+
+Una cota conservadora de serialización utiliza simultáneamente 1.840 bloques,
+10.000 decodificaciones en cada una de las dos listas, 1.000 hits de 32 timestamps,
+40 marcadores y ACK, nearZeroPercent del reporte limpio, y 25 caracteres **entre
+comillas** para cada float (sobreestima el número sin comillas a precisión 17).
+Más 65.536 bytes para cabeceras/campos fijos: **4.000.695 bytes**, frente a
+4.194.304 disponibles; margen 193.609 bytes. La regresión comprueba esta cota y
+que la cabecera de control cabe en esa reserva. Es cálculo del esquema, no medida
+de una captura real. Los límites de lectura/escritura de JSON no se elevan.
+
+El payload de retención es como máximo 11.776.000 bytes; longitud y SHA se verifican
+al cargar, en Native antes/después del replay y mediante hash del PCM procesado en
+Feed. El padre vuelve a validar el dataset y su identidad después del replay.
+Se conservan rechazo de mutación, orden, contabilidad y limpieza por error/Stop.
+
+La reserva privada permanece en memoria hasta destruir Shared; wipe borra las
+muestras, pero no garantiza que el allocator devuelva inmediatamente capacidad al
+SO. Las lecturas/hash también usan copias finitas: Native puede mantener dos
+lecturas de hasta 11.776.000 bytes simultáneamente durante su comprobación final de
+replay (23.552.000 bytes de payload). Esto no es el RSS total: se suman runtime,
+modelo, contenedores y proceso supervisor. El límite de bloques, Decode/hits y la
+reserva inicial mantienen el almacenamiento del harness acotado; no se introduce
+crecimiento sin límite ni disco continuo. El consumo real requiere Windows.
+
+Se mantienen las **12 entradas RSS** para no cambiar otro buffer ni el esquema.
+El cálculo histórico usa min(11, floor(muestras/160000)): entradas 0–10 corresponden
+a rangos previos a 110 s; la última acumula máximos desde 110 s hasta el final,
+incluido el margen de muestras. **No son 18 intervalos independientes de 10 s.**
+Sigue disponible el pico RSS del proceso informado por Windows. Este perfil grueso
+es suficiente como diagnóstico acotado de máximos, pero no permite localizar cuándo
+ocurrió un pico después de 110 s ni demuestra ausencia de fugas sostenidas.
+Ampliar o versionar esa serie temporal requiere otra aprobación.
+
+Tests en Linux usan exclusivamente metadatos/PCM sintéticos y C++ portátil; no
+validan MSVC, WASAPI ni precisión acústica. En Windows comprobar compilación x64,
+preflight, consentimiento de 180 s, 40 ACK, fin automático, JSON por debajo de 4 MiB,
+cero overflow/pérdidas y cleanup. Un dataset incompleto sigue rechazado aunque
+haya hits. Retención siete días y eliminación manual verificada permanecen intactas.
+Los datasets antiguos conservan hashes/locks; para ejecutar con su binario original
+usar el checkout compatible. No parchear locks para aceptar otro ejecutable.

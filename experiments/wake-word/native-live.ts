@@ -4,6 +4,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { calibrationBlockLimit } from './calibration-limits.js';
 import { NativeMarkers, validateFnDiagnostics, type HostMarker } from './native-fn-diagnostics.js';
 import { createInterface } from 'node:readline';
 import { artifactSha256, runtimeCommit } from './native-benchmark.js';
@@ -36,6 +37,8 @@ export function cleanLiveReport(r:any, expected:any, mode:'COLD'|'WARM', source:
   const effectiveConfiguration=liveConfiguration(threshold);
   if(r?.schema!==1 || !['COMPLETED','CANCELLED','FAILED'].includes(r.state))reject();
   if(r.state==='FAILED' && !r.backend)return {schema:1,state:'FAILED',code:codes.has(r.code)?r.code:'NATIVE_LIVE_FAILED'};
+  if(seconds===180&&(mode!=='COLD'||!['MICROPHONE','REPLAY'].includes(source)||r?.calibration?.schema!==1
+    ||r.calibration.mode!==(source==='MICROPHONE'?'CAPTURE':'REPLAY')||(source==='MICROPHONE'?threshold!==.15:![.15,.1,.05].includes(threshold))))reject();
   if(r.backend!=='NATIVE_LIVE' || r.mode!==mode || r.source!==source || !same(r.configuration,effectiveConfiguration)
     || !same(r.modelHashes,expected.modelHashes) || r.keywordSha256!==expected.keywordSha256
     || r.runtime?.version!=='2.0.0' || !Array.isArray(r.runtime.dlls) || r.runtime.dlls.length!==2
@@ -67,7 +70,7 @@ export function cleanLiveReport(r:any, expected:any, mode:'COLD'|'WARM', source:
   });
   let details:any=null;
   if(r.details!==null){
-    if(!Array.isArray(r.details?.decodes)||r.details.decodes.length>10000||!Array.isArray(r.details.blocks)||r.details.blocks.length>1300)reject();
+    if(!Array.isArray(r.details?.decodes)||r.details.decodes.length>10000||!Array.isArray(r.details.blocks)||r.details.blocks.length>calibrationBlockLimit(seconds))reject();
     details={decodes:r.details.decodes.map((d:any)=>nums(d,['block','wallMs','threadCpuMs'])),blocks:r.details.blocks.map((b:any)=>nums(b,['sequence','wallMs','decodeCalls','rawHits']))};
   }
   const conversion=nums(r.conversion,['outputRate','firTaps','filterDelayMs','outputRms','outputPeak','outputClipped','appendedSamples']);
@@ -168,8 +171,10 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   const controller=new AbortController(),stop=()=>controller.abort();
   try{
     const [exe,lock,mode,duration,...flags]=process.argv.slice(2),seconds=Number(duration);
-    if(process.platform!=='win32'||process.arch!=='x64'||!exe||!lock||!['COLD','WARM'].includes(mode??'')||!Number.isInteger(seconds)||seconds<1||seconds>120)throw Error();
+    if(process.platform!=='win32'||process.arch!=='x64'||!exe||!lock||!['COLD','WARM'].includes(mode??'')||!Number.isInteger(seconds)||seconds<1||(seconds>120&&seconds!==180))throw Error();
     const {check,detail,replay,threshold,thresholdSpecified,diagnosticWindows=false}=parseLiveFlags(flags);
+    // 180 s here is a read-only preflight only; capture requires calibration consent.
+    if(seconds===180&&(!check||mode!=='COLD'||threshold!==.15||replay||diagnosticWindows))throw new SpikeError('ARGUMENT_INVALID');
     if(diagnosticWindows&&(mode!=='COLD'||threshold!==.15||seconds!==60||replay))throw new SpikeError('ARGUMENT_INVALID');
     const ready=await livePreflight(exe,lock,replay,threshold);
     if(check)console.log(JSON.stringify({state:'PREFLIGHT_OK',mode,seconds,source:replay?'REPLAY':'MICROPHONE',configuration:liveConfiguration(threshold),...ready.expected}));

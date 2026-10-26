@@ -51,6 +51,7 @@ struct Shared {
   double thresholdFloat32 = -1;
   bool replay = false;
   bool calReplay=false,calSave=false,calPersisted=false;
+  size_t calLimit=atlas_cal::shortMaxSamples,diagnosticLimit=1300;
   size_t calSamples=0;std::string calPath,calHash;atlas_cal::Buffer recording;
   std::string wavHash, pcmHash, processedPcmHash;
   live::Format format{};
@@ -302,18 +303,18 @@ static std::filesystem::path CalPath(const std::string &text) {
   }
   if(!local)throw Failure{"CALIBRATION_PATH_INVALID"};return path;
 }
-static std::vector<unsigned char> CalRead(const std::filesystem::path &path){
+static std::vector<unsigned char> CalRead(const std::filesystem::path &path,size_t maximum=atlas_cal::maxSamples){
   std::ifstream file(path,std::ios::binary|std::ios::ate);
-  if(!file||file.tellg()<=0||file.tellg()>static_cast<std::streamoff>(atlas_cal::maxSamples*4))throw Failure{"CALIBRATION_PCM_INVALID"};
+  if(!file||file.tellg()<=0||file.tellg()>static_cast<std::streamoff>(maximum*4))throw Failure{"CALIBRATION_PCM_INVALID"};
   const auto n=static_cast<size_t>(file.tellg());std::vector<unsigned char> bytes(n);file.seekg(0);
   if(!file.read(reinterpret_cast<char *>(bytes.data()),static_cast<std::streamsize>(n))){
     volatile unsigned char *p=bytes.data();for(size_t i=0;i<bytes.size();i++)p[i]=0;throw Failure{"CALIBRATION_PCM_INVALID"};
   }
   return bytes;
 }
-static std::string CalFileHash(const std::filesystem::path &path){
-  auto bytes=CalRead(path);struct Wipe{std::vector<unsigned char>&b;~Wipe(){volatile unsigned char*p=b.data();for(size_t i=0;i<b.size();i++)p[i]=0;}}wipe{bytes};
-  if(bytes.size()>atlas_cal::maxSamples*4)throw Failure{"CALIBRATION_PCM_INVALID"};return Hash(bytes.data(),bytes.size());
+static std::string CalFileHash(const std::filesystem::path &path,size_t maximum=atlas_cal::maxSamples){
+  auto bytes=CalRead(path,maximum);struct Wipe{std::vector<unsigned char>&b;~Wipe(){volatile unsigned char*p=b.data();for(size_t i=0;i<b.size();i++)p[i]=0;}}wipe{bytes};
+  if(bytes.size()>maximum*4)throw Failure{"CALIBRATION_PCM_INVALID"};return Hash(bytes.data(),bytes.size());
 }
 static void SaveCalibration(Shared &s){
   const auto path=CalPath(s.calPath);static_assert(sizeof(float)==4,"F32 required");
@@ -323,14 +324,14 @@ static void SaveCalibration(Shared &s){
   const bool ok=WriteFile(file,s.recording.data(),n,&written,nullptr)&&written==n&&FlushFileBuffers(file);
   const bool closed=CloseHandle(file)!=FALSE;if(!ok||!closed)throw Failure{"CALIBRATION_WRITE_FAILED"};
   s.calHash=Hash(reinterpret_cast<const unsigned char *>(s.recording.data()),n);
-  if(CalFileHash(path)!=s.calHash)throw Failure{"PCM_HASH_MISMATCH"};s.calSamples=s.recording.size();s.calPersisted=true;
+  if(CalFileHash(path,s.calLimit)!=s.calHash)throw Failure{"PCM_HASH_MISMATCH"};s.calSamples=s.recording.size();s.calPersisted=true;
 }
 static void CalibrationReplay(Shared &s,Progress &progress) noexcept {
   try{
     const auto path=CalPath(s.calPath);const auto attributes=GetFileAttributesW(path.c_str());
     if(attributes==INVALID_FILE_ATTRIBUTES||(attributes&(FILE_ATTRIBUTE_REPARSE_POINT|FILE_ATTRIBUTE_DIRECTORY)))throw Failure{"CALIBRATION_PATH_INVALID"};
     if(std::filesystem::file_size(path)!=s.calSamples*4)throw Failure{"CALIBRATION_PCM_INVALID"};
-    auto bytes=CalRead(path);struct Wipe{std::vector<unsigned char>&b;~Wipe(){volatile unsigned char *p=b.data();for(size_t i=0;i<b.size();i++)p[i]=0;}}wipe{bytes};
+    auto bytes=CalRead(path,s.calLimit);struct Wipe{std::vector<unsigned char>&b;~Wipe(){volatile unsigned char *p=b.data();for(size_t i=0;i<b.size();i++)p[i]=0;}}wipe{bytes};
     if(bytes.size()!=s.calSamples*4||Hash(bytes.data(),bytes.size())!=s.calHash)throw Failure{"PCM_HASH_MISMATCH"};
     s.pcmHash=s.calHash;s.format={16000,1,4,32,live::Kind::float32};s.firTaps=1;
     live::Assembler assembler;const double start=Wall();s.started.store(true);progress.write("REPLAY_STARTED\n");
@@ -346,7 +347,7 @@ static void CalibrationReplay(Shared &s,Progress &progress) noexcept {
       }
     }
     s.tail=assembler.tail();s.captureWallMs=Wall()-start;
-    if(CalFileHash(path)!=s.calHash)throw Failure{"PCM_HASH_MISMATCH"};
+    if(CalFileHash(path,s.calLimit)!=s.calHash)throw Failure{"PCM_HASH_MISMATCH"};
   }catch(const Failure&e){s.fail(e.code);}catch(const live::Error&e){s.fail(e.code);}catch(...){s.fail("CALIBRATION_REPLAY_FAILED");}
   s.captureFinished.store(true,std::memory_order_release);SetEvent(s.captureDone.h);SetEvent(s.data.h);progress.write("REPLAY_STOPPED\n");
 }
@@ -404,7 +405,7 @@ static void Inference(Shared &s, char **argv, bool warm, Progress &progress, con
         if(replayHash)replayHash->add(block.pcm.data(),block.size);
         atlas_fn::Block *diagnostic=nullptr;
         if(s.fnEnabled){
-          if(s.diagnosticBlocks.size()>=1300)throw Failure{"DIAGNOSTIC_LIMIT"};
+          if(s.diagnosticBlocks.size()>=s.diagnosticLimit)throw Failure{"DIAGNOSTIC_LIMIT"};
           const double statsStart=Wall();atlas_fn::Block d;
           d.sequence=block.sequence;d.sampleStart=s.run.samples;d.sampleEnd=d.sampleStart+block.size;
           d.qpcEndMs=block.captureEndWallMs-s.fnOrigin;d.qpcStartMs=d.qpcEndMs-block.size/16.0;
@@ -567,18 +568,18 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
   const bool warm = !std::strcmp(argv[6],"WARM");
   if (!warm && std::strcmp(argv[6],"COLD")) throw Failure{"ARGUMENT_INVALID"};
   char *end = nullptr; const long seconds = std::strtol(argv[7],&end,10);
-  if (!end || *end || seconds<1 || seconds>120 || std::strcmp(argv[5],LiveKeyword(threshold).c_str())) throw Failure{"ARGUMENT_INVALID"};
-  if(trial&&(!atlas_fn::trialId(trial)||warm||replay||threshold!=.15||(seconds!=60&&!(calSave&&seconds==120))))throw Failure{"ARGUMENT_INVALID"};
+  if (!end || *end || seconds<1 || (seconds>120 && !(seconds==180&&(calSave||calReplay))) || std::strcmp(argv[5],LiveKeyword(threshold).c_str())) throw Failure{"ARGUMENT_INVALID"};
+  if(trial&&(!atlas_fn::trialId(trial)||warm||replay||threshold!=.15||(seconds!=60&&!(calSave&&(seconds==120||seconds==180)))))throw Failure{"ARGUMENT_INVALID"};
   size_t calSamples=0;
   if(calReplay){
     if(replay||calSave||trial||consent||warm||threshold==.25||!calCount||!calSha||std::strlen(calSha)!=64||std::strspn(calSha,"0123456789abcdef")!=64)throw Failure{"ARGUMENT_INVALID"};
     char *tail=nullptr;const unsigned long n=std::strtoul(calCount,&tail,10);
-    if(!n||n>atlas_cal::maxSamples||!tail||*tail||std::to_string(n)!=calCount)throw Failure{"ARGUMENT_INVALID"};calSamples=n;CalPath(calReplay);
+    if(!n||n>atlas_cal::sampleLimit(static_cast<int>(seconds))||!tail||*tail||std::to_string(n)!=calCount)throw Failure{"ARGUMENT_INVALID"};calSamples=n;CalPath(calReplay);
   }else if(calCount||calSha)throw Failure{"ARGUMENT_INVALID"};
-  if(calSave&&(!trial||!consent||std::strcmp(consent,trial)||warm||replay||calReplay||threshold!=.15||(seconds!=60&&seconds!=120)))throw Failure{"ARGUMENT_INVALID"};
+  if(calSave&&(!trial||!consent||std::strcmp(consent,trial)||warm||replay||calReplay||threshold!=.15||(seconds!=60&&seconds!=120&&seconds!=180)))throw Failure{"ARGUMENT_INVALID"};
   if(calKind&&!calSave)throw Failure{"ARGUMENT_INVALID"};
   if(calSave){
-    if(calKind){try{if(seconds!=atlas_cal::captureSeconds(calKind))throw Failure{"ARGUMENT_INVALID"};}catch(const atlas_cal::Error &){throw Failure{"ARGUMENT_INVALID"};}}
+    if(calKind){try{if(seconds!=atlas_cal::captureSeconds(calKind)&&!(seconds==120&&atlas_cal::captureSeconds(calKind)==180))throw Failure{"ARGUMENT_INVALID"};}catch(const atlas_cal::Error &){throw Failure{"ARGUMENT_INVALID"};}}
     else if(seconds!=60)throw Failure{"ARGUMENT_INVALID"};
   }
   if(consent&&!calSave)throw Failure{"ARGUMENT_INVALID"};
@@ -590,9 +591,11 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
   std::vector<std::string> hashes;for(int i=1;i<=4;i++)hashes.push_back(FileHash(std::filesystem::u8path(argv[i])));
   const std::string keyword=argv[5],keywordHash=Hash(reinterpret_cast<const unsigned char *>(keyword.data()),keyword.size());
   Shared s;s.replay=replay!=nullptr||calReplay!=nullptr;
-  if(calSave){CalPath(calSave);s.calSave=true;s.calPath=calSave;s.recording.prepare(seconds==120?atlas_cal::maxSamples:atlas_cal::shortMaxSamples);}
+  if(calSave||calReplay)s.calLimit=atlas_cal::sampleLimit(static_cast<int>(seconds));
+  if(seconds==180&&(calSave||calReplay))s.diagnosticLimit=1840;
+  if(calSave){CalPath(calSave);s.calSave=true;s.calPath=calSave;s.recording.prepare(s.calLimit);}
   if(calReplay){s.calReplay=true;s.calPath=calReplay;s.calSamples=calSamples;s.calHash=calSha;}
-  if(trial){s.fnEnabled=true;s.trialId=trial;s.fnOrigin=Wall();s.markers.reserve(40);s.diagnosticBlocks.reserve(1300);s.diagnosticDecodes.reserve(10000);progress.startAsync();}controlState.store(&s);
+  if(trial){s.fnEnabled=true;s.trialId=trial;s.fnOrigin=Wall();s.markers.reserve(40);s.diagnosticBlocks.reserve(s.diagnosticLimit);s.diagnosticDecodes.reserve(10000);progress.startAsync();}controlState.store(&s);
   if(!SetConsoleCtrlHandler(Control,TRUE)){controlState.store(nullptr);throw Failure{"CONTROL_HANDLER_FAILED"};}
   struct ControlGuard {~ControlGuard(){controlState.store(nullptr);SetConsoleCtrlHandler(Control,FALSE);while(controlCalls.load())std::this_thread::yield();}} controlGuard;
   std::thread inference;

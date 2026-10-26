@@ -8,10 +8,10 @@ import { randomBytes } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { EventEmitter } from 'node:events';
-import { runLiveChild } from './native-live.js';
+import { runLiveChild,cleanLiveReport } from './native-live.js';
 import { sha,sdkHashes } from './benchmark-contract.js';
 import { liveConfiguration,liveKeyword } from './native-live-config.js';
-import { validatePcm,retention,retentionMs,bindCalibrationWindows,validateCalReplay,associateCalibration,digest,calibrationFormat,captureSeconds,sessionSeconds,replaySeconds,validateCalCapture,maxCalibrationSamples,shortCalibrationSamples } from './calibration-contract.js';
+import { validatePcm,retention,retentionMs,bindCalibrationWindows,validateCalReplay,associateCalibration,digest,calibrationFormat,captureSeconds,sessionSeconds,replaySeconds,validateCalCapture,maxCalibrationSamples,shortCalibrationSamples,longCalibrationSamples,calibrationMaxSamples } from './calibration-contract.js';
 import { auditCalibrationSession,requireConsent,calibrationRoot,safeLocal,eraseAcoustic,retentionStatus,loadCalibrationSession,compareCalibrationMatrices } from './calibration-session.js';
 
 const trial='a'.repeat(32),models=Object.fromEntries(['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].map(k=>[k,sha(k)]));
@@ -22,6 +22,7 @@ function captureReport(seconds=60):any{
   const markers=Array.from({length:40},(_,i)=>({id:i+1,kind:i%2?'E':'B',qpcMs:2000+Math.floor(i/2)*2500+(i%2?600:0)}));
   return {schema:1,backend:'NATIVE_LIVE',source:'MICROPHONE',state:'COMPLETED',code:'CAPTURE_COMPLETED',mode:'COLD',configuration:liveConfiguration(.15),
     thresholdEvidence:{spotterArgumentFloat32:Math.fround(.15)},runtime:{version:'2.0.0',dllHashes:sdkHashes},modelHashes:models,keywordSha256:sha(liveKeyword(.15)),
+    ...(seconds>=180?{calibration:{schema:1,mode:'CAPTURE',persisted:false,samples:0,sha256:''}}:{}),
     wavSha256:null,pcmSha256:null,processedPcmSha256:null,format:{rate:48000,channels:1,containerBits:32,validBits:32,kind:'FLOAT32',selectedChannel:0,endpointBufferFrames:480},
     conversion:{outputRate:16000,firTaps:385,filterDelayMs:4,outputRms:0,outputPeak:0,outputClipped:0,appendedSamples:0},
     capture:{...zeros('unconvertedFrames silentFrames unprocessedSamples overflows discontinuities initialDiscontinuities sequenceErrors'),requestedSeconds:seconds,wallMs:seconds*1000,
@@ -52,11 +53,11 @@ test('capture consent is unique, explicit, per invocation and never an inferred 
   let calls=0;await requireConsent('SILENCE',trial,async text=>{calls++;assert.match(text,/7 días/);return `CAPTURAR SILENCE ${trial}`;});assert.equal(calls,1);
   await assert.rejects(requireConsent('SIMILAR',trial,async()=>`CAPTURAR POSITIVE ${trial}`));
   for(const kind of ['POSITIVE','SIMILAR'] as const)await requireConsent(kind,trial,async text=>{
-    assert.match(text,/120 s/);return `CAPTURAR ${kind} ${trial}`;
+    assert.match(text,/180 s/);return `CAPTURAR ${kind} ${trial}`;
   });
 });
-test('duration policy is 120 s for positive/similar, 60 s for silence; legacy accepted data remains readable',()=>{
-  for(const kind of ['POSITIVE','SIMILAR'] as const){assert.equal(captureSeconds(kind),120);assert.equal(sessionSeconds({kind}),60);
+test('duration policy is 180 s for positive/similar, 60 s for silence; legacy accepted data remains readable',()=>{
+  for(const kind of ['POSITIVE','SIMILAR'] as const){assert.equal(captureSeconds(kind),180);assert.equal(sessionSeconds({kind}),60);
     assert.equal(sessionSeconds({kind,requestedSeconds:120}),120);}
   assert.equal(captureSeconds('SILENCE'),60);assert.throws(()=>sessionSeconds({kind:'SILENCE',requestedSeconds:120}),{message:'CAL_DURATION_INVALID'});
   for(const seconds of [0,90,121,NaN])assert.throws(()=>sessionSeconds({kind:'POSITIVE',requestedSeconds:seconds}));
@@ -92,7 +93,7 @@ test('120-second supervision permits capture plus preparation budget; cancellati
   t.mock.timers.enable({apis:['setTimeout']});
   const child:any=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.stdin=new EventEmitter();
   const writes:string[]=[];let kills=0;child.stdin.write=(v:string)=>writes.push(v);child.stdin.destroy=()=>{};child.kill=()=>{kills++;child.emit('close',2);};
-  const controller=new AbortController(),p=runLiveChild('owned.exe',[],captureSeconds('POSITIVE'),controller.signal,()=>{},()=>child);
+  const controller=new AbortController(),p=runLiveChild('owned.exe',[],120,controller.signal,()=>{},()=>child);
   const failure=assert.rejects(p,{message:'NATIVE_LIVE_TIMEOUT'});
   t.mock.timers.tick(179999);assert.equal(writes.length,0);t.mock.timers.tick(1);assert.deepEqual(writes,['S']);
   t.mock.timers.tick(4999);assert.equal(kills,0);t.mock.timers.tick(1);assert.equal(kills,1);await failure;
@@ -166,11 +167,11 @@ test('storage refuses links and escape paths without reading or deleting their t
   }finally{await rm(link,{force:true});await rm(dir,{recursive:true,force:true});}
 });
 test('a complete synthetic dataset rebinds report, PCM and annotations; editing any identity cannot force equivalence',async()=>{
-  for(const seconds of [60,120]){
+  for(const seconds of [60,120,180]){
   const session=randomBytes(16).toString('hex'),dir=join(calibrationRoot,'captures',session);await mkdir(dir,{recursive:true});
   const samples=seconds*16000,pcm=Buffer.alloc(samples*4),r=captureReport(seconds);r.fnDiagnostics.trialId=session;
   r.calibration={schema:1,mode:'CAPTURE',persisted:true,samples,sha256:sha(pcm)};
-  const now=Date.now(),consent={schema:1,contract:'ATLAS_CALIBRATION_F32LE_V1',trialId:session,kind:'POSITIVE',...(seconds===120?{requestedSeconds:120}:{}),consent:'EXPLICIT_PER_CAPTURE',
+  const now=Date.now(),consent={schema:1,contract:'ATLAS_CALIBRATION_F32LE_V1',trialId:session,kind:'POSITIVE',...(seconds!==60?{requestedSeconds:seconds}:{}),consent:'EXPLICIT_PER_CAPTURE',
     createdAtUtc:new Date(now).toISOString(),expiresAtUtc:new Date(now+retentionMs).toISOString()};
   const reportBytes=Buffer.from(JSON.stringify(r)),windows=bindCalibrationWindows(r,'POSITIVE');
   const manifest={...consent,state:'COMPLETE',format:calibrationFormat,samples,pcmSha256:sha(pcm),reportSha256:sha(reportBytes),windows,annotationSha256:digest(windows),modelHashes:models,lockSha256:sha('lock')};
@@ -202,7 +203,7 @@ test('portable Native tap preserves byte values and order, refuses overflow, and
   if(process.platform!=='linux'){t.skip('Portable compiler check; MSVC separate');return;}
   const dir=await mkdtemp(join(tmpdir(),'cal-core-'));
   try{const cpp=join(dir,'test.cc'),exe=join(dir,'test');
-    await writeFile(cpp,`#include "${join(process.cwd(),'experiments/wake-word/native-calibration-core.h')}"\n#include <iostream>\nint main(){if(atlas_cal::captureSeconds("POSITIVE")!=120||atlas_cal::captureSeconds("SIMILAR")!=120||atlas_cal::captureSeconds("SILENCE")!=60)return 5;atlas_cal::Buffer b;b.prepare();float p[1600]{};p[0]=-0.0f;p[1]=.123456789f;b.append(p,1600,0);if(std::memcmp(b.data(),p,sizeof(p)))return 1;bool failed=false;try{b.append(p,1,0);}catch(...){failed=true;}if(!failed)return 2;b.wipe();if(b.size())return 3;b.prepare(atlas_cal::maxSamples);for(size_t i=0;i<atlas_cal::maxSamples/1600;i++)b.append(p,1600,i*1600);failed=false;try{b.append(p,1,b.size());}catch(...){failed=true;}if(!failed)return 4;b.wipe();atlas_cal::Buffer shortBuffer;shortBuffer.prepare();for(size_t i=0;i<atlas_cal::shortMaxSamples/1600;i++)shortBuffer.append(p,1600,i*1600);failed=false;try{shortBuffer.append(p,1,shortBuffer.size());}catch(...){failed=true;}if(!failed)return 6;shortBuffer.wipe();std::cout<<"PASS";}`);
+    await writeFile(cpp,`#include "${join(process.cwd(),'experiments/wake-word/native-calibration-core.h')}"\n#include <iostream>\nint main(){if(atlas_cal::captureSeconds("POSITIVE")!=180||atlas_cal::captureSeconds("SIMILAR")!=180||atlas_cal::captureSeconds("SILENCE")!=60)return 5;atlas_cal::Buffer b;b.prepare();float p[1600]{};p[0]=-0.0f;p[1]=.123456789f;b.append(p,1600,0);if(std::memcmp(b.data(),p,sizeof(p)))return 1;bool failed=false;try{b.append(p,1,0);}catch(...){failed=true;}if(!failed)return 2;b.wipe();if(b.size())return 3;b.prepare(atlas_cal::maxSamples);for(size_t i=0;i<atlas_cal::maxSamples/1600;i++)b.append(p,1600,i*1600);failed=false;try{b.append(p,1,b.size());}catch(...){failed=true;}if(!failed)return 4;b.wipe();atlas_cal::Buffer shortBuffer;shortBuffer.prepare();for(size_t i=0;i<atlas_cal::shortMaxSamples/1600;i++)shortBuffer.append(p,1600,i*1600);failed=false;try{shortBuffer.append(p,1,shortBuffer.size());}catch(...){failed=true;}if(!failed)return 6;shortBuffer.wipe();std::cout<<"PASS";}`);
     await promisify(execFile)('g++',['-std=c++17','-O2','-Wall','-Wextra','-Werror',cpp,'-o',exe]);
     assert.equal((await promisify(execFile)(exe)).stdout,'PASS');
   }finally{await rm(dir,{recursive:true,force:true});}
@@ -265,4 +266,103 @@ test('JSON-only audit works with no acoustic file and preserves original legacy 
     assert.equal(await readFile(join(dir,'capture.json'),'utf8'),reportText);assert.equal(await readFile(join(dir,'failure.json'),'utf8'),failureText);
     assert.doesNotMatch(JSON.stringify(audit),/qpcStartMs|samples|modelHashes|encoder|capture.f32le/);
   }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('180-second limits preserve 60/120 storage ceilings, exact F32LE hashing and seven-day retention',()=>{
+  assert.equal(longCalibrationSamples*4,11776000);
+  for(const [seconds,maximum] of [[60,shortCalibrationSamples],[120,maxCalibrationSamples],[180,longCalibrationSamples]]){
+    assert.equal(calibrationMaxSamples(seconds!),maximum);
+    assert.equal(replaySeconds({kind:'POSITIVE',requestedSeconds:seconds,samples:maximum}),seconds!+4);
+    assert.throws(()=>replaySeconds({kind:'POSITIVE',requestedSeconds:seconds,samples:maximum!+1}),{message:'CAL_PCM_LENGTH_INVALID'});
+  }
+  assert.throws(()=>sessionSeconds({kind:'SILENCE',requestedSeconds:180}),{message:'CAL_DURATION_INVALID'});
+  assert.throws(()=>sessionSeconds({kind:'POSITIVE',requestedSeconds:181}));
+  const pcm=Buffer.alloc(longCalibrationSamples*4);pcm.writeFloatLE(-0,0);pcm.writeFloatLE(.125,pcm.length-4);
+  const before=sha(pcm);validatePcm(pcm,before,longCalibrationSamples,180);assert.equal(sha(pcm),before);
+  assert.throws(()=>validatePcm(pcm,before,longCalibrationSamples,120),{message:'CAL_PCM_LENGTH_INVALID'});
+  pcm.writeFloatLE(.25,pcm.length-4);assert.throws(()=>validatePcm(pcm,before,longCalibrationSamples,180),{message:'CAL_PCM_HASH_MISMATCH'});pcm.fill(0);
+  const created='2026-10-01T00:00:00.000Z',expires='2026-10-08T00:00:00.000Z';
+  assert.equal(retention(created,expires,Date.parse(expires)-1),'WITHIN_RETENTION');assert.equal(retention(created,expires,Date.parse(expires)),'EXPIRED');
+});
+test('180 s permits 20 well separated windows through second 155; 28 ALIGNED ACKs remain insufficient',()=>{
+  const r=captureReport(180);
+  for(let i=0;i<40;i++){const qpc=3000+Math.floor(i/2)*8000+(i%2?800:0);r.fnDiagnostics.markers[i].qpcMs=qpc;r.fnDiagnostics.hostMarkers[i].qpcMs=qpc;}
+  const clean=validateCalCapture(r,'POSITIVE',180),windows=bindCalibrationWindows(clean,'POSITIVE');
+  assert.equal(windows.length,20);assert.ok(windows[19].end.upper>150*16000);
+  for(let i=1;i<20;i++)assert.ok(windows[i].begin.lower-4000>windows[i-1].end.upper+16000);
+  assert.equal(auditCalibrationAlignment(r,'POSITIVE').state,'ALIGNMENT_VALID');
+  const incomplete=structuredClone(r);incomplete.fnDiagnostics.markers.length=28;incomplete.fnDiagnostics.hostMarkers.length=28;
+  assert.throws(()=>bindCalibrationWindows(incomplete,'POSITIVE'),e=>e instanceof CalibrationAlignmentError&&e.diagnostics[0]?.reason==='INSUFFICIENT_EVIDENCE');
+  r.state='CANCELLED';r.code='CAPTURE_INCOMPLETE';r.capture.wallMs=179999;
+  assert.throws(()=>bindCalibrationWindows(validateCalCapture(r,'POSITIVE',180),'POSITIVE'),{message:'CAL_CAPTURE_INCOMPLETE'});
+});
+test('180-second calibration replay preserves sample/hash identity, hit positions, counters and cleanup',()=>{
+  for(const threshold of [.15,.1,.05]){
+    const r=replayReport(threshold,[27,46,1591],180),m={kind:'POSITIVE',requestedSeconds:180,samples:180*16000,pcmSha256:r.pcmSha256,modelHashes:models};
+    const expected={modelHashes:models,keywordSha256:sha(liveKeyword(threshold))};
+    const before=JSON.stringify(r);assert.equal(validateCalReplay(r,expected,m,threshold).capture.processedBlocks,1800);assert.equal(JSON.stringify(r),before);
+    for(const mutate of [(v:any)=>v.pcmSha256='0'.repeat(64),(v:any)=>v.processedPcmSha256='0'.repeat(64),
+      (v:any)=>v.cleanup.threadsJoined=false,(v:any)=>v.capture.processedSamples--,(v:any)=>v.positions.reverse()]){
+      const bad=structuredClone(r);mutate(bad);assert.throws(()=>validateCalReplay(bad,expected,m,threshold));
+    }
+    assert.throws(()=>validateCalReplay(r,expected,{...m,requestedSeconds:120},threshold));
+  }
+});
+test('long diagnostic cap is exactly 1840 and cannot widen legacy 1300-record contracts',()=>{
+  const r=captureReport(184);r.capture.requestedSeconds=180;
+  assert.equal(validateCalCapture(r,'SIMILAR',180).fnDiagnostics.blocks.length,1840);
+  const extra=captureReport(184.1);extra.capture.requestedSeconds=180;assert.throws(()=>validateCalCapture(extra,'SIMILAR',180));
+  for(const seconds of [60,120]){
+    const bad=structuredClone(r);bad.capture.requestedSeconds=seconds;
+    assert.throws(()=>validateCalCapture(bad,'POSITIVE',seconds));
+  }
+  const replay=replayReport(.15,[],184);replay.capture.requestedSeconds=180;
+  const m={kind:'POSITIVE',requestedSeconds:180,samples:184*16000,pcmSha256:replay.pcmSha256,modelHashes:models};
+  assert.equal(validateCalReplay(replay,{modelHashes:models,keywordSha256:sha(liveKeyword(.15))},m,.15).details.blocks.length,1840);
+});
+test('180-second watchdog allows 240 s and preserves cooperative cancellation, Stop cleanup and 5 s fallback',async(t)=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const child:any=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.stdin=new EventEmitter();
+  const writes:string[]=[];let kills=0;child.stdin.write=(value:string)=>writes.push(value);child.stdin.destroy=()=>{};child.kill=()=>{kills++;child.emit('close',2);};
+  const p=runLiveChild('owned.exe',[],180,new AbortController().signal,()=>{},()=>child),failure=assert.rejects(p,{message:'NATIVE_LIVE_TIMEOUT'});
+  t.mock.timers.tick(239999);assert.equal(writes.length,0);t.mock.timers.tick(1);assert.deepEqual(writes,['S']);
+  t.mock.timers.tick(4999);assert.equal(kills,0);t.mock.timers.tick(1);await failure;assert.equal(kills,1);
+  const stopped:any=new EventEmitter();stopped.stdout=new EventEmitter();stopped.stderr=new EventEmitter();stopped.stdin=new EventEmitter();
+  stopped.stdin.write=()=>queueMicrotask(()=>{stopped.stdout.emit('data',Buffer.from('{"state":"CANCELLED"}'));stopped.emit('close',130);});stopped.stdin.destroy=()=>{};
+  stopped.kill=()=>assert.fail('cooperative cancellation must not kill');const controller=new AbortController();
+  const q=runLiveChild('owned.exe',[],180,controller.signal,()=>{},()=>stopped);controller.abort();assert.equal((await q).exitCode,130);
+});
+test('schema serialization upper bound fits unchanged 4 MiB even at every diagnostic/hit ceiling',()=>{
+  // Quoted 25-character floats overestimate numeric encodings (C++ precision 17).
+  // Also include cleaned nearZeroPercent and host ACKs absent from raw Native JSON.
+  const f='9'.repeat(25),block={sequence:1839,sampleStart:2942400,sampleEnd:2944000,samples:1600,nearZero:1600,clipped:1600,invalid:1600,
+    completed:false,decodeCalls:10000,rawHits:1000,...Object.fromEntries('qpcStartMs qpcEndMs sumSquares rms peak metricsWallMs nearZeroPercent'.split(' ').map(k=>[k,f]))};
+  const arrays={fnDiagnostics:{blocks:Array(1840).fill(block),decodes:Array(10000).fill({block:1839,startMs:f,endMs:f}),
+    markers:Array(40).fill({id:40,kind:'B',qpcMs:f}),hostMarkers:Array(40).fill({id:40,kind:'B',acknowledged:false,qpcMs:f,roundTripMs:f})},
+    details:{blocks:Array(1840).fill({sequence:1839,wallMs:f,decodeCalls:10000,rawHits:1000}),decodes:Array(10000).fill({block:1839,wallMs:f,threadCpuMs:f})},
+    positions:Array(1000).fill({block:1839,blockCompleted:false,audioSampleEnd:2944000,startTimeSec:f,latencyFromBlockEndMs:f,acousticLatencyMs:null,timestampsSec:Array(32).fill(f)})};
+  const header=captureReport(180);header.fnDiagnostics.blocks=[];header.fnDiagnostics.decodes=[];header.fnDiagnostics.markers=[];header.fnDiagnostics.hostMarkers=[];
+  header.channels=Array(8).fill(header.channels[0]);header.calibration.sha256='a'.repeat(64);
+  assert.ok(Buffer.byteLength(JSON.stringify(header))<65536);
+  const bound=Buffer.byteLength(JSON.stringify(arrays))+65536;
+  assert.equal(bound,4000695);assert.ok(bound<4*1024*1024);
+  // Native HIT_LIMIT can retain the failing 1001st hit before throwing.
+  arrays.positions.push(arrays.positions[0]!);assert.ok(Buffer.byteLength(JSON.stringify(arrays))+65536<4*1024*1024);
+});
+test('portable retention buffer enforces all three ceilings and rejects the next block without changing order',async(t)=>{
+  if(process.platform!=='linux'){t.skip('Portable compiler check; MSVC separately');return;}
+  const dir=await mkdtemp(join(tmpdir(),'cal-180-'));
+  try{const cpp=join(dir,'test.cc'),exe=join(dir,'test');await writeFile(cpp,`#include "${join(process.cwd(),'experiments/wake-word/native-calibration-core.h')}"\nint main(){for(int seconds:{60,120,180}){atlas_cal::Buffer b;auto cap=atlas_cal::sampleLimit(seconds);b.prepare(cap);float pcm[1600]{};pcm[0]=-0.0f;pcm[1599]=.125f;for(size_t i=0;i<cap/1600;i++)b.append(pcm,1600,i*1600);if(b.size()!=cap||std::memcmp(b.data(),pcm,sizeof(pcm)))return 1;bool failed=false;try{b.append(pcm,1,cap);}catch(const atlas_cal::Error&){failed=true;}if(!failed)return 2;b.wipe();if(b.size())return 3;}if(atlas_cal::longMaxSamples*4!=11776000)return 4;}`);
+    await promisify(execFile)('g++',['-std=c++17','-O2','-Wall','-Wextra','-Werror',cpp,'-o',exe]);await promisify(execFile)(exe);
+  }finally{await rm(dir,{recursive:true,force:true});}
+});
+
+test('180 s keeps the 12-slot RSS schema and rejects long ordinary reports without calibration identity',()=>{
+  const r=captureReport(180),expected={modelHashes:models,keywordSha256:sha(liveKeyword(.15))};
+  const raw={...r,runtime:{version:'2.0.0',dlls:['sherpa-onnx-c-api.dll','onnxruntime.dll'].map(name=>({name,sha256:sdkHashes[name]}))}};
+  assert.equal(cleanLiveReport(raw,expected,'COLD','MICROPHONE',180,.15).memory.residentWindows10s.length,12);
+  const wrong=structuredClone(raw);wrong.memory.residentWindows10s=Array(18).fill(null);
+  assert.throws(()=>cleanLiveReport(wrong,expected,'COLD','MICROPHONE',180,.15));
+  delete raw.calibration;assert.throws(()=>cleanLiveReport(raw,expected,'COLD','MICROPHONE',180,.15));
+  assert.equal(cleanLiveReport({schema:1,state:'FAILED',code:'ARGUMENT_INVALID'},expected,'COLD','MICROPHONE',180,.15).code,'ARGUMENT_INVALID');
 });

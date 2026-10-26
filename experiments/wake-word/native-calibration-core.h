@@ -6,11 +6,18 @@
 #include <cstdint>
 namespace atlas_cal {
 constexpr size_t shortMaxSamples=64*16000;
-constexpr size_t maxSamples=124*16000;
+constexpr size_t maxSamples=124*16000; // Historical 120 s bound.
+constexpr size_t longMaxSamples=184*16000;
 struct Error {const char *code;};
+inline size_t sampleLimit(int seconds){
+  if(seconds==60)return shortMaxSamples;
+  if(seconds==120)return maxSamples;
+  if(seconds==180)return longMaxSamples;
+  throw Error{"CALIBRATION_SEQUENCE_INVALID"};
+}
 inline int captureSeconds(const char *kind){
   if(kind&&!std::strcmp(kind,"SILENCE"))return 60;
-  if(kind&&(!std::strcmp(kind,"POSITIVE")||!std::strcmp(kind,"SIMILAR")))return 120;
+  if(kind&&(!std::strcmp(kind,"POSITIVE")||!std::strcmp(kind,"SIMILAR")))return 180;
   throw Error{"CALIBRATION_KIND_INVALID"};
 }
 class Buffer {
@@ -18,7 +25,7 @@ class Buffer {
   size_t limit=shortMaxSamples;
  public:
   void prepare(size_t maximum=shortMaxSamples){
-    if(maximum!=shortMaxSamples&&maximum!=maxSamples)throw Error{"CALIBRATION_SEQUENCE_INVALID"};
+    if(maximum!=shortMaxSamples&&maximum!=maxSamples&&maximum!=longMaxSamples)throw Error{"CALIBRATION_SEQUENCE_INVALID"};
     limit=maximum;values.reserve(limit);
   }
   void append(const float *pcm,size_t count,size_t offset){

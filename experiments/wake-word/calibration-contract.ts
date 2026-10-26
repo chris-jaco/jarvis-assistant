@@ -6,8 +6,8 @@ import { CalibrationAlignmentError,inspectCalibrationAlignment } from './calibra
 import { liveKeyword } from './native-live-config.js';
 import { SpikeError } from './core.js';
 export const calibrationThresholds=[.15,.10,.05] as const;
-export const shortCalibrationSamples=64*16000;
-export const maxCalibrationSamples=124*16000;
+import { calibrationMaxSamples } from './calibration-limits.js';
+export { shortCalibrationSamples,maxCalibrationSamples,longCalibrationSamples,calibrationMaxSamples } from './calibration-limits.js';
 export const retentionMs=7*24*60*60*1000;
 export const calibrationFormat={encoding:'F32LE',sampleRate:16000,channels:1,blockSamples:1600,domain:'POST_FIR',paddingSamples:0,normalization:false} as const;
 export type Kind='POSITIVE'|'SILENCE'|'SIMILAR';
@@ -15,15 +15,15 @@ export const fail=(code:string):never=>{throw new SpikeError(code);};
 export const digest=(v:any)=>sha(JSON.stringify(v));
 export const same=(a:any,b:any)=>digest(a)===digest(b);
 export function checkedKind(v:string):Kind{if(!['POSITIVE','SILENCE','SIMILAR'].includes(v))fail('CAL_KIND_INVALID');return v as Kind;}
-export function captureSeconds(kind:Kind){return checkedKind(kind)==='SILENCE'?60:120;}
+export function captureSeconds(kind:Kind){return checkedKind(kind)==='SILENCE'?60:180;}
 // Missing duration identifies the already published 60-second calibration contract.
 export function sessionSeconds(session:any){
   const kind=checkedKind(session.kind),seconds=session.requestedSeconds===undefined?60:session.requestedSeconds;
-  if(seconds!==60&&!(seconds===120&&kind!=='SILENCE'))fail('CAL_DURATION_INVALID');return seconds as number;
+  if(seconds!==60&&!((seconds===120||seconds===180)&&kind!=='SILENCE'))fail('CAL_DURATION_INVALID');return seconds as number;
 }
 export function replaySeconds(session:any){
   const seconds=sessionSeconds(session);
-  if(!Number.isSafeInteger(session.samples)||session.samples<1||session.samples>(seconds===60?shortCalibrationSamples:maxCalibrationSamples))fail('CAL_PCM_LENGTH_INVALID');
+  if(!Number.isSafeInteger(session.samples)||session.samples<1||session.samples>calibrationMaxSamples(seconds))fail('CAL_PCM_LENGTH_INVALID');
   return Math.max(seconds,Math.ceil(session.samples/16000));
 }
 export function validateCalCapture(report:any,kind:Kind,seconds:number){
@@ -35,6 +35,7 @@ export function validateCalCapture(report:any,kind:Kind,seconds:number){
   const r=cleanLiveReport({...report,runtime:{version:'2.0.0',dlls:['sherpa-onnx-c-api.dll','onnxruntime.dll'].map(name=>({name,sha256:sdkHashes[name]}))}},
     {modelHashes:report.modelHashes,keywordSha256:sha(liveKeyword(.15))},'COLD','MICROPHONE',seconds,.15,
     {trialId:report.fnDiagnostics?.trialId,host:report.fnDiagnostics?.hostMarkers});
+  replaySeconds({kind,requestedSeconds:seconds,samples:r.capture.processedSamples});
   // Preserve the Hito 1.5 hit/cooldown accounting without relaxing its 60 s entry point.
   if(r.positions.length!==r.recognition.rawHits)fail('CAL_HIT_ACCOUNTING_INVALID');
   let last=-Infinity,previous=-1,accepted=0;
@@ -51,9 +52,9 @@ export function retention(created:string,expires:string,now=Date.now()){
   if(!Number.isFinite(c)||!Number.isFinite(e)||new Date(c).toISOString()!==created||new Date(e).toISOString()!==expires||e-c!==retentionMs||c>now)fail('CAL_RETENTION_INVALID');
   return now>=e?'EXPIRED':'WITHIN_RETENTION';
 }
-export function validatePcm(bytes:Uint8Array,expected:string,samples:number){
+export function validatePcm(bytes:Uint8Array,expected:string,samples:number,seconds=120){
   checkHash(expected);
-  if(!Number.isSafeInteger(samples)||samples<1||samples>maxCalibrationSamples||bytes.byteLength!==samples*4)fail('CAL_PCM_LENGTH_INVALID');
+  if(!Number.isSafeInteger(samples)||samples<1||samples>calibrationMaxSamples(seconds)||bytes.byteLength!==samples*4)fail('CAL_PCM_LENGTH_INVALID');
   if(sha(bytes)!==expected)fail('CAL_PCM_HASH_MISMATCH');
   const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
   for(let at=0;at<bytes.byteLength;at+=4)if(!Number.isFinite(view.getFloat32(at,true)))fail('CAL_PCM_INVALID');

@@ -76,7 +76,7 @@ export function auditCalibrationAlignment(report:any,kind:string){
     if(!['POSITIVE','SIMILAR','SILENCE'].includes(kind)||report?.state!=='COMPLETED'||report?.source!=='MICROPHONE'||report?.mode!=='COLD'||report?.configuration?.threshold!==.15
       ||!Number.isSafeInteger(report?.capture?.processedSamples))throw new Error();
     const seconds=report.capture.requestedSeconds===undefined?60:report.capture.requestedSeconds;
-    if(seconds!==60&&!(seconds===120&&kind!=='SILENCE'))throw new Error();
+    if(seconds!==60&&!((seconds===120||seconds===180)&&kind!=='SILENCE'))throw new Error();
     const d=validateFnDiagnostics(report.fnDiagnostics,report,report.fnDiagnostics?.trialId,report.fnDiagnostics?.hostMarkers);
     const result=inspectCalibrationAlignment(report,kind,d);
     return {state:result.diagnostics.length?'ALIGNMENT_REJECTED':'ALIGNMENT_VALID',diagnostics:result.diagnostics,

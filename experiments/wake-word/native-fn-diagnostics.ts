@@ -1,3 +1,4 @@
+import { calibrationBlockLimit } from './calibration-limits.js';
 import { SpikeError } from './core.js';
 
 export const fnPolicy={markerRttMs:50,clockGapMs:2,beforeMs:250,afterMs:1000,lowRms:.003,lowPeak:.02};
@@ -38,7 +39,7 @@ export function validateFnDiagnostics(value:any,report:any,expectedTrial?:string
   if(value===undefined){if(expectedTrial)fail();return undefined;}
   if(value?.schema!==1||!/^[0-9a-f]{32}$/.test(value.trialId??'')||(expectedTrial&&value.trialId!==expectedTrial)
     ||value.clock!=='QPC_RELATIVE_MS'||value.signalDomain!=='POST_FIR_MONO_16000'||typeof value.channelHealthy!=='boolean'
-    ||!Array.isArray(value.blocks)||value.blocks.length>1300||!Array.isArray(value.decodes)||value.decodes.length>10000
+    ||!Array.isArray(value.blocks)||value.blocks.length>calibrationBlockLimit(report?.capture?.requestedSeconds)||!Array.isArray(value.decodes)||value.decodes.length>10000
     ||!Array.isArray(value.markers)||value.markers.length>40)fail();
   const blocks=value.blocks.map((b:any,i:number)=>{
     for(const key of ['sequence','sampleStart','sampleEnd','samples','nearZero','clipped','invalid','decodeCalls','rawHits'])if(!integer(b[key]))fail();
