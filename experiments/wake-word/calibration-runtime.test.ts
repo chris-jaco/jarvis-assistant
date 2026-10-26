@@ -1,6 +1,7 @@
 import test from 'node:test';
+import { CalibrationAlignmentError,auditCalibrationAlignment } from './calibration-alignment.js';
 import assert from 'node:assert/strict';
-import { readFile,mkdir,writeFile,rm,mkdtemp,access,symlink } from 'node:fs/promises';
+import { readFile,mkdir,writeFile,rm,mkdtemp,access,symlink,readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -11,7 +12,7 @@ import { runLiveChild } from './native-live.js';
 import { sha,sdkHashes } from './benchmark-contract.js';
 import { liveConfiguration,liveKeyword } from './native-live-config.js';
 import { validatePcm,retention,retentionMs,bindCalibrationWindows,validateCalReplay,associateCalibration,digest,calibrationFormat,captureSeconds,sessionSeconds,replaySeconds,validateCalCapture,maxCalibrationSamples,shortCalibrationSamples } from './calibration-contract.js';
-import { requireConsent,calibrationRoot,safeLocal,eraseAcoustic,retentionStatus,loadCalibrationSession,compareCalibrationMatrices } from './calibration-session.js';
+import { auditCalibrationSession,requireConsent,calibrationRoot,safeLocal,eraseAcoustic,retentionStatus,loadCalibrationSession,compareCalibrationMatrices } from './calibration-session.js';
 
 const trial='a'.repeat(32),models=Object.fromEntries(['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].map(k=>[k,sha(k)]));
 const zeros=(keys:string)=>Object.fromEntries(keys.split(' ').map(k=>[k,0]));
@@ -213,4 +214,55 @@ test('capture and historical replay remain untouched; persistence happens only a
   assert.match(s,/s\.calSave&&!s\.error\.load\(\)&&!s\.cancelled\.load/);assert.match(s,/CREATE_NEW/);
   assert.match(s,/if\(replay && threshold!=\.25\)/);assert.match(s,/if\(calReplay\).*CalibrationReplay/);
   const jsonSection=s.slice(s.indexOf('static void Report('),s.indexOf('static int NativeLive('));assert.doesNotMatch(jsonSection,/recording\.data|recording\[|pcm\.data/);
+});
+
+// Numeric metadata controls only; these tests do not establish acoustic accuracy.
+test('alignment diagnostics collect all independently verifiable expanded-window overlaps with 40 ALIGNED ACKs',()=>{
+  const r=captureReport(120);
+  for(let i=0;i<40;i++){const qpc=2000+Math.floor(i/2)*1500+(i%2?600:0);r.fnDiagnostics.markers[i].qpcMs=qpc;r.fnDiagnostics.hostMarkers[i].qpcMs=qpc;}
+  const before=JSON.stringify(r),audit=auditCalibrationAlignment(r,'POSITIVE');
+  assert.equal(audit.state,'ALIGNMENT_REJECTED');assert.equal(audit.diagnostics.length,19);
+  assert.deepEqual(audit.affectedWindows,Array.from({length:19},(_,i)=>i+2));
+  const issue=audit.diagnostics[0]!;assert.equal(issue.reason,'EXPANDED_WINDOWS_OVERLAP');
+  assert.equal(issue.observedSeparationMs,-364);assert.equal(issue.minimumRequiredMs,.0625);assert.equal(issue.deficitMs,364.0625);
+  assert.throws(()=>bindCalibrationWindows(r,'POSITIVE'),e=>e instanceof CalibrationAlignmentError&&e.code==='CAL_ALIGNMENT_AMBIGUOUS'&&e.diagnostics.length===19);
+  assert.equal(JSON.stringify(r),before);
+});
+test('specific alignment reasons preserve strict boundaries and legacy 60-second reports',()=>{
+  assert.equal(auditCalibrationAlignment(captureReport(),'POSITIVE').state,'ALIGNMENT_VALID');
+  const marker=(r:any,i:number,qpc:number)=>{r.fnDiagnostics.markers[i].qpcMs=qpc;r.fnDiagnostics.hostMarkers[i].qpcMs=qpc;};
+  const cases:Array<[string,(r:any)=>void]>=[
+    ['PRE_CONTEXT_MISSING',r=>marker(r,0,1100)],
+    ['POST_CONTEXT_MISSING',r=>marker(r,39,60500)],
+    ['MARKER_OUTSIDE_COVERAGE',r=>marker(r,0,1005)],
+    ['MARKER_UNCERTAINTY_OVERLAP',r=>marker(r,1,2005)],
+    ['QPC_DISCONTINUITY',r=>{for(const b of r.fnDiagnostics.blocks.slice(9)){b.qpcStartMs+=3;b.qpcEndMs+=3;}}],
+    ['INSUFFICIENT_EVIDENCE',r=>r.fnDiagnostics.hostMarkers[0].roundTripMs=51],
+    ['INSUFFICIENT_EVIDENCE',r=>r.fnDiagnostics.hostMarkers.pop()],
+  ];
+  for(const [reason,mutate] of cases){const r=captureReport();mutate(r);const audit=auditCalibrationAlignment(r,'POSITIVE');
+    assert.ok(audit.diagnostics.some(d=>d.reason===reason),JSON.stringify(audit));assert.throws(()=>bindCalibrationWindows(r,'POSITIVE'));}
+  const legacy=captureReport();delete legacy.fnDiagnostics;
+  assert.equal(auditCalibrationAlignment(legacy,'POSITIVE').state,'ALIGNMENT_REJECTED');
+  assert.equal(auditCalibrationAlignment({},'POSITIVE').state,'NOT_EVALUABLE');
+});
+test('automatic child completion needs no extra Enter and closes markers without READY timers',async()=>{
+  const child:any=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.stdin=new EventEmitter();
+  child.stdin.write=()=>assert.fail('no Stop or operator Enter needed');child.stdin.destroy=()=>{};
+  const p=runLiveChild('owned.exe',[],120,new AbortController().signal,()=>{},()=>child);
+  child.stdout.emit('data',Buffer.from('{"state":"COMPLETED"}'));child.emit('close',0);
+  assert.equal((await p).exitCode,0);
+});
+
+test('JSON-only audit works with no acoustic file and preserves original legacy failure metadata',async()=>{
+  const session=randomBytes(16).toString('hex'),dir=join(calibrationRoot,'captures',session);await mkdir(dir,{recursive:true});
+  const report=captureReport(120);report.fnDiagnostics.trialId=session;
+  const reportText=JSON.stringify(report),failureText=JSON.stringify({schema:1,state:'FAILED_OR_CANCELLED',cleanupVerified:true,sessionId:session});
+  try{
+    await writeFile(join(dir,'capture.json'),reportText);await writeFile(join(dir,'failure.json'),failureText);
+    const audit=await auditCalibrationSession(session,'POSITIVE');assert.equal(audit.state,'ALIGNMENT_VALID');assert.equal(audit.failureRecorded,true);
+    assert.deepEqual((await readdir(dir)).sort(),['capture.json','failure.json']);
+    assert.equal(await readFile(join(dir,'capture.json'),'utf8'),reportText);assert.equal(await readFile(join(dir,'failure.json'),'utf8'),failureText);
+    assert.doesNotMatch(JSON.stringify(audit),/qpcStartMs|samples|modelHashes|encoder|capture.f32le/);
+  }finally{await rm(dir,{recursive:true,force:true});}
 });

@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { sha } from './benchmark-contract.js';
 import { livePreflight,runLiveChild,cleanLiveReport } from './native-live.js';
+import { CalibrationAlignmentError,auditCalibrationAlignment } from './calibration-alignment.js';
 import { NativeMarkers } from './native-fn-diagnostics.js';
 import { bindCalibrationWindows,validatePcm,retention,retentionMs,maxCalibrationSamples,checkedKind,checkHash,calibrationThresholds,calibrationFormat,
   associateCalibration,validateCalReplay,validateCalCapture,captureSeconds,sessionSeconds,replaySeconds,digest,same,fail,type Kind } from './calibration-contract.js';
@@ -88,6 +89,18 @@ export async function requireConsent(kind:Kind,trial:string,ask:(text:string)=>P
   const answer=await ask(`Se conservarán ${captureSeconds(kind)} s de PCM privado hasta 7 días. Sin envío externo. Escribí ${expected}: `);
   if(answer!==expected)fail('CAL_CAPTURE_CONSENT_REQUIRED');
 }
+// Fixed JSON basenames only. Never loadCalibrationSession here: that reads PCM.
+export async function auditCalibrationSession(session:string,kind:Kind){
+  const dir=folder(session),report=await json(join(dir,'capture.json'));
+  let failureRecorded=false;
+  if(await exists(join(dir,'failure.json'))){
+    const failure=await json(join(dir,'failure.json'));
+    if(failure?.sessionId!==session||failure?.schema!==1)fail('CAL_SESSION_INVALID');
+    failureRecorded=true;
+  }
+  if(report.fnDiagnostics?.trialId!==session)fail('CAL_SESSION_INVALID');
+  return {sessionId:session,failureRecorded,...auditCalibrationAlignment(report,kind)};
+}
 async function capture(exe:string,lock:string,kind:Kind){
   if(process.platform!=='win32'||process.arch!=='x64')fail('CAL_WINDOWS_REQUIRED');
   const statuses=await retentionStatus();if(statuses.some(s=>s.warning))fail('CAL_RETENTION_REVIEW_REQUIRED');
@@ -123,7 +136,7 @@ async function capture(exe:string,lock:string,kind:Kind){
       modelHashes:r.modelHashes,lockSha256:sha(await readFile(await safeLocal(lock)))};
     await saveJson(join(dir,'session.json'),manifest);
     return {state:'CAPTURE_SAVED',sessionId:trial,samples:manifest.samples,pcmSha256,expiresAtUtc:consent.expiresAtUtc};
-  }catch(e){try{await saveJson(join(dir,'failure.json'),{schema:1,state:'FAILED_OR_CANCELLED',cleanupVerified,sessionId:trial});}catch{/* Never replace the original failure or silently delete acoustic data. */}throw e;}
+  }catch(e){try{await saveJson(join(dir,'failure.json'),{schema:1,state:'FAILED_OR_CANCELLED',cleanupVerified,sessionId:trial,...(e instanceof CalibrationAlignmentError?{code:e.code,diagnostics:e.diagnostics}:{})});}catch{/* Never replace the original failure or silently delete acoustic data. */}throw e;}
   finally{process.removeListener('SIGINT',stop);rl.close();console.error(`CAL_SESSION ${trial} — verificar status; eliminar manualmente cualquier PCM parcial.`);}
 }
 async function replay(exe:string,lock:string,sessionId:string,threshold:number,signal:AbortSignal,frozen:string){
@@ -185,9 +198,11 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   try{const [op,...args]=process.argv.slice(2);let result:any;
     if(op==='capture'&&args.length===3)result=await capture(args[0]!,args[1]!,checkedKind(args[2]!));
     else if(op==='matrix'&&args.length===6)result=await matrix(args[0]!,args[1]!,args[2]!,args[3]!,args[4]!,args[5]!);
+    else if(op==='audit'&&args.length===2)result=await auditCalibrationSession(id(args[0]!),checkedKind(args[1]!));
     else if(op==='status'&&!args.length)result={state:'RETENTION_STATUS',sessions:await retentionStatus()};
     else if(op==='delete'&&args.length===1){const session=id(args[0]!);result=await eraseAcoustic(session,await prompt(`Escribí BORRAR ${session}: `));}
     else if(op==='compare'&&args.length===2)result=compareCalibrationMatrices(await json(args[0]!),await json(args[1]!));else fail('CAL_ARGUMENT_INVALID');
     console.log(JSON.stringify(result));
-  }catch(e){const code=(e as {code?:string}).code;console.log(JSON.stringify({state:'FAILED',code:code&&/^CAL_[A-Z_]+$/.test(code)?code:'CAL_OPERATION_FAILED',productionGo:false}));process.exitCode=2;}
+    if(op==='audit'&&result.state!=='ALIGNMENT_VALID')process.exitCode=2;
+  }catch(e){const code=(e as {code?:string}).code;console.log(JSON.stringify({state:'FAILED',code:code&&/^CAL_[A-Z_]+$/.test(code)?code:'CAL_OPERATION_FAILED',productionGo:false,...(e instanceof CalibrationAlignmentError?{diagnostics:e.diagnostics}:{})}));process.exitCode=2;}
 }

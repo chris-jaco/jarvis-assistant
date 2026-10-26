@@ -267,3 +267,85 @@ contra edición deliberada del propietario.
 
 GO sólo para aceptación experimental Windows con consentimiento por toma.
 **NO-GO para integración productiva o declarar precisión acústica validada.**
+
+## Diagnóstico de alineación por ventana (sin leer PCM)
+
+`ALIGNED` en un ACK sólo verifica identidad/orden del marcador y RTT <=50 ms.
+No certifica cobertura del marcador, contexto o separación de ventanas ampliadas.
+El código global continúa `CAL_ALIGNMENT_AMBIGUOUS`; se añaden `diagnostics` al
+error de consola y a nuevos `failure.json`. Los archivos existentes no se editan.
+El validador conserva comparaciones, floor/ceil, umbrales y márgenes anteriores.
+Recoge todas las causas independientes evaluables, sin inventar una conversión
+para un marcador sin cobertura. Un fallo de mapeo puede impedir evaluar causas
+posteriores; ausencia de esas causas no demuestra que estén descartadas.
+
+| Motivo | Condición conservada |
+| --- | --- |
+| `PRE_CONTEXT_MISSING` | begin.lower <4000 muestras |
+| `POST_CONTEXT_MISSING` | end.upper +16000 > muestras procesadas |
+| `QPC_DISCONTINUITY` | hueco o solapamiento absoluto entre bloques >2 ms |
+| `MARKER_OUTSIDE_COVERAGE` | intervalo QPC completo del marcador sin cobertura |
+| `MARKER_UNCERTAINTY_OVERLAP` | begin.upper >= end.lower |
+| `EXPANDED_WINDOWS_OVERLAP` | begin.lower −4000 <= end.upper anterior +16000 |
+| `INSUFFICIENT_EVIDENCE` | ACK ausente/RTT >50 ms, pares incompletos, bloque inválido o evidencia insuficiente |
+
+Cuando son calculables se incluyen ventana/marcador/bloque, QPC, separación
+observada, mínimo requerido, déficit en ms y tolerancia máxima. Un límite estricto
+entre índices enteros necesita al menos una muestra (0,0625 ms): igualdad sigue
+rechazada. `deficitMs` es distancia al límite permitido, no una corrección aplicada.
+Un salto QPC incluye signo en observedSeparationMs, valor absoluto para el déficit.
+Los QPC son relativos al proceso Native; no se restan a performance.now de Node.
+
+Auditar la sesión existente, sin compilar ni ejecutar Native:
+
+```powershell
+node --import tsx experiments/wake-word/calibration-session.ts audit a9e12de19a0ef49b0dbc17cfca3dd8f8 POSITIVE
+```
+
+Lee sólo los nombres fijos capture.json y, si existe, failure.json bajo la carpeta
+local de esa sesión. No lee capture.f32le, no escribe reportes ni modifica los
+originales, no abre el micrófono ni inicia inferencia. Devuelve affectedWindows
+sin contar un rawHit como acierto. Exit 2 si ALIGNMENT_REJECTED/NOT_EVALUABLE;
+exit 0 sólo significa ALIGNMENT_VALID para estas comprobaciones, nunca aceptación
+del dataset, integridad del PCM ni autorización de mantenimiento/producción.
+Los reportes antiguos suficientes mantienen el mismo resultado; sin evidencia
+QPC suficiente se rechazan o declaran NOT_EVALUABLE. Los textos crudos y campos
+ajenos de failure.json no se imprimen. La sesión Windows no está disponible en
+cloud: no se confirma solapamiento ni otro motivo hasta ejecutar esta auditoría.
+
+### Límite de asistencia temporal y decisión pendiente
+
+No se implementa `READY_FOR_NEXT_WINDOW`: con el protocolo actual, el supervisor
+sólo recibe QPC en los ACK B/E, y los bloques QPC/muestras al terminar. Esperar
+1250 ms (o más) en Node no demuestra separación en el reloj de muestras. Incluso
+QPC de dos marcadores suficientemente separados puede cruzar una discontinuidad
+QPC/muestras. La ausencia de errores WASAPI no demuestra esa condición adicional.
+No se añade un temporizador que emita READY ni se cambia el envío de B/E.
+
+Para una asistencia verificable se propone aprobar por separado telemetría Native
+acotada, no bloqueante, de avance y cobertura QPC/muestras; evaluar un margen
+operativo explícito adicional (por ejemplo 100 ms), nunca ampliar −250/+1000 ms.
+Debe definirse el alcance de READY: separación respecto a cobertura observada y
+comprobación del siguiente B, no promesa sobre fallos futuros. Hasta aprobar ese
+contrato de observación/sincronización, la asistencia queda NO-GO. El diagnóstico
+final seguirá siendo obligatorio y ningún aviso podrá convertir un rechazo en PASS.
+
+No hay cambios C++ en este checkpoint: no hace falta recompilar el EXE auditado.
+Si se requiere una compilación nueva, usar los comandos anteriores con un directorio
+nuevo, por ejemplo `.local\wake-word-spike\native-calibration-window-audit`.
+Ejecutar el preflight de 120 s con el EXE y lock de esa misma salida. Después,
+sólo con consentimiento explícito por toma:
+
+```powershell
+node --import tsx experiments/wake-word/native-live.ts $exe $lock COLD 120 --threshold 0.15 --check
+if ($LASTEXITCODE -ne 0) { throw 'PREFLIGHT_FAILED' }
+node --import tsx experiments/wake-word/calibration-session.ts status
+node --import tsx experiments/wake-word/calibration-session.ts capture $exe $lock POSITIVE
+```
+
+Se mantienen 20 pares B/E y final automático a 120 s sin Enter adicional. Para una
+repetición manual, empezar ~2 s después de CAPTURE_STARTED, separar inicios ~4–5 s,
+dejar al menos ~2 s entre ACK E y el próximo B y finalizar antes de ~115 s. Son
+pautas operativas conservadoras, no READY ni garantía de validez: analizar los
+JSON antes de repetir si una captura falla. No modificar marcas ni regenerar
+session.json para convertir una sesión rechazada en dataset.

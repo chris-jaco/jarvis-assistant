@@ -1,7 +1,8 @@
 // Calibration-only numeric contract. Never records or reconstructs audio.
 import { sha,sdkHashes } from './benchmark-contract.js';
 import { cleanLiveReport } from './native-live.js';
-import { validateFnDiagnostics,fnPolicy } from './native-fn-diagnostics.js';
+import { validateFnDiagnostics } from './native-fn-diagnostics.js';
+import { CalibrationAlignmentError,inspectCalibrationAlignment } from './calibration-alignment.js';
 import { liveKeyword } from './native-live-config.js';
 import { SpikeError } from './core.js';
 export const calibrationThresholds=[.15,.10,.05] as const;
@@ -62,37 +63,9 @@ export function bindCalibrationWindows(report:any,kind:Kind){
   sessionSeconds({kind,requestedSeconds:report.capture?.requestedSeconds});
   if(report.state!=='COMPLETED'||report.source!=='MICROPHONE'||report.mode!=='COLD'||report.configuration?.threshold!==.15)fail('CAL_CAPTURE_INCOMPLETE');
   const d=validateFnDiagnostics(report.fnDiagnostics,report,report.fnDiagnostics?.trialId,report.fnDiagnostics?.hostMarkers);
-  if(!d||!d.channelHealthy||d.blocks.length===0)fail('CAL_ALIGNMENT_AMBIGUOUS');
-  if(kind==='SILENCE'){
-    if(d.markers.length||d.hostMarkers.length)fail('CAL_ALIGNMENT_AMBIGUOUS');return [];
-  }
-  if(d.markers.length!==40||d.hostMarkers.length!==40)fail('CAL_ALIGNMENT_AMBIGUOUS');
-  function point(i:number){
-    const marker=d.markers[i],host=d.hostMarkers[i];
-    if(!host.acknowledged||host.roundTripMs>fnPolicy.markerRttMs)fail('CAL_ALIGNMENT_AMBIGUOUS');
-    const low=marker.qpcMs-host.roundTripMs-fnPolicy.clockGapMs,high=marker.qpcMs+fnPolicy.clockGapMs;
-    const blocks=d.blocks.filter((b:any)=>b.qpcEndMs>=low&&b.qpcStartMs<=high);
-    if(!blocks.length||blocks[0].qpcStartMs>low||blocks.at(-1).qpcEndMs<high)fail('CAL_ALIGNMENT_AMBIGUOUS');
-    let end=blocks[0].qpcStartMs;
-    const limits:number[]=[];
-    for(const b of blocks){
-      if(!b.completed||b.invalid||Math.abs(b.qpcStartMs-end)>fnPolicy.clockGapMs)fail('CAL_ALIGNMENT_AMBIGUOUS');
-      limits.push(b.sampleStart+(Math.max(low,b.qpcStartMs)-b.qpcStartMs)*16,b.sampleStart+(Math.min(high,b.qpcEndMs)-b.qpcStartMs)*16);end=b.qpcEndMs;
-    }
-    const lower=Math.floor(Math.min(...limits)),upper=Math.ceil(Math.max(...limits));
-    return {lower,upper,qpcMs:marker.qpcMs,roundTripMs:host.roundTripMs,uncertaintySamples:upper-lower,
-      offsetLowerMs:marker.qpcMs-upper/16,offsetUpperMs:marker.qpcMs-lower/16};
-  }
-  const windows:any[]=Array.from({length:20},(_,i)=>({id:i+1,begin:point(i*2),end:point(i*2+1)}));
-  let previous=-1;
-  for(const w of windows){
-    if(w.begin.upper>=w.end.lower||w.begin.lower<4000||w.end.upper+16000>report.capture.processedSamples
-      ||w.begin.lower-4000<=previous)fail('CAL_ALIGNMENT_AMBIGUOUS');
-    previous=w.end.upper+16000;
-    const relevant=d.blocks.filter((b:any)=>b.sampleEnd>w.begin.lower-4000&&b.sampleStart<w.end.upper+16000);
-    for(let i=0;i<relevant.length;i++)if(!relevant[i].completed||relevant[i].invalid||(i&&Math.abs(relevant[i].qpcStartMs-relevant[i-1].qpcEndMs)>fnPolicy.clockGapMs))fail('CAL_ALIGNMENT_AMBIGUOUS');
-  }
-  return windows;
+  const result=inspectCalibrationAlignment(report,kind,d);
+  if(result.diagnostics.length)throw new CalibrationAlignmentError(result.diagnostics);
+  return result.windows;
 }
 export function validateCalReplay(raw:any,expected:any,session:any,threshold:number){
   if(!calibrationThresholds.some(t=>t===threshold))fail('CAL_THRESHOLD_INVALID');
