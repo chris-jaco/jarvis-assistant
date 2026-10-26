@@ -24,6 +24,8 @@ const codes = new Set(['CALIBRATION_SEQUENCE_INVALID','CALIBRATION_PCM_INVALID',
   'INFERENCE_FAILED','CONTROL_HANDLER_FAILED','CONTROL_WAIT_FAILED','PREPARATION_TIMEOUT','THREAD_OR_CONTROL_FAILED',
   'AUDIO_ACCOUNTING_FAILED','NATIVE_LIVE_FAILED','WAV_INVALID','WAV_FORMAT_REQUIRED','WAV_SAMPLE_COUNT_MISMATCH',
   'PCM_HASH_MISMATCH','PCM_MUTATED','REPLAY_FAILED']);
+// Closed diagnostic code lookup; never expose an arbitrary Native string.
+export const nativeDiagnosticCode=(value:unknown)=>typeof value==='string'&&codes.has(value)?value:null;
 const stages = new Set(['PREPARING','CAPTURE_STARTED','CAPTURE_STOPPED','REPLAY_STARTED','REPLAY_STOPPED']);
 function reject(): never { throw new SpikeError('NATIVE_LIVE_REPORT_INVALID'); }
 function nums(value: any, keys: string[]) {
@@ -125,7 +127,7 @@ export async function livePreflight(executable:string,lockPath:string,replay?:st
 // Abort requests cooperative Stop first. The watchdog may terminate only this owned
 // experimental child if a synchronous DLL call never returns; never claim clean release then.
 export function runLiveChild(exe:string,args:string[],seconds:number,signal:AbortSignal,progress:(stage:string)=>void=()=>{},
-  launch:(file:string,args:string[])=>ChildProcess=(file,args)=>spawn(file,args,{shell:false,windowsHide:true,stdio:['pipe','pipe','pipe']}), watchdogMs=(seconds+60)*1000, markers?:NativeMarkers) {
+  launch:(file:string,args:string[])=>ChildProcess=(file,args)=>spawn(file,args,{shell:false,windowsHide:true,stdio:['pipe','pipe','pipe']}), watchdogMs=(seconds+60)*1000, markers?:NativeMarkers, observeResult?:(result:{report:any;exitCode:number|null})=>void) {
   return new Promise<{report:any;exitCode:number|null}>((resolveResult,rejectResult)=>{
     let child:ChildProcess;
     try{child=launch(exe,args);}catch{rejectResult(new SpikeError('NATIVE_LIVE_CHILD_FAILED'));return;}
@@ -145,8 +147,12 @@ export function runLiveChild(exe:string,args:string[],seconds:number,signal:Abor
     child.on('error',()=>{failure='NATIVE_LIVE_CHILD_FAILED';});
     child.once('close',(code:number|null)=>{closed=true;markers?.close();
       clearTimeout(timer);if(killTimer)clearTimeout(killTimer);signal.removeEventListener('abort',abort);child.stdin?.destroy();
-      if(failure){rejectResult(new SpikeError(failure));return;}
-      try{const report=JSON.parse(stdout);if(![0,2,130].includes(code??-1) || (code===0 && report.state!=='COMPLETED') || (code===130 && report.state!=='CANCELLED'))reject();resolveResult({report,exitCode:code});}
+      if(failure){
+        if(observeResult){let report:any=null;try{report=JSON.parse(stdout);}catch{}try{observeResult({report,exitCode:code});}catch{/* Preserve the existing supervisor failure. */}}
+        rejectResult(new SpikeError(failure));return;
+      }
+      try{let report:any;try{report=JSON.parse(stdout);}catch{observeResult?.({report:null,exitCode:code});throw new SpikeError('NATIVE_LIVE_CHILD_FAILED');}
+        observeResult?.({report,exitCode:code});if(![0,2,130].includes(code??-1) || (code===0 && report.state!=='COMPLETED') || (code===130 && report.state!=='CANCELLED'))reject();resolveResult({report,exitCode:code});}
       catch{rejectResult(new SpikeError('NATIVE_LIVE_CHILD_FAILED'));}
     });
     if(signal.aborted)stop();

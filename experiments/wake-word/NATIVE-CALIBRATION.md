@@ -400,3 +400,120 @@ cero overflow/pérdidas y cleanup. Un dataset incompleto sigue rechazado aunque
 haya hits. Retención siete días y eliminación manual verificada permanecen intactas.
 Los datasets antiguos conservan hashes/locks; para ejecutar con su binario original
 usar el checkout compatible. No parchear locks para aceptar otro ejecutable.
+
+## Observabilidad de fallos de replay por celda
+
+La segunda matriz comunicada se interrumpió en la quinta celda, SILENCE/.10,
+tras validar POSITIVE/.15/.10/.05 y SILENCE/.15, según el prefijo de archivos
+conservado en Windows. El error anterior no demuestra la causa Native: el validador
+podía convertir FAILED en CAL_REPLAY_CONTRACT_INVALID y no guardaba el reporte
+fallido. La instrumentación nueva no puede recuperar retroactivamente ese reporte.
+No se ha vuelto a ejecutar esa matriz en cloud ni se ha leído su PCM.
+
+El supervisor ahora comprueba exit code y estado antes de validar los invariantes
+de un replay exitoso. FAILED con exit distinto de cero **o con exit 0** sigue
+rechazado, conservando el código Native cerrado. El segundo caso registra también
+la inconsistencia exit/estado y el rechazo del supervisor. Fallos tempranos sin
+cabecera de calibración no se reinterpretan como fallos del contrato exitoso.
+JSON inválido, timeout y cierre inesperado siguen rechazados por el mismo runner.
+Su observador opcional sólo se ejecuta después de terminar el hijo; no introduce
+mensajes, scheduling, backpressure, buffers, cambios de watchdog ni trabajo en audio.
+
+La celda fallida crea exclusivamente `runs/<runId>/<KIND>-<threshold>.failure.json`:
+por ejemplo `SILENCE-0.1.failure.json`. No escribe el archivo exitoso de esa celda ni
+matrix.json. Se conservan las celdas ya validadas, se detiene la secuencia y no hay
+reintentos, saltos ni continuación automática. Archivos creados con wx/0600 bajo
+.local, sin sobrescribir. Si falla guardar el diagnóstico, el error de consola
+conserva los datos saneados y marca `failureReportSaved:false`; no sustituye la causa
+por un mensaje de filesystem. Una escritura interrumpida puede dejar un JSON parcial:
+no sobrescribirlo ni interpretarlo como resultado válido.
+
+Contrato diagnóstico schema 1, separado de datasets y resultados exitosos:
+
+- kind, sessionId de 32 hex, threshold y etapa cerrada.
+- Exit code, estado conocido, código Native allowlisted y código del supervisor.
+  Código desconocido/ausente se representa como null, nunca texto crudo.
+- Contadores numéricos seleccionados de captura, muestras/bloques, overflow,
+  discontinuidades, errores de secuencia, cola, Decode y hits; longitudes de listas,
+  tiempos seleccionados y flags de cleanup.
+- Comprobaciones de metadatos y coincidencia de muestras/bloques, hashes y modelo
+  como booleanos o null si falta evidencia. No se imprimen los hashes.
+
+No contiene PCM, RMS, espectros, posiciones de hits, timestamps de detecciones,
+transcripciones, rutas, nombres/IDs de dispositivos, credenciales, mensajes crudos
+ni reporte Native completo. No se conserva una referencia adicional al reporte
+bruto en el observador; se toma una proyección numérica acotada. Los tests verifican
+que el diagnóstico cabe en 4 KiB y no filtra campos adicionales. Null no demuestra
+ausencia de error; un flag de cleanup desconocido no acredita liberación.
+
+Etapas de validación: REPLAY_METADATA, SESSION_LIMITS, REPORT_VALIDATION,
+REPLAY_ACCOUNTING, BLOCK_DETAILS, DECODE_DETAILS e HIT_POSITIONS. También se registran
+DATASET_LOAD, PREFLIGHT, IDENTITY, NATIVE_EXECUTION/NATIVE_EXIT, DATASET_RECHECK y
+ASSOCIATION. La etapa identifica el grupo que falló, no elimina ninguna condición.
+Las comprobaciones y la asociación científica anteriores se mantienen intactas.
+Los rechazos iniciales de toda la matriz, anteriores al directorio/celdas, conservan
+sus códigos existentes y pueden no generar un archivo de fallo por celda.
+
+### Procedimiento Windows para investigar SILENCE/.10
+
+No hay cambios C++: **no hace falta recompilar Native ni editar su lock** para esta
+instrumentación. Usar el EXE/lock ya verificados de la ampliación a 180 s. No instalar
+SDK/modelos ni borrar el run fallido. Los reportes anteriores conservan su validez
+e integridad; el formato de datasets, muestras, hashes y límites no cambia.
+
+Preflight de sólo lectura, sin Native ni acceso al PCM:
+
+```powershell
+node --import tsx experiments/wake-word/native-live.ts $exe $lock COLD 180 --threshold 0.15 --check
+if ($LASTEXITCODE -ne 0) { throw 'PREFLIGHT_FAILED' }
+node --import tsx experiments/wake-word/calibration-session.ts status
+```
+
+Para obtener evidencia nueva hace falta **una ejecución manual explícita**. Este
+comando procesa los PCM autorizados mediante el replay existente; no captura el
+micrófono. No ejecutarlo como reintento automático ni reutilizar el UUID anterior:
+
+```powershell
+$runDiagnostic = [guid]::NewGuid().ToString('N')
+node --import tsx experiments/wake-word/calibration-session.ts matrix $exe $lock $positive $silence $similar $runDiagnostic
+$matrixExit = $LASTEXITCODE
+```
+
+Si falla, leer únicamente sus metadatos saneados:
+
+```powershell
+$dir = Join-Path (Get-Location) ".local\wake-word-spike\calibration\runs\$runDiagnostic"
+Get-ChildItem -LiteralPath $dir -Filter '*.failure.json' -File | ForEach-Object {
+  Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json | ConvertTo-Json -Depth 8
+}
+```
+
+Interpretación:
+
+- NATIVE_EXIT + AUDIO_OVERFLOW: overflow confirmado por Native; estudiar scheduling
+  posteriormente, sin ampliar ni modificar la cola para conseguir un PASS.
+- PCM_HASH_MISMATCH/CALIBRATION_PCM_INVALID o flags de hash falsos: investigar
+  integridad y fase exacta, sin editar locks, hashes, PCM ni manifests.
+- AUDIO_ACCOUNTING_FAILED o diferencias de muestras/bloques: comprobar los contadores
+  conservados; no truncar ni completar audio.
+- MODEL_LOAD_FAILED/RUNTIME_VERSION_MISMATCH/SDK_HASH_MISMATCH: fallo de inicio o
+  procedencia, no una detección acústica negativa.
+- Exit 0/COMPLETED con CAL_REPLAY_CONTRACT_INVALID: examinar la etapa y las
+  comprobaciones; mantiene el rechazo. NATIVE_LIVE_REPORT_INVALID identifica fallo
+  del validador general, también conservado en supervisorCode.
+- Sin JSON Native: reportAvailable false y código Native null; no atribuirlo a
+  overflow por conjetura. Revisar exit code y código del supervisor.
+
+Si termina correctamente, comparar la primera matriz completa con la nueva mediante
+el compare existente. No declarar reproducibilidad con una ejecución o un run parcial:
+
+```powershell
+$root = Join-Path (Get-Location) '.local\wake-word-spike\calibration\runs'
+node --import tsx experiments/wake-word/calibration-session.ts compare `
+  "$root\f706ac8c4ac14e8d9fb1f46a4a990aca\matrix.json" `
+  "$root\$runDiagnostic\matrix.json"
+```
+
+Dos matrices sólo son consistentes si compare lo confirma sobre los mismos datasets,
+modelos y configuración; la instrumentación no constituye aceptación acústica ni GO
+productivo. La causa real del fallo original SILENCE/.10 sigue pendiente de evidencia.

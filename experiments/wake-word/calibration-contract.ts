@@ -4,6 +4,7 @@ import { cleanLiveReport } from './native-live.js';
 import { validateFnDiagnostics } from './native-fn-diagnostics.js';
 import { CalibrationAlignmentError,inspectCalibrationAlignment } from './calibration-alignment.js';
 import { liveKeyword } from './native-live-config.js';
+import type { ReplayStage } from './replay-observation.js';
 import { SpikeError } from './core.js';
 export const calibrationThresholds=[.15,.10,.05] as const;
 import { calibrationMaxSamples } from './calibration-limits.js';
@@ -68,21 +69,32 @@ export function bindCalibrationWindows(report:any,kind:Kind){
   if(result.diagnostics.length)throw new CalibrationAlignmentError(result.diagnostics);
   return result.windows;
 }
-export function validateCalReplay(raw:any,expected:any,session:any,threshold:number){
+// Cell orchestration must inspect process failure before success-only invariants.
+export function validateCalReplayResult(result:{report:any;exitCode:number|null},expected:any,session:any,threshold:number,stage:(value:ReplayStage)=>void=()=>{}){
+  if(result.exitCode!==0||result.report?.state==='FAILED'||result.report?.state==='CANCELLED')fail('CAL_REPLAY_NATIVE_FAILED');
+  return validateCalReplay(result.report,expected,session,threshold,stage);
+}
+export function validateCalReplay(raw:any,expected:any,session:any,threshold:number,stage:(value:ReplayStage)=>void=()=>{}){
+  stage('REPLAY_METADATA');
   if(!calibrationThresholds.some(t=>t===threshold))fail('CAL_THRESHOLD_INVALID');
   const c=raw?.calibration;
   if(c?.schema!==1||c.mode!=='REPLAY'||c.persisted!==false||c.samples!==session.samples||c.sha256!==session.pcmSha256)fail('CAL_REPLAY_CONTRACT_INVALID');
-  replaySeconds(session);
+  stage('SESSION_LIMITS');replaySeconds(session);
+  stage('REPORT_VALIDATION');
   const r=cleanLiveReport(raw,{...expected,wavSha256:null,pcmSha256:session.pcmSha256},'COLD','REPLAY',sessionSeconds(session),threshold);
+  stage('REPLAY_ACCOUNTING');
   if(r.state!=='COMPLETED'||r.capture.processedSamples!==session.samples||r.capture.processedBlocks!==Math.ceil(session.samples/1600)
     ||r.format.kind!=='FLOAT32'||r.format.rate!==16000||r.format.channels!==1||r.conversion.firTaps!==1||r.conversion.filterDelayMs!==0
     ||!same(r.modelHashes,session.modelHashes)||!r.details||r.details.blocks.length!==r.capture.processedBlocks
     ||r.positions.length!==r.recognition.rawHits||r.details.decodes.length!==r.inference.decodeCalls)fail('CAL_REPLAY_CONTRACT_INVALID');
+  stage('BLOCK_DETAILS');
   for(let i=0;i<r.details.blocks.length;i++){
     const b=r.details.blocks[i];if(b.sequence!==i||b.decodeCalls!==r.details.decodes.filter((d:any)=>d.block===i).length
       ||b.rawHits!==r.positions.filter((p:any)=>p.block===i).length||typeof b.wallMs!=='number')fail('CAL_REPLAY_CONTRACT_INVALID');
   }
+  stage('DECODE_DETAILS');
   let decoded=-1;for(const d of r.details.decodes){if(!Number.isSafeInteger(d.block)||d.block<decoded||d.block<0||d.block>=r.capture.processedBlocks||typeof d.wallMs!=='number')fail('CAL_REPLAY_CONTRACT_INVALID');decoded=d.block;}
+  stage('HIT_POSITIONS');
   let previous=-1;for(const p of r.positions){if(!Number.isInteger(p.block)||p.block<previous||p.block<0||!p.blockCompleted
     ||p.block>=r.capture.processedBlocks||p.audioSampleEnd!==Math.min(session.samples,(p.block+1)*1600))fail('CAL_REPLAY_CONTRACT_INVALID');previous=p.block;}
   return r;

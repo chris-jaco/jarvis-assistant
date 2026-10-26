@@ -1,7 +1,8 @@
 import test from 'node:test';
+import { observeReplayCell,ReplayCellError,ReplayObservation } from './replay-observation.js';
 import { CalibrationAlignmentError,auditCalibrationAlignment } from './calibration-alignment.js';
 import assert from 'node:assert/strict';
-import { readFile,mkdir,writeFile,rm,mkdtemp,access,symlink,readdir } from 'node:fs/promises';
+import { readFile,mkdir,writeFile,rm,mkdtemp,access,symlink,readdir,stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -11,8 +12,8 @@ import { EventEmitter } from 'node:events';
 import { runLiveChild,cleanLiveReport } from './native-live.js';
 import { sha,sdkHashes } from './benchmark-contract.js';
 import { liveConfiguration,liveKeyword } from './native-live-config.js';
-import { validatePcm,retention,retentionMs,bindCalibrationWindows,validateCalReplay,associateCalibration,digest,calibrationFormat,captureSeconds,sessionSeconds,replaySeconds,validateCalCapture,maxCalibrationSamples,shortCalibrationSamples,longCalibrationSamples,calibrationMaxSamples } from './calibration-contract.js';
-import { auditCalibrationSession,requireConsent,calibrationRoot,safeLocal,eraseAcoustic,retentionStatus,loadCalibrationSession,compareCalibrationMatrices } from './calibration-session.js';
+import { validatePcm,retention,retentionMs,bindCalibrationWindows,validateCalReplay,validateCalReplayResult,associateCalibration,digest,calibrationFormat,captureSeconds,sessionSeconds,replaySeconds,validateCalCapture,maxCalibrationSamples,shortCalibrationSamples,longCalibrationSamples,calibrationMaxSamples } from './calibration-contract.js';
+import { evaluateCalibrationCells,saveJson,auditCalibrationSession,requireConsent,calibrationRoot,safeLocal,eraseAcoustic,retentionStatus,loadCalibrationSession,compareCalibrationMatrices } from './calibration-session.js';
 
 const trial='a'.repeat(32),models=Object.fromEntries(['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].map(k=>[k,sha(k)]));
 const zeros=(keys:string)=>Object.fromEntries(keys.split(' ').map(k=>[k,0]));
@@ -365,4 +366,94 @@ test('180 s keeps the 12-slot RSS schema and rejects long ordinary reports witho
   assert.throws(()=>cleanLiveReport(wrong,expected,'COLD','MICROPHONE',180,.15));
   delete raw.calibration;assert.throws(()=>cleanLiveReport(raw,expected,'COLD','MICROPHONE',180,.15));
   assert.equal(cleanLiveReport({schema:1,state:'FAILED',code:'ARGUMENT_INVALID'},expected,'COLD','MICROPHONE',180,.15).code,'ARGUMENT_INVALID');
+});
+
+// Fake child processes and synthetic numeric reports only: no Native or acoustic input.
+const replayCell={kind:'SILENCE' as const,sessionId:trial,threshold:.1};
+function childReport(report:any,exitCode:number){
+  const child:any=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.stdin=new EventEmitter();
+  child.stdin.write=()=>assert.fail('no stop for an immediately completed mock');child.stdin.destroy=()=>{};
+  queueMicrotask(()=>{child.stdout.emit('data',Buffer.from(JSON.stringify(report)));child.emit('close',exitCode);});return child;
+}
+async function observeMockReplay(raw:any,exitCode:number){
+  const m={kind:'SILENCE',requestedSeconds:60,samples:960000,pcmSha256:sha(Buffer.alloc(960000*4)),modelHashes:models};
+  const expected={modelHashes:models,keywordSha256:sha(liveKeyword(.1))};let saved:any;
+  try{await observeReplayCell(replayCell,async observer=>{
+    observer.expect(m);observer.expect(expected);observer.stage('NATIVE_EXECUTION');
+    const result=await runLiveChild('owned.exe',[],60,new AbortController().signal,()=>{},()=>childReport(raw,exitCode),undefined,undefined,observer.observeNative);
+    return validateCalReplayResult(result,expected,m,.1,observer.stage);
+  },async diagnostic=>{saved=diagnostic;});assert.fail('mock must reject');}
+  catch(error){assert.ok(error instanceof ReplayCellError);assert.equal(error.failureReportSaved,true);assert.deepEqual(error.diagnostic,saved);return error;}
+}
+test('Native FAILED/nonzero preserves overflow and bounded numeric evidence before success validation',async()=>{
+  const raw=replayReport(.1);raw.state='FAILED';raw.code='AUDIO_OVERFLOW';raw.capture.overflows=1;raw.buffer.highWater=4;
+  const error=await observeMockReplay(raw,2),d=error.diagnostic;
+  assert.equal(error.code,'CAL_REPLAY_NATIVE_FAILED');assert.equal(d.stage,'NATIVE_EXIT');assert.equal(d.exitCode,2);assert.equal(d.nativeCode,'AUDIO_OVERFLOW');
+  assert.equal(d.native.capture.overflows,1);assert.equal(d.native.buffer.highWater,4);assert.equal(d.native.checks.exitStateConsistent,true);
+  assert.equal(d.kind,'SILENCE');assert.equal(d.threshold,.1);assert.equal(d.sessionId,trial);
+});
+test('Native FAILED/zero remains rejected but its original code survives child exit/state rejection',async()=>{
+  const raw={schema:1,state:'FAILED',code:'MODEL_LOAD_FAILED'};
+  const error=await observeMockReplay(raw,0),d=error.diagnostic;
+  assert.equal(d.code,'CAL_REPLAY_NATIVE_FAILED');assert.equal(d.exitCode,0);assert.equal(d.nativeCode,'MODEL_LOAD_FAILED');
+  assert.equal(d.supervisorCode,'NATIVE_LIVE_CHILD_FAILED');assert.equal(d.native.checks.exitStateConsistent,false);
+});
+test('initialization failure without a replay header is reported as Native failure, not contract failure',async()=>{
+  const error=await observeMockReplay({schema:1,state:'FAILED',code:'RUNTIME_VERSION_MISMATCH'},2);
+  assert.equal(error.diagnostic.nativeCode,'RUNTIME_VERSION_MISMATCH');assert.equal(error.diagnostic.stage,'NATIVE_EXIT');
+  assert.equal(error.diagnostic.native.capture.processedSamples,null);assert.equal(error.diagnostic.native.checks.declaredSamplesMatch,null);
+});
+test('successful Native output with an invalid replay contract retains exact validation stage',async()=>{
+  const raw=replayReport(.1);raw.calibration.samples--;
+  const metadata=await observeMockReplay(raw,0);assert.equal(metadata.code,'CAL_REPLAY_CONTRACT_INVALID');
+  assert.equal(metadata.diagnostic.stage,'REPLAY_METADATA');assert.equal(metadata.diagnostic.native.checks.declaredSamplesMatch,false);
+  const blocks=replayReport(.1);blocks.details.blocks[0].decodeCalls=0;
+  const mismatch=await observeMockReplay(blocks,0);assert.equal(mismatch.diagnostic.stage,'BLOCK_DETAILS');assert.equal(mismatch.code,'CAL_REPLAY_CONTRACT_INVALID');
+});
+test('unknown native strings, raw errors, PCM, positions, extra context and nonnumeric fields never enter diagnostics',async()=>{
+  const secret='PRIVATE_SENTINEL_AUDIO_OR_CREDENTIAL',observer=new ReplayObservation({...replayCell,pcm:secret} as any);
+  observer.expect({samples:960000,pcmSha256:sha(secret),modelHashes:{...models,pcm:secret}} as any);
+  observer.observeNative({exitCode:2,report:{state:'FAILED',code:secret,pcm:[.1,.2],transcription:secret,deviceName:secret,
+    capture:{overflows:secret,processedSamples:-1},positions:[{timestampsSec:[1],pcm:secret}],cleanup:{threadsJoined:secret}}});
+  const d=observer.failure(new Error(secret)),text=JSON.stringify(d);
+  assert.equal(d.nativeCode,null);assert.equal(d.native.capture.overflows,null);assert.equal(d.native.capture.processedSamples,null);
+  assert.equal(d.native.cleanup.threadsJoined,null);assert.ok(Buffer.byteLength(text)<4096);
+  assert.doesNotMatch(text,/PRIVATE_SENTINEL|transcription|deviceName|timestampsSec|pcmSha256|encoder.onnx|\[0.1/);
+  assert.equal('pcm' in d,false);assert.equal('message' in d,false);assert.ok(!text.includes(sha(secret)));
+});
+test('malformed JSON keeps exit code without logging the raw child output',async()=>{
+  let saved:any;
+  await assert.rejects(observeReplayCell(replayCell,async observer=>{
+    observer.stage('NATIVE_EXECUTION');
+    const child:any=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.stdin=new EventEmitter();child.stdin.destroy=()=>{};
+    const p=runLiveChild('owned.exe',[],60,new AbortController().signal,()=>{},()=>child,undefined,undefined,observer.observeNative);
+    child.stdout.emit('data',Buffer.from('PRIVATE_RAW_NOT_JSON'));child.emit('close',0);return await p;
+  },async diagnostic=>{saved=diagnostic;}),ReplayCellError);
+  assert.equal(saved.exitCode,0);assert.equal(saved.native.reportAvailable,false);assert.doesNotMatch(JSON.stringify(saved),/PRIVATE_RAW_NOT_JSON/);
+});
+test('intermediate SILENCE .10 failure saves one diagnostic, preserves four earlier results and stops without retries',async()=>{
+  const parent=join(calibrationRoot,'runs');await mkdir(parent,{recursive:true});const out=join(parent,'synthetic-replay-'+randomBytes(16).toString('hex'));await mkdir(out);
+  const selections=['POSITIVE','SILENCE','SIMILAR'].map((kind,i)=>({kind,id:String(i+1).repeat(32)}));let calls=0;const original=new Map<string,string>();
+  try{
+    const operation=evaluateCalibrationCells(selections,new AbortController().signal,async(s,t)=>observeReplayCell({kind:s.kind as any,sessionId:s.id,threshold:t},async observer=>{
+      calls++;const raw=replayReport(t),m={kind:s.kind,requestedSeconds:60,samples:960000,pcmSha256:raw.pcmSha256,modelHashes:models,annotationSha256:sha('synthetic')};
+      const expected={modelHashes:models,keywordSha256:sha(liveKeyword(t))};observer.expect(m);observer.expect(expected);
+      if(calls===5){raw.state='FAILED';raw.code='AUDIO_OVERFLOW';raw.capture.overflows=1;}
+      const result={report:raw,exitCode:calls===5?2:0};observer.observeNative(result);
+      const report=validateCalReplayResult(result,expected,m,t,observer.stage);
+      return {manifest:m,report,summary:{kind:s.kind,threshold:t,rawHits:0}};
+    },d=>saveJson(join(out,`${s.kind}-${t}.failure.json`),d)),async(s,t,result)=>{
+      const path=join(out,`${s.kind}-${t}.json`);await saveJson(path,result);original.set(path,await readFile(path,'utf8'));
+    });
+    await assert.rejects(operation,ReplayCellError);assert.equal(calls,5);assert.equal(original.size,4);
+    for(const [path,bytes] of original)assert.equal(await readFile(path,'utf8'),bytes);
+    assert.deepEqual((await readdir(out)).sort(),['POSITIVE-0.05.json','POSITIVE-0.1.json','POSITIVE-0.15.json','SILENCE-0.1.failure.json','SILENCE-0.15.json']);
+    const failurePath=join(out,'SILENCE-0.1.failure.json'),bytes=await readFile(failurePath,'utf8'),d=JSON.parse(bytes);
+    assert.equal(d.threshold,.1);assert.equal(d.nativeCode,'AUDIO_OVERFLOW');assert.equal(d.kind,'SILENCE');assert.ok(Buffer.byteLength(bytes)<4096);
+    assert.equal((await stat(failurePath)).mode&0o777,0o600);
+    await assert.rejects(saveJson(failurePath,{replacement:true}),{code:'EEXIST'});assert.equal(await readFile(failurePath,'utf8'),bytes);
+    const error=await observeMockReplay({schema:1,state:'FAILED',code:'MODEL_LOAD_FAILED'},2);
+    await assert.rejects(observeReplayCell(replayCell,async()=>{throw error;},d=>saveJson(failurePath,d)),e=>e instanceof ReplayCellError&&!e.failureReportSaved);
+    assert.equal(await readFile(failurePath,'utf8'),bytes);
+  }finally{await rm(out,{recursive:true,force:true});}
 });

@@ -9,9 +9,10 @@ import { promisify } from 'node:util';
 import { sha } from './benchmark-contract.js';
 import { livePreflight,runLiveChild,cleanLiveReport } from './native-live.js';
 import { CalibrationAlignmentError,auditCalibrationAlignment } from './calibration-alignment.js';
+import { observeReplayCell,ReplayCellError,type ReplayObservation } from './replay-observation.js';
 import { NativeMarkers } from './native-fn-diagnostics.js';
 import { bindCalibrationWindows,validatePcm,retention,retentionMs,calibrationMaxSamples,checkedKind,checkHash,calibrationThresholds,calibrationFormat,
-  associateCalibration,validateCalReplay,validateCalCapture,captureSeconds,sessionSeconds,replaySeconds,digest,same,fail,type Kind } from './calibration-contract.js';
+  associateCalibration,validateCalReplayResult,validateCalCapture,captureSeconds,sessionSeconds,replaySeconds,digest,same,fail,type Kind } from './calibration-contract.js';
 export const calibrationRoot=resolve(import.meta.dirname,'../../.local/wake-word-spike/calibration');
 const localRoot=resolve(import.meta.dirname,'../../.local');
 function id(value:string){if(!/^[a-f0-9]{32}$/.test(value))fail('CAL_ID_INVALID');return value;}
@@ -32,7 +33,7 @@ async function json(path:string){
   await safeLocal(path);const s=await lstat(path);if(!s.isFile()||s.size>4*1024*1024)fail('CAL_JSON_INVALID');
   try{return JSON.parse((await readFile(path,'utf8')).replace(/^\uFEFF/,''));}catch{fail('CAL_JSON_INVALID');}
 }
-async function saveJson(path:string,value:any){await safeLocal(path,true);await writeFile(path,JSON.stringify(value)+'\n',{flag:'wx',mode:0o600});}
+export async function saveJson(path:string,value:any){await safeLocal(path,true);await writeFile(path,JSON.stringify(value)+'\n',{flag:'wx',mode:0o600});}
 function validateConsent(c:any,session:string,now=Date.now()){
   if(c?.schema!==1||c.contract!=='ATLAS_CALIBRATION_F32LE_V1'||c.trialId!==id(session)||c.consent!=='EXPLICIT_PER_CAPTURE')fail('CAL_CONSENT_INVALID');
   sessionSeconds(c);return retention(c.createdAtUtc,c.expiresAtUtc,now);
@@ -139,16 +140,22 @@ async function capture(exe:string,lock:string,kind:Kind){
   }catch(e){try{await saveJson(join(dir,'failure.json'),{schema:1,state:'FAILED_OR_CANCELLED',cleanupVerified,sessionId:trial,...(e instanceof CalibrationAlignmentError?{code:e.code,diagnostics:e.diagnostics}:{})});}catch{/* Never replace the original failure or silently delete acoustic data. */}throw e;}
   finally{process.removeListener('SIGINT',stop);rl.close();console.error(`CAL_SESSION ${trial} — verificar status; eliminar manualmente cualquier PCM parcial.`);}
 }
-async function replay(exe:string,lock:string,sessionId:string,threshold:number,signal:AbortSignal,frozen:string){
+async function replay(exe:string,lock:string,sessionId:string,threshold:number,signal:AbortSignal,frozen:string,observer:ReplayObservation){
+  observer.stage('DATASET_LOAD');
   const {manifest:m,pcm}=await loadCalibrationSession(sessionId);
   if(digest(m)!==frozen)fail('CAL_SESSION_CHANGED');
+  observer.expect(m);observer.stage('PREFLIGHT');
   const ready=await livePreflight(exe,lock,undefined,threshold);
+  observer.expect(ready.expected);observer.stage('IDENTITY');
   if(!same(ready.expected.modelHashes,m.modelHashes)||sha(await readFile(await safeLocal(lock)))!==m.lockSha256)fail('CAL_IDENTITY_MISMATCH');
   const args=['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].map(n=>resolve(ready.root,'model',n));
+  observer.stage('NATIVE_EXECUTION');
   const raw=await runLiveChild(ready.exe,[...args,ready.keyword,'COLD',String(sessionSeconds(m)),'--threshold',String(threshold),'--detail',
-    '--calibration-replay',pcm,'--calibration-samples',String(m.samples),'--calibration-sha',m.pcmSha256],replaySeconds(m),signal);
-  const r=validateCalReplay(raw.report,ready.expected,m,threshold);if(raw.exitCode!==0)fail('CAL_REPLAY_INCOMPLETE');
+    '--calibration-replay',pcm,'--calibration-samples',String(m.samples),'--calibration-sha',m.pcmSha256],replaySeconds(m),signal,undefined,undefined,undefined,undefined,observer.observeNative);
+  const r=validateCalReplayResult(raw,ready.expected,m,threshold,observer.stage);
+  observer.stage('DATASET_RECHECK');
   if(digest((await loadCalibrationSession(sessionId)).manifest)!==frozen)fail('CAL_SESSION_CHANGED'); // Revalidate after the actual Feed-boundary hash.
+  observer.stage('ASSOCIATION');
   return {manifest:m,report:r,summary:associateCalibration(r,m)};
 }
 async function matrix(exe:string,lock:string,positive:string,silence:string,similar:string,runId:string){
@@ -159,14 +166,14 @@ async function matrix(exe:string,lock:string,positive:string,silence:string,simi
   for(const s of selections){const m=(await loadCalibrationSession(s.id)).manifest;if(m.kind!==s.kind)fail('CAL_KIND_INVALID');frozen.set(s.id,digest(m));}
   const out=join(calibrationRoot,'runs',runId);await safeLocal(out,true);if(await exists(out))fail('CAL_RUN_EXISTS');await mkdir(out,{recursive:true,mode:0o700});
   const controller=new AbortController(),stop=()=>controller.abort();process.on('SIGINT',stop);
-  const rows:any[]=[];let modelIdentity:string|undefined;
-  try{for(const s of selections)for(const t of calibrationThresholds){
-    if(controller.signal.aborted)fail('CAL_CANCELLED');
-    const result=await replay(exe,lock,s.id,t,controller.signal,frozen.get(s.id)!);
-    const identity=digest(result.manifest.modelHashes);if(modelIdentity&&modelIdentity!==identity)fail('CAL_IDENTITY_MISMATCH');modelIdentity=identity;
-    await saveJson(join(out,`${s.kind}-${t}.json`),{schema:1,sessionId:s.id,pcmSha256:result.manifest.pcmSha256,report:result.report,summary:result.summary});
-    rows.push({sessionId:s.id,pcmSha256:result.manifest.pcmSha256,samples:result.manifest.samples,requestedSeconds:sessionSeconds(result.manifest),annotationSha256:result.manifest.annotationSha256,...result.summary});
-  }}finally{process.removeListener('SIGINT',stop);}
+  let evaluated:{rows:any[];modelIdentity:string|undefined};
+  try{evaluated=await evaluateCalibrationCells(selections,controller.signal,
+    (s,t)=>observeReplayCell({kind:s.kind as Kind,sessionId:s.id,threshold:t},
+      observer=>replay(exe,lock,s.id,t,controller.signal,frozen.get(s.id)!,observer),
+      diagnostic=>saveJson(join(out,`${s.kind}-${t}.failure.json`),diagnostic)),
+    (s,t,result)=>saveJson(join(out,`${s.kind}-${t}.json`),{schema:1,sessionId:s.id,pcmSha256:result.manifest.pcmSha256,report:result.report,summary:result.summary}));
+  }finally{process.removeListener('SIGINT',stop);}
+  const {rows,modelIdentity}=evaluated;
   for(const row of rows){const reference=rows.find(r=>r.kind===row.kind&&r.threshold===.15)!;
     row.deltaFromReference={associatedPronunciations:row.associatedPronunciations===null?null:row.associatedPronunciations-reference.associatedPronunciations,
       falsePositives:row.falsePositives-reference.falsePositives,rawHits:row.rawHits-reference.rawHits};}
@@ -174,6 +181,19 @@ async function matrix(exe:string,lock:string,positive:string,silence:string,simi
   await saveJson(join(out,'matrix.json'),{...result,integritySha256:digest(result)});
   return {state:result.state,runId,rows:rows.map(r=>({kind:r.kind,threshold:r.threshold,associatedPronunciations:r.associatedPronunciations,
     omissions:r.omissions,duplicates:r.duplicates,rawHits:r.rawHits,falsePositives:r.falsePositives})),acceptance:result.acceptance};
+}
+// Testable orchestration seam: same ordering, no retries and persist only validated cells.
+export async function evaluateCalibrationCells(selections:Array<{kind:string;id:string}>,signal:AbortSignal,
+  execute:(selection:{kind:string;id:string},threshold:number)=>Promise<any>,persist:(selection:{kind:string;id:string},threshold:number,result:any)=>Promise<void>){
+  const rows:any[]=[];let modelIdentity:string|undefined;
+  for(const s of selections)for(const t of calibrationThresholds){
+    if(signal.aborted)fail('CAL_CANCELLED');
+    const result=await execute(s,t);
+    const identity=digest(result.manifest.modelHashes);if(modelIdentity&&modelIdentity!==identity)fail('CAL_IDENTITY_MISMATCH');modelIdentity=identity;
+    await persist(s,t,result);
+    rows.push({sessionId:s.id,pcmSha256:result.manifest.pcmSha256,samples:result.manifest.samples,requestedSeconds:sessionSeconds(result.manifest),annotationSha256:result.manifest.annotationSha256,...result.summary});
+  }
+  return {rows,modelIdentity};
 }
 export function compareCalibrationMatrices(a:any,b:any){
   for(const r of [a,b]){const {integritySha256,...body}=r??{};
@@ -204,5 +224,5 @@ if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
     else if(op==='compare'&&args.length===2)result=compareCalibrationMatrices(await json(args[0]!),await json(args[1]!));else fail('CAL_ARGUMENT_INVALID');
     console.log(JSON.stringify(result));
     if(op==='audit'&&result.state!=='ALIGNMENT_VALID')process.exitCode=2;
-  }catch(e){const code=(e as {code?:string}).code;console.log(JSON.stringify({state:'FAILED',code:code&&/^CAL_[A-Z_]+$/.test(code)?code:'CAL_OPERATION_FAILED',productionGo:false,...(e instanceof CalibrationAlignmentError?{diagnostics:e.diagnostics}:{})}));process.exitCode=2;}
+  }catch(e){const code=(e as {code?:string}).code;console.log(JSON.stringify({state:'FAILED',code:code&&/^CAL_[A-Z_]+$/.test(code)?code:'CAL_OPERATION_FAILED',productionGo:false,...(e instanceof ReplayCellError?{replayDiagnostic:e.diagnostic,failureReportSaved:e.failureReportSaved}:{}),...(e instanceof CalibrationAlignmentError?{diagnostics:e.diagnostics}:{})}));process.exitCode=2;}
 }
