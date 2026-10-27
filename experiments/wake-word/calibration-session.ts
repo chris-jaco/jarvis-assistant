@@ -10,6 +10,7 @@ import { sha } from './benchmark-contract.js';
 import { livePreflight,runLiveChild,cleanLiveReport } from './native-live.js';
 import { CalibrationAlignmentError,auditCalibrationAlignment } from './calibration-alignment.js';
 import { observeReplayCell,ReplayCellError,type ReplayObservation } from './replay-observation.js';
+import { createReplayAuthorization,validateReplayAuthorization,checkedReplayLock,replayTimingMode,historicalTimingMode,type ReplayTimingMode } from './replay-authorization.js';
 import { NativeMarkers } from './native-fn-diagnostics.js';
 import { bindCalibrationWindows,validatePcm,retention,retentionMs,calibrationMaxSamples,checkedKind,checkHash,calibrationThresholds,calibrationFormat,
   associateCalibration,validateCalReplayResult,validateCalCapture,captureSeconds,sessionSeconds,replaySeconds,digest,same,fail,type Kind } from './calibration-contract.js';
@@ -102,6 +103,11 @@ export async function auditCalibrationSession(session:string,kind:Kind){
   if(report.fnDiagnostics?.trialId!==session)fail('CAL_SESSION_INVALID');
   return {sessionId:session,failureRecorded,...auditCalibrationAlignment(report,kind)};
 }
+async function verifyPrivateDirectory(dir:string){
+  try{await promisify(execFile)(join(process.env.SystemRoot??'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'),
+    ['-NoProfile','-NonInteractive','-File',fileURLToPath(new URL('./calibration-private-directory.ps1',import.meta.url)),'-Directory',dir],{timeout:10000,maxBuffer:4096});}
+  catch{fail('CAL_PRIVATE_DIRECTORY_UNVERIFIED');}
+}
 async function capture(exe:string,lock:string,kind:Kind){
   if(process.platform!=='win32'||process.arch!=='x64')fail('CAL_WINDOWS_REQUIRED');
   const statuses=await retentionStatus();if(statuses.some(s=>s.warning))fail('CAL_RETENTION_REVIEW_REQUIRED');
@@ -140,26 +146,69 @@ async function capture(exe:string,lock:string,kind:Kind){
   }catch(e){try{await saveJson(join(dir,'failure.json'),{schema:1,state:'FAILED_OR_CANCELLED',cleanupVerified,sessionId:trial,...(e instanceof CalibrationAlignmentError?{code:e.code,diagnostics:e.diagnostics}:{})});}catch{/* Never replace the original failure or silently delete acoustic data. */}throw e;}
   finally{process.removeListener('SIGINT',stop);rl.close();console.error(`CAL_SESSION ${trial} — verificar status; eliminar manualmente cualquier PCM parcial.`);}
 }
-async function replay(exe:string,lock:string,sessionId:string,threshold:number,signal:AbortSignal,frozen:string,observer:ReplayObservation){
+function authorizationPath(session:string,lockHash:string,mode:ReplayTimingMode){
+  return join(calibrationRoot,'authorizations',`${id(session)}-${checkHash(lockHash)}-${replayTimingMode(mode)}.json`);
+}
+// Only this explicit interactive operation creates an annex; matrix never creates one.
+export async function saveReplayAuthorization(path:string,annex:any){
+  try{await saveJson(path,annex);}catch(e){if((e as NodeJS.ErrnoException).code==='EEXIST')fail('CAL_AUTHORIZATION_EXISTS');throw e;}
+}
+async function authorizeReplay(exe:string,lock:string,captureLock:string,session:string,mode:ReplayTimingMode){
+  if(process.platform!=='win32'||process.arch!=='x64')fail('CAL_WINDOWS_REQUIRED');
+  const {manifest}=await loadCalibrationSession(id(session));
+  const ready=await livePreflight(exe,lock,undefined,.15);
+  if(!same(ready.expected.modelHashes,manifest.modelHashes))fail('CAL_IDENTITY_MISMATCH');
+  const oldText=await readFile(await safeLocal(captureLock),'utf8'),nextText=await readFile(await safeLocal(lock),'utf8');
+  const annex=createReplayAuthorization(manifest,oldText,nextText,sha(await readFile(await safeLocal(ready.exe))),mode);
+  const expected=`AUTORIZAR ${session} ${annex.replayLockSha256} ${mode}`;
+  if(await prompt(`Replay experimental; no autoriza Live ni amplía retención. Escribí ${expected}: `)!==expected)fail('CAL_AUTHORIZATION_CONSENT_REQUIRED');
+  // Recheck all inputs after operator interaction. No runtime is started here.
+  const after=(await loadCalibrationSession(session)).manifest;
+  const again=await livePreflight(exe,lock,undefined,.15);
+  if(!same(after,manifest)||!same(again.expected,ready.expected)||await readFile(await safeLocal(captureLock),'utf8')!==oldText)fail('CAL_SESSION_CHANGED');
+  validateReplayAuthorization(annex,annex.integritySha256,after,await readFile(await safeLocal(lock),'utf8'),sha(await readFile(await safeLocal(again.exe))),mode);
+  const path=authorizationPath(session,annex.replayLockSha256,mode);
+  await safeLocal(path,true);await mkdir(join(calibrationRoot,'authorizations'),{recursive:true,mode:0o700});
+  await verifyPrivateDirectory(join(calibrationRoot,'authorizations'));
+  await saveReplayAuthorization(path,annex);
+  return {state:'REPLAY_AUTHORIZED',datasetId:session,timingMode:mode,authorizationSha256:annex.integritySha256,
+    replayLockSha256:annex.replayLockSha256,executableSha256:annex.executableSha256,expiresAtUtc:annex.expiresAtUtc,productionGo:false};
+}
+async function replayIdentity(exe:string,lock:string,m:any,mode:ReplayTimingMode,pin?:string){
+  const text=await readFile(await safeLocal(lock),'utf8'),lockHash=sha(text),executableSha256=sha(await readFile(await safeLocal(exe)));
+  checkedReplayLock(text);
+  if(mode==='STRICT_REALTIME'&&lockHash===m.lockSha256&&!pin)return {captureLockSha256:m.lockSha256,replayLockSha256:lockHash,executableSha256,authorizationSha256:null,timingMode:mode};
+  if(!pin)fail('CAL_AUTHORIZATION_REQUIRED');
+  const path=authorizationPath(m.trialId,lockHash,mode);
+  if(!await exists(await safeLocal(path,true)))fail('CAL_AUTHORIZATION_REQUIRED');
+  const annex=await json(path);
+  return validateReplayAuthorization(annex,pin!,m,text,executableSha256,mode);
+}
+async function replay(exe:string,lock:string,sessionId:string,threshold:number,signal:AbortSignal,frozen:string,observer:ReplayObservation,mode:ReplayTimingMode='STRICT_REALTIME',pin?:string){
   observer.stage('DATASET_LOAD');
   const {manifest:m,pcm}=await loadCalibrationSession(sessionId);
   if(digest(m)!==frozen)fail('CAL_SESSION_CHANGED');
   observer.expect(m);observer.stage('PREFLIGHT');
   const ready=await livePreflight(exe,lock,undefined,threshold);
   observer.expect(ready.expected);observer.stage('IDENTITY');
-  if(!same(ready.expected.modelHashes,m.modelHashes)||sha(await readFile(await safeLocal(lock)))!==m.lockSha256)fail('CAL_IDENTITY_MISMATCH');
+  if(!same(ready.expected.modelHashes,m.modelHashes))fail('CAL_IDENTITY_MISMATCH');
+  const provenance=await replayIdentity(ready.exe,lock,m,mode,pin);
   const args=['encoder.onnx','decoder.onnx','joiner.onnx','tokens.txt'].map(n=>resolve(ready.root,'model',n));
   observer.stage('NATIVE_EXECUTION');
   const raw=await runLiveChild(ready.exe,[...args,ready.keyword,'COLD',String(sessionSeconds(m)),'--threshold',String(threshold),'--detail',
-    '--calibration-replay',pcm,'--calibration-samples',String(m.samples),'--calibration-sha',m.pcmSha256],replaySeconds(m),signal,undefined,undefined,undefined,undefined,observer.observeNative);
-  const r=validateCalReplayResult(raw,ready.expected,m,threshold,observer.stage);
+    '--calibration-replay',pcm,'--calibration-samples',String(m.samples),'--calibration-sha',m.pcmSha256,...(mode==='ACOUSTIC_BACKPRESSURE'?['--replay-timing',mode]:[])],replaySeconds(m),signal,undefined,undefined,undefined,undefined,observer.observeNative);
+  const r=validateCalReplayResult(raw,ready.expected,m,threshold,observer.stage,mode,provenance.authorizationSha256===null);
   observer.stage('DATASET_RECHECK');
   if(digest((await loadCalibrationSession(sessionId)).manifest)!==frozen)fail('CAL_SESSION_CHANGED'); // Revalidate after the actual Feed-boundary hash.
+  await livePreflight(exe,lock,undefined,threshold);
+  if(!same(provenance,await replayIdentity(ready.exe,lock,m,mode,pin)))fail('CAL_IDENTITY_MISMATCH');
   observer.stage('ASSOCIATION');
-  return {manifest:m,report:r,summary:associateCalibration(r,m)};
+  return {manifest:m,report:{...r,replayProvenance:provenance},summary:{...associateCalibration(r,m),timingMode:mode,replayProvenance:provenance}};
 }
-async function matrix(exe:string,lock:string,positive:string,silence:string,similar:string,runId:string){
-  if(process.platform!=='win32'||process.arch!=='x64')fail('CAL_WINDOWS_REQUIRED');id(runId);
+async function matrix(exe:string,lock:string,positive:string,silence:string,similar:string,runId:string,mode:ReplayTimingMode='STRICT_REALTIME',pins:string[]=[]){
+  if(process.platform!=='win32'||process.arch!=='x64')fail('CAL_WINDOWS_REQUIRED');id(runId);replayTimingMode(mode);
+  if(pins.length!==0&&pins.length!==3)fail('CAL_ARGUMENT_INVALID');pins.forEach(checkHash);
+  if(mode==='ACOUSTIC_BACKPRESSURE'&&pins.length!==3)fail('CAL_AUTHORIZATION_REQUIRED');
   const selections=[{kind:'POSITIVE',id:positive},{kind:'SILENCE',id:silence},{kind:'SIMILAR',id:similar}];
   if(new Set(selections.map(s=>s.id)).size!==3)fail('CAL_SESSION_INVALID');
   const frozen=new Map<string,string>();
@@ -168,18 +217,18 @@ async function matrix(exe:string,lock:string,positive:string,silence:string,simi
   const controller=new AbortController(),stop=()=>controller.abort();process.on('SIGINT',stop);
   let evaluated:{rows:any[];modelIdentity:string|undefined};
   try{evaluated=await evaluateCalibrationCells(selections,controller.signal,
-    (s,t)=>observeReplayCell({kind:s.kind as Kind,sessionId:s.id,threshold:t},
-      observer=>replay(exe,lock,s.id,t,controller.signal,frozen.get(s.id)!,observer),
+    (s,t)=>observeReplayCell({kind:s.kind as Kind,sessionId:s.id,threshold:t,timingMode:mode},
+      observer=>replay(exe,lock,s.id,t,controller.signal,frozen.get(s.id)!,observer,mode,pins[selections.findIndex(x=>x.id===s.id)]),
       diagnostic=>saveJson(join(out,`${s.kind}-${t}.failure.json`),diagnostic)),
-    (s,t,result)=>saveJson(join(out,`${s.kind}-${t}.json`),{schema:1,sessionId:s.id,pcmSha256:result.manifest.pcmSha256,report:result.report,summary:result.summary}));
+    (s,t,result)=>saveJson(join(out,`${s.kind}-${t}.json`),{schema:1,timingMode:mode,sessionId:s.id,pcmSha256:result.manifest.pcmSha256,report:result.report,summary:result.summary}));
   }finally{process.removeListener('SIGINT',stop);}
   const {rows,modelIdentity}=evaluated;
   for(const row of rows){const reference=rows.find(r=>r.kind===row.kind&&r.threshold===.15)!;
     row.deltaFromReference={associatedPronunciations:row.associatedPronunciations===null?null:row.associatedPronunciations-reference.associatedPronunciations,
       falsePositives:row.falsePositives-reference.falsePositives,rawHits:row.rawHits-reference.rawHits};}
-  const result={schema:1,state:'NINE_EXPERIMENTAL_EVALUATIONS_COMPLETE',runId,referenceThreshold:.15,modelIdentity,rows,acceptance:'WINDOWS_ACOUSTIC_REVIEW_REQUIRED_NO_PRODUCTION_GO'};
+  const result={schema:1,state:'NINE_EXPERIMENTAL_EVALUATIONS_COMPLETE',runId,timingMode:mode,referenceThreshold:.15,modelIdentity,rows,acceptance:'WINDOWS_ACOUSTIC_REVIEW_REQUIRED_NO_PRODUCTION_GO'};
   await saveJson(join(out,'matrix.json'),{...result,integritySha256:digest(result)});
-  return {state:result.state,runId,rows:rows.map(r=>({kind:r.kind,threshold:r.threshold,associatedPronunciations:r.associatedPronunciations,
+  return {state:result.state,runId,timingMode:mode,rows:rows.map(r=>({kind:r.kind,threshold:r.threshold,associatedPronunciations:r.associatedPronunciations,
     omissions:r.omissions,duplicates:r.duplicates,rawHits:r.rawHits,falsePositives:r.falsePositives})),acceptance:result.acceptance};
 }
 // Testable orchestration seam: same ordering, no retries and persist only validated cells.
@@ -201,9 +250,18 @@ export function compareCalibrationMatrices(a:any,b:any){
     if(checkHash(integritySha256)!==digest(body)||r.schema!==1||r.state!=='NINE_EXPERIMENTAL_EVALUATIONS_COMPLETE'||r.referenceThreshold!==.15||!Array.isArray(r.rows)||r.rows.length!==9)fail('CAL_MATRIX_INVALID');}
   if(a.runId===b.runId)fail('CAL_INDEPENDENT_RUNS_REQUIRED');
   if(a.modelIdentity!==b.modelIdentity)fail('CAL_IDENTITY_MISMATCH');
+  const mode=historicalTimingMode(a.timingMode);if(mode!==historicalTimingMode(b.timingMode))fail('CAL_TIMING_MODE_MISMATCH');
   const keys=new Set();
   for(let i=0;i<9;i++){
     const x=a.rows[i],y=b.rows[i],key=`${x.kind}-${x.threshold}`;
+    if(historicalTimingMode(x.timingMode)!==mode||historicalTimingMode(y.timingMode)!==mode)fail('CAL_TIMING_MODE_MISMATCH');
+    for(const p of [x.replayProvenance,y.replayProvenance])if(p!==undefined){
+      if(!p||p.timingMode!==mode)fail('CAL_IDENTITY_MISMATCH');
+      for(const k of ['captureLockSha256','replayLockSha256','executableSha256'])checkHash(p[k]);
+      if(p.authorizationSha256!==null)checkHash(p.authorizationSha256);
+      if(p.authorizationSha256===null&&p.captureLockSha256!==p.replayLockSha256)fail('CAL_IDENTITY_MISMATCH');
+    }
+    if(!same(x.replayProvenance??null,y.replayProvenance??null)||(mode==='ACOUSTIC_BACKPRESSURE'&&(!x.replayProvenance||x.replayProvenance.timingMode!==mode||!x.replayProvenance.authorizationSha256)))fail('CAL_IDENTITY_MISMATCH');
     checkedKind(x.kind);if(!calibrationThresholds.includes(x.threshold)||keys.has(key))fail('CAL_MATRIX_INVALID');keys.add(key);
     replaySeconds(x);replaySeconds(y);if(sessionSeconds(x)!==sessionSeconds(y))fail('CAL_RESULTS_INCONSISTENT');
     id(x.sessionId);for(const k of ['samples','rawHits','detections','suppressedHits','duplicates','falsePositives'])if(!Number.isSafeInteger(x[k])||x[k]<0)fail('CAL_MATRIX_INVALID');
@@ -212,12 +270,15 @@ export function compareCalibrationMatrices(a:any,b:any){
       if(x[k]===undefined||!same(x[k],y[k]))fail('CAL_RESULTS_INCONSISTENT');
     checkHash(x.recognitionSignature);checkHash(x.pcmSha256);checkHash(x.annotationSha256);
   }
-  return {state:'REPRODUCIBLE_ON_SAME_PCM',cells:9,productionGo:false};
+  return {state:'REPRODUCIBLE_ON_SAME_PCM',timingMode:mode,cells:9,productionGo:false};
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   try{const [op,...args]=process.argv.slice(2);let result:any;
     if(op==='capture'&&args.length===3)result=await capture(args[0]!,args[1]!,checkedKind(args[2]!));
     else if(op==='matrix'&&args.length===6)result=await matrix(args[0]!,args[1]!,args[2]!,args[3]!,args[4]!,args[5]!);
+    else if(op==='matrix'&&args.length===8&&args[6]==='--timing-mode')result=await matrix(args[0]!,args[1]!,args[2]!,args[3]!,args[4]!,args[5]!,replayTimingMode(args[7]));
+    else if(op==='matrix'&&args.length===12&&args[6]==='--timing-mode'&&args[8]==='--authorizations')result=await matrix(args[0]!,args[1]!,args[2]!,args[3]!,args[4]!,args[5]!,replayTimingMode(args[7]),args.slice(9));
+    else if(op==='authorize-replay'&&args.length===5)result=await authorizeReplay(args[0]!,args[1]!,args[2]!,id(args[3]!),replayTimingMode(args[4]));
     else if(op==='audit'&&args.length===2)result=await auditCalibrationSession(id(args[0]!),checkedKind(args[1]!));
     else if(op==='status'&&!args.length)result={state:'RETENTION_STATUS',sessions:await retentionStatus()};
     else if(op==='delete'&&args.length===1){const session=id(args[0]!);result=await eraseAcoustic(session,await prompt(`Escribí BORRAR ${session}: `));}

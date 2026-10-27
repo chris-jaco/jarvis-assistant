@@ -457,3 +457,20 @@ test('intermediate SILENCE .10 failure saves one diagnostic, preserves four earl
     assert.equal(await readFile(failurePath,'utf8'),bytes);
   }finally{await rm(out,{recursive:true,force:true});}
 });
+
+test('acoustic replay keeps PCM hashes, decoder block positions and cooldown association; never certifies Live',()=>{
+  const raw=replayReport(.15,[27,46,91]);
+  const session={kind:'POSITIVE',samples:960000,pcmSha256:raw.pcmSha256,annotationSha256:sha('ann'),modelHashes:models,windows:bindCalibrationWindows(captureReport(),'POSITIVE')};
+  const expected={modelHashes:models,keywordSha256:sha(liveKeyword(.15))};
+  const strict=validateCalReplay(raw,expected,session,.15);
+  assert.throws(()=>validateCalReplay(raw,expected,session,.15,undefined,'STRICT_REALTIME',false),{message:'CAL_TIMING_MODE_INVALID'});
+  raw.replayTiming={timingMode:'ACOUSTIC_BACKPRESSURE',waitCount:2,capacityWaitWallMs:1000,maxCapacityWaitWallMs:502,totalWallMs:62000,cancelled:false};
+  const acoustic=validateCalReplay(raw,expected,session,.15,undefined,'ACOUSTIC_BACKPRESSURE');
+  assert.equal(acoustic.technicalThresholdsMet,false);assert.equal(acoustic.processedPcmSha256,strict.processedPcmSha256);
+  assert.deepEqual(acoustic.details,strict.details);assert.deepEqual(acoustic.positions,strict.positions);
+  assert.equal(associateCalibration(acoustic,session).recognitionSignature,associateCalibration(strict,session).recognitionSignature);
+  assert.equal(acoustic.replayTiming.capacityWaitWallMs,1000);
+  assert.throws(()=>validateCalReplay(raw,expected,session,.15),{message:'CAL_TIMING_MODE_INVALID'});
+  raw.replayTiming.cancelled=true;assert.throws(()=>validateCalReplay(raw,expected,session,.15,undefined,'ACOUSTIC_BACKPRESSURE'));
+  raw.replayTiming.cancelled=false;raw.processedPcmSha256=sha('changed Feed');assert.throws(()=>validateCalReplay(raw,expected,session,.15,undefined,'ACOUSTIC_BACKPRESSURE'));
+});

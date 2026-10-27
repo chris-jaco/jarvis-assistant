@@ -51,6 +51,7 @@ struct Shared {
   double thresholdFloat32 = -1;
   bool replay = false;
   bool calReplay=false,calSave=false,calPersisted=false;
+  bool acousticBackpressure=false;atlas_cal::CapacityWait capacityWait;double replayBeginWall=0;
   size_t calLimit=atlas_cal::shortMaxSamples,diagnosticLimit=1300;
   size_t calSamples=0;std::string calPath,calHash;atlas_cal::Buffer recording;
   std::string wavHash, pcmHash, processedPcmHash;
@@ -334,10 +335,13 @@ static void CalibrationReplay(Shared &s,Progress &progress) noexcept {
     auto bytes=CalRead(path,s.calLimit);struct Wipe{std::vector<unsigned char>&b;~Wipe(){volatile unsigned char *p=b.data();for(size_t i=0;i<b.size();i++)p[i]=0;}}wipe{bytes};
     if(bytes.size()!=s.calSamples*4||Hash(bytes.data(),bytes.size())!=s.calHash)throw Failure{"PCM_HASH_MISMATCH"};
     s.pcmHash=s.calHash;s.format={16000,1,4,32,live::Kind::float32};s.firTaps=1;
-    live::Assembler assembler;const double start=Wall();s.started.store(true);progress.write("REPLAY_STARTED\n");
+    live::Assembler assembler;const double start=Wall();s.replayBeginWall=start;s.started.store(true);progress.write("REPLAY_STARTED\n");
     for(size_t at=0;at<s.calSamples&&!stopped(s);at+=1600){
       const size_t n=std::min<size_t>(1600,s.calSamples-at);
       while(!stopped(s)&&Wall()<start+(at+n)/16.0)WaitForSingleObject(s.stop.h,1);
+      if(s.acousticBackpressure&&!s.capacityWait.beforeBlock([&]{return s.queue.pending();},[&]{return stopped(s);},[]{return Wall();},[&]{
+        if(WaitForSingleObject(s.stop.h,5)==WAIT_FAILED)throw Failure{"CAPTURE_WAIT_FAILED"};
+      },start+(std::ceil(s.calSamples/16000.0)+60)*1000))break;
       if(stopped(s))break;s.frames+=n;
       for(size_t i=0;i<n;i++){
         float value=0;std::memcpy(&value,bytes.data()+(at+i)*4,4);if(!std::isfinite(value))throw Failure{"CALIBRATION_PCM_INVALID"};
@@ -348,7 +352,7 @@ static void CalibrationReplay(Shared &s,Progress &progress) noexcept {
     }
     s.tail=assembler.tail();s.captureWallMs=Wall()-start;
     if(CalFileHash(path,s.calLimit)!=s.calHash)throw Failure{"PCM_HASH_MISMATCH"};
-  }catch(const Failure&e){s.fail(e.code);}catch(const live::Error&e){s.fail(e.code);}catch(...){s.fail("CALIBRATION_REPLAY_FAILED");}
+  }catch(const Failure&e){s.fail(e.code);}catch(const atlas_cal::Error&e){s.fail(e.code);}catch(const live::Error&e){s.fail(e.code);}catch(...){s.fail("CALIBRATION_REPLAY_FAILED");}
   s.captureFinished.store(true,std::memory_order_release);SetEvent(s.captureDone.h);SetEvent(s.data.h);progress.write("REPLAY_STOPPED\n");
 }
 
@@ -533,6 +537,8 @@ static void Report(Shared &s, const std::vector<Dll> &dlls, const std::vector<st
   if(!detail)o<<"null";else{o<<"{\"decodes\":[";for(size_t i=0;i<s.run.decodes.size();i++){if(i)o<<',';auto d=s.run.decodes[i];o<<"{\"block\":"<<d.block<<",\"wallMs\":"<<d.wall<<",\"threadCpuMs\":";Number(o,d.cpu);o<<'}';}o<<"],\"blocks\":[";
     for(size_t i=0;i<s.run.blocks.size();i++){if(i)o<<',';auto b=s.run.blocks[i];o<<"{\"sequence\":"<<b.sequence<<",\"wallMs\":"<<b.wall<<",\"decodeCalls\":"<<b.calls<<",\"rawHits\":"<<b.hits<<'}';}o<<"]}";}
   if(s.calSave||s.calReplay)o<<",\"calibration\":{\"schema\":1,\"mode\":\""<<(s.calSave?"CAPTURE":"REPLAY")<<"\",\"samples\":"<<s.calSamples<<",\"sha256\":\""<<s.calHash<<"\",\"persisted\":"<<(s.calPersisted?"true":"false")<<'}';
+  if(s.calReplay)o<<",\"replayTiming\":{\"timingMode\":\""<<(s.acousticBackpressure?"ACOUSTIC_BACKPRESSURE":"STRICT_REALTIME")<<"\",\"waitCount\":"<<s.capacityWait.count
+    <<",\"capacityWaitWallMs\":"<<s.capacityWait.totalMs<<",\"maxCapacityWaitWallMs\":"<<s.capacityWait.maxMs<<",\"totalWallMs\":"<<(s.replayBeginWall?Wall()-s.replayBeginWall:0)<<",\"cancelled\":"<<(s.cancelled.load()?"true":"false")<<'}';
   if(s.fnEnabled){
     o<<",\"fnDiagnostics\":{\"schema\":1,\"trialId\":\""<<s.trialId<<"\",\"clock\":\"QPC_RELATIVE_MS\",\"signalDomain\":\"POST_FIR_MONO_16000\",\"channelHealthy\":"<<(s.fnChannelHealthy?"true":"false")<<",\"blocks\":[";
     for(size_t i=0;i<s.diagnosticBlocks.size();i++){if(i)o<<',';const auto &b=s.diagnosticBlocks[i];const auto &m=b.signal;
@@ -548,10 +554,11 @@ static void Report(Shared &s, const std::vector<Dll> &dlls, const std::vector<st
 }
 
 static int NativeLive(int argc, char **argv, Progress &progress) {
-  const char *replay=nullptr,*trial=nullptr,*calReplay=nullptr,*calSave=nullptr,*calCount=nullptr,*calSha=nullptr,*consent=nullptr,*calKind=nullptr;bool detail=false,thresholdSpecified=false;double parsedThreshold=.25;
+  const char *replay=nullptr,*trial=nullptr,*calReplay=nullptr,*calSave=nullptr,*calCount=nullptr,*calSha=nullptr,*consent=nullptr,*calKind=nullptr,*timingMode=nullptr;bool detail=false,thresholdSpecified=false;double parsedThreshold=.25;
   for(int i=8;i<argc;i++){
     if(!std::strcmp(argv[i],"--detail")&&!detail)detail=true;
     else if(!std::strcmp(argv[i],"--replay")&&!replay&&i+1<argc)replay=argv[++i];
+    else if(!std::strcmp(argv[i],"--replay-timing")&&!timingMode&&i+1<argc)timingMode=argv[++i];
     else if(!std::strcmp(argv[i],"--calibration-replay")&&!calReplay&&i+1<argc)calReplay=argv[++i];
     else if(!std::strcmp(argv[i],"--calibration-save")&&!calSave&&i+1<argc)calSave=argv[++i];
     else if(!std::strcmp(argv[i],"--calibration-samples")&&!calCount&&i+1<argc)calCount=argv[++i];
@@ -570,6 +577,7 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
   char *end = nullptr; const long seconds = std::strtol(argv[7],&end,10);
   if (!end || *end || seconds<1 || (seconds>120 && !(seconds==180&&(calSave||calReplay))) || std::strcmp(argv[5],LiveKeyword(threshold).c_str())) throw Failure{"ARGUMENT_INVALID"};
   if(trial&&(!atlas_fn::trialId(trial)||warm||replay||threshold!=.15||(seconds!=60&&!(calSave&&(seconds==120||seconds==180)))))throw Failure{"ARGUMENT_INVALID"};
+  if(timingMode&&(!calReplay||(std::strcmp(timingMode,"STRICT_REALTIME")&&std::strcmp(timingMode,"ACOUSTIC_BACKPRESSURE"))))throw Failure{"ARGUMENT_INVALID"};
   size_t calSamples=0;
   if(calReplay){
     if(replay||calSave||trial||consent||warm||threshold==.25||!calCount||!calSha||std::strlen(calSha)!=64||std::strspn(calSha,"0123456789abcdef")!=64)throw Failure{"ARGUMENT_INVALID"};
@@ -594,7 +602,7 @@ static int NativeLive(int argc, char **argv, Progress &progress) {
   if(calSave||calReplay)s.calLimit=atlas_cal::sampleLimit(static_cast<int>(seconds));
   if(seconds==180&&(calSave||calReplay))s.diagnosticLimit=1840;
   if(calSave){CalPath(calSave);s.calSave=true;s.calPath=calSave;s.recording.prepare(s.calLimit);}
-  if(calReplay){s.calReplay=true;s.calPath=calReplay;s.calSamples=calSamples;s.calHash=calSha;}
+  if(calReplay){s.acousticBackpressure=timingMode&&!std::strcmp(timingMode,"ACOUSTIC_BACKPRESSURE");s.calReplay=true;s.calPath=calReplay;s.calSamples=calSamples;s.calHash=calSha;}
   if(trial){s.fnEnabled=true;s.trialId=trial;s.fnOrigin=Wall();s.markers.reserve(40);s.diagnosticBlocks.reserve(s.diagnosticLimit);s.diagnosticDecodes.reserve(10000);progress.startAsync();}controlState.store(&s);
   if(!SetConsoleCtrlHandler(Control,TRUE)){controlState.store(nullptr);throw Failure{"CONTROL_HANDLER_FAILED"};}
   struct ControlGuard {~ControlGuard(){controlState.store(nullptr);SetConsoleCtrlHandler(Control,FALSE);while(controlCalls.load())std::this_thread::yield();}} controlGuard;

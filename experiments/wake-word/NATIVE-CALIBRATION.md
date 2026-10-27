@@ -517,3 +517,213 @@ node --import tsx experiments/wake-word/calibration-session.ts compare `
 Dos matrices sólo son consistentes si compare lo confirma sobre los mismos datasets,
 modelos y configuración; la instrumentación no constituye aceptación acústica ni GO
 productivo. La causa real del fallo original SILENCE/.10 sigue pendiente de evidencia.
+
+## Replay acústico con autorización privada de runtime (experimental)
+
+Esta sección sustituye las instrucciones anteriores de recompilación/replay cuando
+se utiliza este checkpoint. No modifica datasets ni resultados históricos.
+
+### Dos modalidades y alcance
+
+- `STRICT_REALTIME` sigue siendo el valor predeterminado. Conserva los deadlines
+  absolutos de 100 ms y el push único. Puede recuperar deadlines atrasados en ráfaga;
+  un rechazo de la cola sigue siendo `AUDIO_OVERFLOW`. No hay espera de capacidad.
+- `ACOUSTIC_BACKPRESSURE` sólo se acepta con `--calibration-replay`. Conserva la
+  cadencia nominal inicial y, antes de alimentar cada bloque, espera si los cuatro
+  slots están ocupados. La espera usa el evento Stop con intervalos de 5 ms; no
+  gira activamente, no bloquea el consumidor ni toca WASAPI. Sólo hay un productor;
+  mientras espera, el consumidor únicamente libera slots. Por eso puede comprobar
+  capacidad y realizar **un solo push**, sin reservar slots ni reintentar rechazos.
+  Si ese push rechaza inesperadamente, se conserva el fallo y no se reintenta.
+
+La fragmentación de 1.600 muestras, cola SPSC, tail sin padding, orden, muestras F32LE,
+Feed/decoder, modelos, tokens, thresholds, cooldown y asociación −250/+1000 ms no
+cambian. La espera se aplica antes de leer las muestras del siguiente bloque, sin
+insertar silencios ni convertir el PCM. Los timestamps de audio siguen expresando
+la posición original de las muestras, no el tiempo de pared después de las esperas.
+`latencyFromBlockEndMs`/`maxQueueAgeMs` usan el deadline nominal original, **no** un
+nuevo timestamp de enqueue ni una latencia acústica medida.
+
+Los reportes de cada celda y matrices nuevos identifican `timingMode`. Native añade
+`replayTiming`: waitCount, capacityWaitWallMs, maxCapacityWaitWallMs, totalWallMs y
+cancelled. Son tiempos de pared QPC, no CPU. totalWallMs abarca desde el comienzo del
+productor hasta el reporte tras los joins/cleanup; processingWallMs sigue midiendo
+el trabajo de Feed. Occupancy/overflow y cleanup conservan los campos existentes.
+Los fallos también conservan modalidad y métricas numéricas saneadas. Un fallo muy
+inicial puede carecer de métricas Native; la modalidad del supervisor sigue registrada.
+
+El timeout del supervisor continúa siendo duración de replay + 60 s, seguido de Stop
+cooperativo y, si el hijo no responde en 5 s, terminación de **ese hijo experimental**
+con fallo, nunca cleanup acreditado. La espera de capacidad tiene además un deadline
+Native finito de duración PCM + 60 s (`CALIBRATION_REPLAY_TIMEOUT`). Cancelación/error
+interrumpe el productor; los joins, wipe y contabilidad siguen siendo obligatorios.
+No se amplía el watchdog ni se toleran hashes de prefijos como si fueran PCM completo.
+
+**Esta modalidad sólo evalúa acústica offline: nunca acredita rendimiento Live.**
+Puede ocultar un déficit temporal del consumidor, deliberadamente separado de su
+calidad de reconocimiento. No ofrece garantía de completar ante una pausa arbitraria;
+un timeout sigue siendo fallo. No reintenta matrices ni continúa después de una celda
+fallida, y conserva resultados anteriores con creación exclusiva.
+
+### Anexo de autorización V1
+
+Cada dataset histórico conserva session.json, consent.json, capture.json, PCM,
+anotaciones y SHA originales. No se editan locks ni fechas. El comando manual
+`authorize-replay` verifica el dataset completo, preflight del nuevo EXE/SDK/modelos
+y exige escribir una frase que incluye dataset, hash del nuevo lock y modalidad.
+No ejecuta Native ni abre el micrófono. Sí lee el PCM autorizado localmente para
+verificar integridad: no debe ejecutarse en cloud sobre datos privados.
+
+Crea exclusivamente bajo `.local/wake-word-spike/calibration/authorizations/`:
+`<dataset>-<replayLockSha256>-<timingMode>.json`, mediante `wx`/0600 y comprobación ACL
+Windows del directorio. Nunca sobrescribe una autorización existente. El anexo fija:
+
+- UUID del dataset y digest del manifest original completo.
+- SHA de PCM, capture.json y anotaciones.
+- Bytes de texto exactos de ambos locks (sólo sus campos cerrados), sus SHA y hash
+  del EXE nuevo; procedencia v2.0.0/commit/SDK DLL, identidad de modelos/tokens.
+- Configuraciones completas y hashes de keyword de .15/.10/.05, modalidad concreta.
+- Consentimiento explícito, creación y expiración **idéntica a la del dataset**.
+- integritySha256 del cuerpo. No contiene PCM, contenido acústico ni rutas privadas.
+
+El lock original queda como snapshot de texto verificable contra el hash fijado en
+el manifest, sin depender de que su ruta original siga existiendo después de crear
+el anexo. El código de reconocimiento (`reference-kws.cc`), transporte/FIR
+(`native-live-core.h`) y diagnósticos FN deben conservar los SHA del lock de captura.
+Esto autoriza un cambio de runtime para evaluar, **no demuestra equivalencia**.
+
+La salida manual devuelve `authorizationSha256`. Guardarlo como pin de referencia;
+la matriz exige explícitamente los tres pins, en orden POSITIVE/SILENCE/SIMILAR.
+Antes y después de cada replay se verifican dataset, retención, anexo con su pin,
+locks, ejecutable, SDK y modelos. No se acepta un anexo incompleto, alterado, vencido,
+con campos adicionales, modo/EXE/dataset/configuración distintos o sin pin. Una
+sustitución del archivo con otro self-hash también falla contra el pin suministrado.
+El anexo no puede ampliar los siete días; si vencieron los datasets, detenerse y
+seguir el procedimiento de eliminación/consentimiento existente, sin editar fechas.
+
+Inmutabilidad operativa: creación exclusiva y comprobación criptográfica con pin
+externo. No es almacenamiento WORM ni firma digital; un administrador que pueda
+alterar simultáneamente archivos, código y pins está fuera de esta protección.
+Conservar los pins en el registro privado de autorización. No publicar anexos,
+locks ni hashes de datasets privados en GitHub. La eliminación acústica manual
+existente permanece intacta, sin borrado automático; no garantiza borrado físico
+seguro en SSD/backups. Los anexos sólo conservan metadatos de auditoría.
+
+`compare` sólo declara consistencia acústica dentro de una modalidad y procedencia
+idénticas, con los mismos datasets/PCM, anotaciones y firmas de reconocimiento.
+Rechaza modalidades o runtime/autoridad distintos. Un reporte histórico sin modalidad
+se interpreta exclusivamente como STRICT_REALTIME, sin inventar métricas. Dos matrices
+históricas siguen pudiendo compararse con sus controles originales; una matriz nueva
+con procedencia explícita no se declara equivalente automáticamente a una histórica
+sin ella. Los archivos históricos nunca se reescriben.
+
+### Windows x64: recompilar y preflight (sin captura)
+
+En Developer PowerShell x64, desde la raíz del repo. Utilizar sólo el SDK ya auditado;
+no instalar ni descargar nada. El directorio de salida debe ser nuevo.
+
+```powershell
+$sdk = (Resolve-Path '.local\wake-word-spike\native-sdk\v2.0.0-win-x64-shared-MD-Release-no-tts-audit\extracted\sherpa-onnx-v2.0.0-win-x64-shared-MD-Release-no-tts').Path
+$out = Join-Path (Get-Location) '.local\wake-word-spike\native-calibration-backpressure-v1'
+& .\experiments\wake-word\build-native-reference.ps1 -SdkRoot $sdk -OutputDir $out -Live
+if ($LASTEXITCODE -ne 0) { throw 'BUILD_FAILED' }
+$exe = Join-Path $out 'native-live.exe'
+$lock = Join-Path $out 'native-live-lock.json'
+node --import tsx experiments/wake-word/native-live.ts $exe $lock COLD 180 --threshold 0.15 --check
+if ($LASTEXITCODE -ne 0) { throw 'PREFLIGHT_FAILED' }
+node --import tsx experiments/wake-word/calibration-session.ts status
+if ($LASTEXITCODE -ne 0) { throw 'RETENTION_CHECK_FAILED' }
+```
+
+### Autorizar cada dataset manualmente
+
+Completar estas variables con IDs y locks originales reales **sin editar archivos**.
+Si las capturas comparten lock, las tres variables pueden señalar el mismo archivo.
+
+```powershell
+$positive = '<UUID POSITIVE de 32 hex>'
+$silence = '<UUID SILENCE de 32 hex>'
+$similar = '<UUID SIMILAR de 32 hex>'
+$captureLockPositive = '<ruta .local al lock original POSITIVE>'
+$captureLockSilence = '<ruta .local al lock original SILENCE>'
+$captureLockSimilar = '<ruta .local al lock original SIMILAR>'
+
+node --import tsx experiments/wake-word/calibration-session.ts authorize-replay $exe $lock $captureLockPositive $positive ACOUSTIC_BACKPRESSURE
+if ($LASTEXITCODE -ne 0) { throw 'AUTH_POSITIVE_FAILED' }
+node --import tsx experiments/wake-word/calibration-session.ts authorize-replay $exe $lock $captureLockSilence $silence ACOUSTIC_BACKPRESSURE
+if ($LASTEXITCODE -ne 0) { throw 'AUTH_SILENCE_FAILED' }
+node --import tsx experiments/wake-word/calibration-session.ts authorize-replay $exe $lock $captureLockSimilar $similar ACOUSTIC_BACKPRESSURE
+if ($LASTEXITCODE -ne 0) { throw 'AUTH_SIMILAR_FAILED' }
+
+$authPositive = '<authorizationSha256 devuelto para POSITIVE>'
+$authSilence = '<authorizationSha256 devuelto para SILENCE>'
+$authSimilar = '<authorizationSha256 devuelto para SIMILAR>'
+```
+
+Cada comando exige su frase exacta `AUTORIZAR <dataset> <replayLockSha256> <modo>`.
+No automatizar ni redirigir ese consentimiento. Conservar también las salidas manuales
+privadamente. El comando falla ante duplicado; no borrar/recrear anexos para conseguir
+compatibilidad. Si un anexo existe, usar el pin de su autorización registrada.
+
+### Dos matrices acústicas independientes
+
+Ejecutar cada comando conscientemente; nunca como reintento automático tras fallo.
+No hay micrófono. Cada matriz ejecuta nueve procesos secuenciales nuevos, todos
+sobre los PCM originales autorizados. Ante error, detenerse y revisar el failure.json;
+no ejecutar la siguiente matriz ni comparar resultados parciales.
+
+```powershell
+$runAcoustic1 = [guid]::NewGuid().ToString('N')
+node --import tsx experiments/wake-word/calibration-session.ts matrix $exe $lock $positive $silence $similar $runAcoustic1 --timing-mode ACOUSTIC_BACKPRESSURE --authorizations $authPositive $authSilence $authSimilar
+if ($LASTEXITCODE -ne 0) { throw 'ACOUSTIC_MATRIX_1_FAILED' }
+```
+
+Sólo después de revisar la primera:
+
+```powershell
+$runAcoustic2 = [guid]::NewGuid().ToString('N')
+node --import tsx experiments/wake-word/calibration-session.ts matrix $exe $lock $positive $silence $similar $runAcoustic2 --timing-mode ACOUSTIC_BACKPRESSURE --authorizations $authPositive $authSilence $authSimilar
+if ($LASTEXITCODE -ne 0) { throw 'ACOUSTIC_MATRIX_2_FAILED' }
+$root = Join-Path (Get-Location) '.local\wake-word-spike\calibration\runs'
+node --import tsx experiments/wake-word/calibration-session.ts compare "$root\$runAcoustic1\matrix.json" "$root\$runAcoustic2\matrix.json"
+if ($LASTEXITCODE -ne 0) { throw 'ACOUSTIC_REPRODUCIBILITY_FAILED' }
+```
+
+Examinar los nueve reportes y sus métricas de espera/cola/cleanup. Exigir SHA original
+= SHA en Feed, muestras/bloques exactos, mismas posiciones/hits y asociación válida,
+0 overflow, cleanup completo y compare satisfactorio. No exigir un número artificial
+de detecciones ni ajustar parámetros para forzar coincidencias. Ninguna prueba
+sintética sustituye estos resultados Windows sobre los PCM autorizados.
+
+### Evaluación temporal independiente
+
+Autorizar **otros anexos**, específicos de STRICT_REALTIME, para los mismos tres
+UUID/locks y EXE nuevo:
+
+```powershell
+node --import tsx experiments/wake-word/calibration-session.ts authorize-replay $exe $lock $captureLockPositive $positive STRICT_REALTIME
+if ($LASTEXITCODE -ne 0) { throw 'STRICT_AUTH_POSITIVE_FAILED' }
+node --import tsx experiments/wake-word/calibration-session.ts authorize-replay $exe $lock $captureLockSilence $silence STRICT_REALTIME
+if ($LASTEXITCODE -ne 0) { throw 'STRICT_AUTH_SILENCE_FAILED' }
+node --import tsx experiments/wake-word/calibration-session.ts authorize-replay $exe $lock $captureLockSimilar $similar STRICT_REALTIME
+if ($LASTEXITCODE -ne 0) { throw 'STRICT_AUTH_SIMILAR_FAILED' }
+$strictPositive = '<pin STRICT POSITIVE>'
+$strictSilence = '<pin STRICT SILENCE>'
+$strictSimilar = '<pin STRICT SIMILAR>'
+$runStrict = [guid]::NewGuid().ToString('N')
+node --import tsx experiments/wake-word/calibration-session.ts matrix $exe $lock $positive $silence $similar $runStrict --timing-mode STRICT_REALTIME --authorizations $strictPositive $strictSilence $strictSimilar
+if ($LASTEXITCODE -ne 0) { throw 'STRICT_TIMING_FAILED_REVIEW_DIAGNOSTICS' }
+```
+
+STRICT conserva overflow como fallo y cero esperas de capacidad. Si se necesita
+comparar repetibilidad temporal, realizar otra matriz STRICT manual con UUID nuevo
+y los mismos pins, y comparar únicamente esas dos matrices. No comparar STRICT y
+ACOUSTIC como equivalentes. Incluso un STRICT PASS sólo es una prueba del replay
+pautado: no valida captura WASAPI Live ni sustituye su aceptación independiente.
+El CLI histórico de seis argumentos sigue siendo STRICT y sólo omite anexo cuando
+su lock coincide exactamente con el del dataset; no admite automáticamente un EXE
+nuevo. El replay WAV histórico .25 queda intacto.
+
+Estado: implementado y verificable con pruebas sintéticas en Linux. Compilación MSVC,
+aceptación de DLL/EXE nuevo y dos matrices Windows consistentes pendientes. GO sólo
+para evaluación experimental; NO-GO para integración productiva.

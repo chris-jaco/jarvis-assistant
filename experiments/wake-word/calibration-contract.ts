@@ -5,6 +5,7 @@ import { validateFnDiagnostics } from './native-fn-diagnostics.js';
 import { CalibrationAlignmentError,inspectCalibrationAlignment } from './calibration-alignment.js';
 import { liveKeyword } from './native-live-config.js';
 import type { ReplayStage } from './replay-observation.js';
+import { cleanReplayTiming,type ReplayTimingMode } from './replay-authorization.js';
 import { SpikeError } from './core.js';
 export const calibrationThresholds=[.15,.10,.05] as const;
 import { calibrationMaxSamples } from './calibration-limits.js';
@@ -70,15 +71,17 @@ export function bindCalibrationWindows(report:any,kind:Kind){
   return result.windows;
 }
 // Cell orchestration must inspect process failure before success-only invariants.
-export function validateCalReplayResult(result:{report:any;exitCode:number|null},expected:any,session:any,threshold:number,stage:(value:ReplayStage)=>void=()=>{}){
+export function validateCalReplayResult(result:{report:any;exitCode:number|null},expected:any,session:any,threshold:number,stage:(value:ReplayStage)=>void=()=>{},timingMode:ReplayTimingMode='STRICT_REALTIME',allowHistoricalTiming=true){
   if(result.exitCode!==0||result.report?.state==='FAILED'||result.report?.state==='CANCELLED')fail('CAL_REPLAY_NATIVE_FAILED');
-  return validateCalReplay(result.report,expected,session,threshold,stage);
+  return validateCalReplay(result.report,expected,session,threshold,stage,timingMode,allowHistoricalTiming);
 }
-export function validateCalReplay(raw:any,expected:any,session:any,threshold:number,stage:(value:ReplayStage)=>void=()=>{}){
+export function validateCalReplay(raw:any,expected:any,session:any,threshold:number,stage:(value:ReplayStage)=>void=()=>{},timingMode:ReplayTimingMode='STRICT_REALTIME',allowHistoricalTiming=true){
   stage('REPLAY_METADATA');
   if(!calibrationThresholds.some(t=>t===threshold))fail('CAL_THRESHOLD_INVALID');
   const c=raw?.calibration;
   if(c?.schema!==1||c.mode!=='REPLAY'||c.persisted!==false||c.samples!==session.samples||c.sha256!==session.pcmSha256)fail('CAL_REPLAY_CONTRACT_INVALID');
+  const replayTiming=cleanReplayTiming(raw.replayTiming,timingMode,allowHistoricalTiming);
+  if(raw.state==='COMPLETED'&&replayTiming.cancelled===true)fail('CAL_REPLAY_CONTRACT_INVALID');
   stage('SESSION_LIMITS');replaySeconds(session);
   stage('REPORT_VALIDATION');
   const r=cleanLiveReport(raw,{...expected,wavSha256:null,pcmSha256:session.pcmSha256},'COLD','REPLAY',sessionSeconds(session),threshold);
@@ -97,7 +100,7 @@ export function validateCalReplay(raw:any,expected:any,session:any,threshold:num
   stage('HIT_POSITIONS');
   let previous=-1;for(const p of r.positions){if(!Number.isInteger(p.block)||p.block<previous||p.block<0||!p.blockCompleted
     ||p.block>=r.capture.processedBlocks||p.audioSampleEnd!==Math.min(session.samples,(p.block+1)*1600))fail('CAL_REPLAY_CONTRACT_INVALID');previous=p.block;}
-  return r;
+  return {...r,replayTiming};
 }
 export function associateCalibration(r:any,session:any){
   const target=session.kind==='POSITIVE',windows=session.windows.map((w:any)=>({...w,accepted:0,raw:0}));

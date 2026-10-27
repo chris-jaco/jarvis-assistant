@@ -20,6 +20,28 @@ inline int captureSeconds(const char *kind){
   if(kind&&(!std::strcmp(kind,"POSITIVE")||!std::strcmp(kind,"SIMILAR")))return 180;
   throw Error{"CALIBRATION_KIND_INVALID"};
 }
+// Replay-producer gate only. Queue implementation and single-attempt push are unchanged.
+struct CapacityWait {
+  uint64_t count=0;double totalMs=0,maxMs=0;
+  template<class Pending,class Stopped,class Clock,class Wait>
+  bool beforeBlock(Pending pending,Stopped stopped,Clock clock,Wait wait,double deadline){
+    if(stopped())return false;
+    if(clock()>=deadline)throw Error{"CALIBRATION_REPLAY_TIMEOUT"};
+    if(pending()<4)return true;
+    const double start=clock();count++;
+    try{
+      while(pending()>=4&&!stopped()){
+        if(clock()>=deadline)throw Error{"CALIBRATION_REPLAY_TIMEOUT"};
+        wait(); // kernel wait in Windows; virtual clock in portable tests
+      }
+    }catch(...){record(clock()-start);throw;}
+    record(clock()-start);
+    if(stopped())return false;
+    if(clock()>=deadline)throw Error{"CALIBRATION_REPLAY_TIMEOUT"};
+    return true;
+  }
+  void record(double elapsed){totalMs+=elapsed;if(elapsed>maxMs)maxMs=elapsed;}
+};
 class Buffer {
   std::vector<float> values;
   size_t limit=shortMaxSamples;

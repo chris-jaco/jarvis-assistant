@@ -1,12 +1,13 @@
 // Supervisor-only, bounded allowlisted diagnostics. Never retain raw reports/PCM.
+import { historicalTimingMode } from './replay-authorization.js';
 import { SpikeError } from './core.js';
 import { nativeDiagnosticCode } from './native-live.js';
 export type ReplayStage='DATASET_LOAD'|'PREFLIGHT'|'IDENTITY'|'NATIVE_EXECUTION'|'NATIVE_EXIT'|'REPLAY_METADATA'|'SESSION_LIMITS'|
   'REPORT_VALIDATION'|'REPLAY_ACCOUNTING'|'BLOCK_DETAILS'|'DECODE_DETAILS'|'HIT_POSITIONS'|'DATASET_RECHECK'|'ASSOCIATION';
-export interface ReplayCell {kind:'POSITIVE'|'SILENCE'|'SIMILAR';sessionId:string;threshold:number}
+export interface ReplayCell {kind:'POSITIVE'|'SILENCE'|'SIMILAR';sessionId:string;threshold:number;timingMode?:'STRICT_REALTIME'|'ACOUSTIC_BACKPRESSURE'}
 const stages=new Set<ReplayStage>(['DATASET_LOAD','PREFLIGHT','IDENTITY','NATIVE_EXECUTION','NATIVE_EXIT','REPLAY_METADATA','SESSION_LIMITS',
   'REPORT_VALIDATION','REPLAY_ACCOUNTING','BLOCK_DETAILS','DECODE_DETAILS','HIT_POSITIONS','DATASET_RECHECK','ASSOCIATION']);
-const knownErrors=new Set(['CAL_REPLAY_NATIVE_FAILED','CAL_REPLAY_CONTRACT_INVALID','CAL_REPLAY_INCOMPLETE','CAL_CANCELLED',
+const knownErrors=new Set(['CAL_AUTHORIZATION_INVALID','CAL_AUTHORIZATION_REQUIRED','CAL_TIMING_MODE_INVALID','CAL_TIMING_MODE_MISMATCH','CAL_REPLAY_NATIVE_FAILED','CAL_REPLAY_CONTRACT_INVALID','CAL_REPLAY_INCOMPLETE','CAL_CANCELLED',
   'CAL_SESSION_CHANGED','CAL_IDENTITY_MISMATCH','CAL_SESSION_INVALID','CAL_RETENTION_EXPIRED','CAL_RETENTION_INVALID','CAL_CONSENT_INVALID',
   'CAL_JSON_INVALID','CAL_PATH_INVALID','CAL_HASH_INVALID','CAL_PCM_HASH_MISMATCH','CAL_PCM_LENGTH_INVALID','CAL_PCM_INVALID',
   'CAL_REPORT_HASH_MISMATCH','CAL_ANNOTATION_INVALID','CAL_DURATION_INVALID','CAL_THRESHOLD_INVALID','CAL_HIT_AMBIGUOUS','CAL_HIT_ACCOUNTING_INVALID',
@@ -30,7 +31,7 @@ export class ReplayObservation {
   readonly cell:ReplayCell;
   constructor(cell:ReplayCell){
     if(!['POSITIVE','SILENCE','SIMILAR'].includes(cell.kind)||!/^[a-f0-9]{32}$/.test(cell.sessionId)||![.15,.1,.05].includes(cell.threshold))throw new SpikeError('CAL_ARGUMENT_INVALID');
-    this.cell=Object.freeze({kind:cell.kind,sessionId:cell.sessionId,threshold:cell.threshold});
+    this.cell=Object.freeze({kind:cell.kind,sessionId:cell.sessionId,threshold:cell.threshold,timingMode:historicalTimingMode(cell.timingMode)});
   }
   stage=(value:ReplayStage)=>{if(!stages.has(value))throw new SpikeError('CAL_ARGUMENT_INVALID');this.current=value;};
   expect(value:{samples?:number;pcmSha256?:string;modelHashes?:any;keywordSha256?:string}){
@@ -45,6 +46,7 @@ export class ReplayObservation {
       reportAvailable:!!r&&typeof r==='object',state:['FAILED','CANCELLED','COMPLETED'].includes(r?.state)?r.state:'UNKNOWN',nativeCode:nativeDiagnosticCode(r?.code),
       capture:{...counters(r?.capture,'requestedSeconds processedSamples processedBlocks resampledSamples framesReceived framesConverted unprocessedSamples unconvertedFrames overflows discontinuities sequenceErrors'),...times(r?.capture,'wallMs')},
       buffer:{...counters(r?.buffer,'queuedCapacity highWater pendingAfterCleanup abandonedBlocksOnFailure'),...times(r?.buffer,'maxQueueAgeMs maxBlockEndLatencyMs')},
+      replayTiming:{timingMode:['STRICT_REALTIME','ACOUSTIC_BACKPRESSURE'].includes(r?.replayTiming?.timingMode)?r.replayTiming.timingMode:null,...counters(r?.replayTiming,'waitCount'),...times(r?.replayTiming,'capacityWaitWallMs maxCapacityWaitWallMs totalWallMs'),cancelled:bool(r?.replayTiming?.cancelled)},
       inference:{...counters(r?.inference,'decodeCalls'),...times(r?.inference,'processingWallMs maxBlockWallMs')},
       recognition:counters(r?.recognition,'rawHits detections suppressedHits'),
       details:{blocks:Array.isArray(r?.details?.blocks)?count(r.details.blocks.length):null,decodes:Array.isArray(r?.details?.decodes)?count(r.details.decodes.length):null,
