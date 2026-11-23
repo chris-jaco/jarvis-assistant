@@ -160,3 +160,7 @@ El registro completo está en `docs/acceptance/atlas-v0.6.1-windows.md`.
 - No se completaron mediciones continuas de una hora visible u oculta ni una medición de recursos posterior a carga intensiva.
 - El modo exacto de recuperación del micrófono permanece `NOT_VERIFIED`.
 - WhatsApp B.2 permanece `PARTIAL / DEFERRED`; B.3 y cualquier Send real permanecen deshabilitados.
+
+## Candidato V0.7
+
+El flujo de primer inicio, la gestión nativa de Gmail y Calendar, el empaquetado y los casos pendientes en Windows se detallan en [la ficha de aceptación V0.7](acceptance/atlas-v0.7-work-preview.md).

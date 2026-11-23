@@ -126,3 +126,19 @@ test('Windows security stdin preserves Unicode and literal metacharacters withou
   assert.ok([...payload].every(character => character.charCodeAt(0) < 128));
   assert.deepEqual(JSON.parse(payload), { path, operation: 'validate' });
 });
+
+test('local Calendar disconnect removes only the validated grant', async t => {
+  const { mkdtemp, rm, writeFile, readFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { saveTokens, disconnectCalendarLocally, readTokens } = await import('./adapters/google-auth.js');
+  const root = await mkdtemp(join(tmpdir(), 'atlas-grant-test-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, 'private', 'grant.json');
+  const other = join(root, 'private', 'other.json');
+  await saveTokens(file, { refresh_token: 'synthetic' });
+  await writeFile(other, '{}', { mode: 0o600 });
+  await disconnectCalendarLocally(file);
+  await assert.rejects(readTokens(file), { code: 'ENOENT' });
+  assert.equal(await readFile(other, 'utf8'), '{}');
+});

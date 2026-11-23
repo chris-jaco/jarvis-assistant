@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, session, utilityProcess } fr
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { manageGoogle } from './google-settings.js';
 import { BackendSupervisor } from './backend-supervisor.js';
 import { registerDesktopIpc } from './ipc.js';
 import type { DesktopIpcController } from './ipc.js';
@@ -25,11 +26,12 @@ let cleanupProtocol: DesktopCleanupProtocol | undefined;
 let lifecycle: DesktopLifecycleRuntime | undefined;
 let trayController: DesktopTrayController | undefined;
 let closing = false;
+const setupAbort = new AbortController();
 let trayWarning: Promise<void> | undefined;
 let supervisor: BackendSupervisor | undefined;
 
 async function startupShutdown(message?: Electron.MessageBoxOptions): Promise<void> {
-  if (closing) return; closing = true;
+  if (closing) return; closing = true; setupAbort.abort();
   disposeTray();
   cleanupProtocol?.dispose();cleanupProtocol=undefined;cleanupIpc?.dispose();cleanupIpc=undefined;
   await supervisor?.stop();
@@ -67,11 +69,14 @@ async function start(): Promise<void> {
   await mkdir(paths.coreWorkingDirectory, { recursive: true });
   let credentialStore: ReturnType<typeof createElectronDesktopCredentialStore> | undefined;
   let credentialPreference: CredentialSetupPreference | undefined;
+  const googlePreference = new CredentialSetupPreference(join(paths.configRoot, 'google-setup'));
   if (paths.mode === 'PACKAGED') {
     Menu.setApplicationMenu(null);
     credentialStore = createElectronDesktopCredentialStore(paths.credentialsRoot);
     credentialPreference = new CredentialSetupPreference(paths.configRoot);
-    const state = (await credentialStore.status()).OPENAI_API_KEY;
+    const stored = await credentialStore.status();
+    const state = stored.OPENAI_API_KEY;
+    const partialGoogle = (stored.GOOGLE_CLIENT_ID === 'MISSING') !== (stored.GOOGLE_CLIENT_SECRET === 'MISSING');
     if (shouldShowCredentialSetup(state, await credentialPreference.required())) {
       const configured = await runCredentialSetupWindow(credentialStore, {
         html: paths.credentialSetupHtml,
@@ -82,6 +87,12 @@ async function start(): Promise<void> {
       await credentialPreference.clear();
       if (closing) return;
     }
+    if (partialGoogle || state !== 'CONFIGURED' || await googlePreference.required()) {
+      await manageGoogle(credentialStore, paths, setupAbort.signal);
+      if (closing) return;
+      await googlePreference.clear();
+    }
+
   }
   if (paths.mode === 'DEVELOPMENT') {
     try { process.loadEnvFile(join(paths.coreWorkingDirectory, '.env')); }
@@ -102,9 +113,17 @@ async function start(): Promise<void> {
     }
   });
   const endpoint = credentialStore
-    ? await credentialStore.withOpenAIKey(openAIKey => {
+    ? await credentialStore.withOpenAIKey(async openAIKey => {
         if (closing) throw new Error('DESKTOP_START_CANCELLED');
-        return supervisor!.start({ generation: randomUUID(), openAIKey });
+        const state = await credentialStore!.status();
+        if (state.GOOGLE_CLIENT_ID === 'MISSING' || state.GOOGLE_CLIENT_SECRET === 'MISSING') {
+          if (closing) throw new Error('DESKTOP_START_CANCELLED');
+          return supervisor!.start({ generation: randomUUID(), openAIKey });
+        }
+        return credentialStore!.withGoogleClient(google => {
+          if (closing) throw new Error('DESKTOP_START_CANCELLED');
+          return supervisor!.start({ generation: randomUUID(), openAIKey, google });
+        });
       })
     : await supervisor.start();
   const applicationOrigin = new URL(endpoint.baseUrl).origin;
@@ -124,12 +143,12 @@ async function start(): Promise<void> {
   trayController=createElectronTrayController(paths.trayIcon,{restore:()=>lifecycle?.restore(),quit:()=>requestQuit()});
   trayController.initialize();
   let credentialReconfiguration: Promise<boolean> | undefined;
-  const reconfigureCredentials = credentialPreference ? () => {
+  const reconfigure = credentialPreference ? (google: boolean) => {
     if (credentialReconfiguration) return credentialReconfiguration;
     const operation = requestCredentialReconfiguration({
       cleanup: () => lifecycle!.hide(),
-      persistPreference: () => credentialPreference!.request(),
-      quit: () => lifecycle!.quit(),
+      persistPreference: () => (google ? googlePreference : credentialPreference!).request(),
+      quit: () => { if (google) app.relaunch(); return lifecycle!.quit(); },
       restore: () => { lifecycle?.restore(); },
       showFailure: () => dialog.showMessageBox(browserWindow, { type: 'error', title: 'No se pudo preparar la reconfiguración', message: 'Atlas no pudo cerrar la sesión de forma segura. La credencial no fue modificada y Atlas seguirá visible.' }).then(() => undefined)
     });
@@ -153,7 +172,7 @@ async function start(): Promise<void> {
   Menu.setApplicationMenu(Menu.buildFromTemplate(desktopApplicationMenu({
     hide:()=>lifecycle?.hide(),
     quit:()=>requestQuit(),
-    ...(reconfigureCredentials ? { reconfigureCredentials } : {})
+    ...(reconfigure ? { reconfigureCredentials: () => reconfigure(false), manageGoogle: () => reconfigure(true) } : {})
   })));
   await browserWindow.loadURL(endpoint.baseUrl);
 }

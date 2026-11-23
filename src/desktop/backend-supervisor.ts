@@ -3,6 +3,7 @@ import type { Readable } from 'node:stream';
 import { createDesktopSecret } from '../server/desktop-auth.js';
 import { DesktopBackendClient, DesktopHealthError } from './backend-client.js';
 import { allowlistedCoreEnvironment } from './core-environment.js';
+import type { GoogleClientCredentials } from './core-bootstrap-protocol.js';
 import { createCoreBootstrapRequest, parseCoreBootstrapAck, validCoreBootstrapGeneration } from './core-bootstrap-protocol.js';
 
 export interface BackendEndpoint { baseUrl: string; secret: string }
@@ -25,6 +26,9 @@ export function backendEnvironment(base: NodeJS.ProcessEnv, secret: string, runt
   const env: NodeJS.ProcessEnv = { ...allowlistedCoreEnvironment(base), ATLAS_DESKTOP_MODE: 'true', ATLAS_DESKTOP_SECRET: secret, HOST: '127.0.0.1', PORT: '0' };
   if (bootstrapGeneration !== undefined) {
     if (!validCoreBootstrapGeneration(bootstrapGeneration)) throw new Error('DESKTOP_CORE_BOOTSTRAP_INVALID');
+    delete env.OPENAI_API_KEY;
+    delete env.GOOGLE_CLIENT_ID;
+    delete env.GOOGLE_CLIENT_SECRET;
     env.ATLAS_CREDENTIAL_BOOTSTRAP_GENERATION = bootstrapGeneration;
   }
   if (runtime === 'node') env.ELECTRON_RUN_AS_NODE = '1';
@@ -50,7 +54,7 @@ export class BackendSupervisor {
     onUnexpectedExit?: (code: number | null) => void;
   }) {}
 
-  async start(bootstrap?: { generation: string; openAIKey: string }): Promise<BackendEndpoint> {
+  async start(bootstrap?: { generation: string; openAIKey: string; google?: GoogleClientCredentials }): Promise<BackendEndpoint> {
     if (this.child) throw new Error('DESKTOP_BACKEND_ALREADY_STARTED');
     const secret = createDesktopSecret();
     const spawner: BackendSpawner = this.options.spawn ?? ((executable, args, options) => spawn(executable, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }));
@@ -73,7 +77,7 @@ export class BackendSupervisor {
       const messageListener = (message: unknown) => {
         if (!bootstrap) return;
         const ack = parseCoreBootstrapAck(message);
-        if (!ack || ack.generation !== bootstrap.generation || ack.status !== 'ACCEPTED' || bootstrapAccepted) {
+        if (!bootstrapSent || !ack || ack.generation !== bootstrap.generation || ack.status !== 'ACCEPTED' || bootstrapAccepted) {
           emit({ stage: 'CORE_BOOTSTRAP_FAILED' }); finish(new Error('DESKTOP_CORE_BOOTSTRAP_REJECTED')); return;
         }
         bootstrapAccepted = true; emit({ stage: 'CORE_BOOTSTRAP_ACK' }); maybeReady();
@@ -88,7 +92,7 @@ export class BackendSupervisor {
         child.once('spawn', () => {
           if (settled || bootstrapSent) return;
           bootstrapSent = true;
-          try { child.postMessage!(createCoreBootstrapRequest(bootstrap.generation, bootstrap.openAIKey)); emit({ stage: 'CORE_BOOTSTRAP_SENT' }); }
+          try { child.postMessage!(createCoreBootstrapRequest(bootstrap.generation, bootstrap.openAIKey, bootstrap.google)); emit({ stage: 'CORE_BOOTSTRAP_SENT' }); }
           catch { emit({ stage: 'CORE_BOOTSTRAP_FAILED' }); finish(new Error('DESKTOP_CORE_BOOTSTRAP_SEND_FAILED')); }
         });
       }

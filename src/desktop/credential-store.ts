@@ -2,6 +2,7 @@ import { constants } from 'node:fs';
 import { lstat, mkdir, open, rename, unlink } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
+import type { GoogleClientCredentials } from './core-bootstrap-protocol.js';
 import type { Stats } from 'node:fs';
 
 export const DESKTOP_CREDENTIAL_IDS = [
@@ -132,16 +133,49 @@ export class DesktopCredentialStore {
     return this.mutate(async () => {
       this.requireCrypto();
       const document = await this.validDocument();
-      let encrypted: Buffer;
-      try { encrypted = this.options.crypto.encrypt(checkedValue); }
-      catch { throw new DesktopCredentialStoreError('CREDENTIAL_STORAGE_UNAVAILABLE'); }
-      if (!Buffer.isBuffer(encrypted) || encrypted.length === 0 || encrypted.indexOf(Buffer.from(checkedValue, 'utf8')) !== -1) throw new DesktopCredentialStoreError('CREDENTIAL_STORAGE_UNAVAILABLE');
-      document.credentials[checkedId] = {
-        ciphertext: encrypted.toString('base64'),
-        updatedAt: (this.options.now ?? (() => new Date()))().toISOString()
-      };
+      document.credentials[checkedId] = this.encrypt(checkedValue);
       await this.writeDocument(document);
     });
+  }
+
+  private encrypt(value: string): StoredCredential {
+    let encrypted: Buffer;
+    try { encrypted = this.options.crypto.encrypt(value); }
+    catch { throw new DesktopCredentialStoreError('CREDENTIAL_STORAGE_UNAVAILABLE'); }
+    if (!Buffer.isBuffer(encrypted) || !encrypted.length || encrypted.includes(Buffer.from(value))) {
+      throw new DesktopCredentialStoreError('CREDENTIAL_STORAGE_UNAVAILABLE');
+    }
+    return { ciphertext: encrypted.toString('base64'), updatedAt: (this.options.now ?? (() => new Date()))().toISOString() };
+  }
+
+  async setGoogleClient(pair: GoogleClientCredentials): Promise<void> {
+    const id = credentialValue(pair.GOOGLE_CLIENT_ID);
+    const secret = credentialValue(pair.GOOGLE_CLIENT_SECRET);
+    return this.mutate(async () => {
+      this.requireCrypto();
+      const document = await this.validDocument();
+      document.credentials.GOOGLE_CLIENT_ID = this.encrypt(id);
+      document.credentials.GOOGLE_CLIENT_SECRET = this.encrypt(secret);
+      await this.writeDocument(document);
+    });
+  }
+
+  async withGoogleClient<T>(use: (pair?: GoogleClientCredentials) => Promise<T>): Promise<T> {
+    await this.mutations;
+    this.requireCrypto();
+    const { credentials } = await this.validDocument();
+    const id = credentials.GOOGLE_CLIENT_ID;
+    const secret = credentials.GOOGLE_CLIENT_SECRET;
+    if (!id && !secret) return use();
+    if (!id || !secret) throw new DesktopCredentialStoreError('CREDENTIAL_STORE_INVALID');
+    let pair: GoogleClientCredentials;
+    try {
+      pair = {
+        GOOGLE_CLIENT_ID: credentialValue(this.options.crypto.decrypt(Buffer.from(id.ciphertext, 'base64'))),
+        GOOGLE_CLIENT_SECRET: credentialValue(this.options.crypto.decrypt(Buffer.from(secret.ciphertext, 'base64')))
+      };
+    } catch { throw new DesktopCredentialStoreError('CREDENTIAL_STORE_INVALID'); }
+    return use(pair);
   }
 
   async delete(id: DesktopCredentialId): Promise<void> {

@@ -65,3 +65,16 @@ test('non-invitation creates preserve WRITE opt-out; partial/no-op update reject
     const invalid = fixture(); assert.equal((await invalid.executor.invoke('bad', 'calendar.updateEvent', input)).status, 'error'); assert.equal(invalid.mutations.length, 0);
   }
 });
+
+test('deletion discloses the notification policy in the confirmation and the success result', async () => {
+  const f = fixture(false);
+  const pending = await f.executor.invoke('delete', 'calendar.deleteEvent', { target: { eventId: 'one' } });
+  assert.equal(pending.status, 'pending');
+  if (pending.status !== 'pending') return;
+  assert.match(pending.summary, /no solicitará avisos de cancelación/);
+  const result = await approve(f, pending);
+  assert.equal(result.status, 'success');
+  if (result.status === 'success') assert.deepEqual(result.data, { deleted: true, sendUpdates: 'none' });
+  assert.equal(f.mutations.length, 1);
+  assert.match(f.mutations[0]!.path, /sendUpdates=none$/);
+});

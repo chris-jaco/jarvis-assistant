@@ -1,11 +1,18 @@
-export const CORE_BOOTSTRAP_PROTOCOL = 'atlas.core-bootstrap/1' as const;
+export const CORE_BOOTSTRAP_PROTOCOL = 'atlas.core-bootstrap/2' as const;
 export const CORE_BOOTSTRAP_MAX_CREDENTIAL_BYTES = 8_192;
+
+export interface GoogleClientCredentials {
+  GOOGLE_CLIENT_ID: string;
+  GOOGLE_CLIENT_SECRET: string;
+}
+
+export type CoreCredentials = { OPENAI_API_KEY: string } & Partial<GoogleClientCredentials>;
 
 export interface CoreBootstrapRequest {
   protocol: typeof CORE_BOOTSTRAP_PROTOCOL;
   kind: 'CREDENTIALS';
   generation: string;
-  credentials: { OPENAI_API_KEY: string };
+  credentials: CoreCredentials;
 }
 
 export type CoreBootstrapRejectReason = 'INVALID_MESSAGE' | 'GENERATION_MISMATCH' | 'DUPLICATE';
@@ -28,13 +35,23 @@ export function validOpenAICredential(value: unknown): value is string {
     !/[\u0000-\u001f\u007f]/u.test(value) && Buffer.byteLength(value) <= CORE_BOOTSTRAP_MAX_CREDENTIAL_BYTES;
 }
 
+export function validGoogleClientId(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 512 && /^[A-Za-z0-9-]+\.apps\.googleusercontent\.com$/u.test(value);
+}
+export function validGoogleClientSecret(value: unknown): value is string {
+  return validOpenAICredential(value) && /^[A-Za-z0-9_.-]+$/u.test(value);
+}
+
 export function parseCoreBootstrapRequest(value: unknown): CoreBootstrapRequest | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
   if (!exactKeys(record, ['protocol', 'kind', 'generation', 'credentials']) || record.protocol !== CORE_BOOTSTRAP_PROTOCOL || record.kind !== 'CREDENTIALS' || !validCoreBootstrapGeneration(record.generation)) return undefined;
   if (!record.credentials || typeof record.credentials !== 'object' || Array.isArray(record.credentials)) return undefined;
   const credentials = record.credentials as Record<string, unknown>;
-  if (!exactKeys(credentials, ['OPENAI_API_KEY']) || !validOpenAICredential(credentials.OPENAI_API_KEY)) return undefined;
+  if (!validOpenAICredential(credentials.OPENAI_API_KEY)) return undefined;
+  if (!exactKeys(credentials, ['OPENAI_API_KEY']) &&
+      !(exactKeys(credentials, ['OPENAI_API_KEY', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET']) &&
+        validGoogleClientId(credentials.GOOGLE_CLIENT_ID) && validGoogleClientSecret(credentials.GOOGLE_CLIENT_SECRET))) return undefined;
   return value as CoreBootstrapRequest;
 }
 
@@ -47,7 +64,11 @@ export function parseCoreBootstrapAck(value: unknown): CoreBootstrapAck | undefi
   return undefined;
 }
 
-export function createCoreBootstrapRequest(generation: string, openAIKey: string): CoreBootstrapRequest {
-  if (!validCoreBootstrapGeneration(generation) || !validOpenAICredential(openAIKey)) throw new Error('DESKTOP_CORE_BOOTSTRAP_INVALID');
-  return { protocol: CORE_BOOTSTRAP_PROTOCOL, kind: 'CREDENTIALS', generation, credentials: { OPENAI_API_KEY: openAIKey } };
+export function createCoreBootstrapRequest(generation: string, openAIKey: string, google?: GoogleClientCredentials): CoreBootstrapRequest {
+  const request: CoreBootstrapRequest = {
+    protocol: CORE_BOOTSTRAP_PROTOCOL, kind: 'CREDENTIALS', generation,
+    credentials: { OPENAI_API_KEY: openAIKey, ...google }
+  };
+  if (!parseCoreBootstrapRequest(request)) throw new Error('DESKTOP_CORE_BOOTSTRAP_INVALID');
+  return request;
 }

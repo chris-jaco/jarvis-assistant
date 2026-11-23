@@ -143,3 +143,21 @@ test('atomic persistence validates directory, temporary and final paths without 
     assert.deepEqual(await readdir(join(f.root, 'guarded')), ['credentials.v1.json']);
   } finally { await f.close(); }
 });
+
+test('Google client import is one encrypted mutation; absent and unavailable storage stay distinct', async () => {
+  const pair = { GOOGLE_CLIENT_ID: 'fixture-client', GOOGLE_CLIENT_SECRET: 'fixture-secret' };
+  const f = await fixture();
+  try {
+    await f.store.withGoogleClient(async value => assert.equal(value, undefined));
+    await f.store.setGoogleClient(pair);
+    await f.store.withGoogleClient(async value => assert.deepEqual(value, pair));
+    assert.doesNotMatch(await readFile(f.store.path, 'utf8'), /fixture-client|fixture-secret/);
+    await assert.rejects(f.store.setGoogleClient({ ...pair, GOOGLE_CLIENT_SECRET: '' }));
+    await f.store.withGoogleClient(async value => assert.deepEqual(value, pair));
+  } finally { await f.close(); }
+  const inaccessible = await fixture({ available: false });
+  try {
+    await assert.rejects(inaccessible.store.setGoogleClient(pair), /CREDENTIAL_STORAGE_UNAVAILABLE/);
+    await assert.rejects(readFile(inaccessible.store.path), { code: 'ENOENT' });
+  } finally { await inaccessible.close(); }
+});

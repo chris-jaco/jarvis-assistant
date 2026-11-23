@@ -1,8 +1,8 @@
 # ATLAS — Roadmap maestro
 
-**Actualizado:** 19 de octubre de 2026
+**Actualizado:** 22 de noviembre de 2026
 **Repositorio:** `chris-jaco/jarvis-assistant`  
-**Rama de desarrollo actual:** `v0.6.2-windows-packaging`
+**Ramas del sprint:** `v0.7-desktop-work-preview` y `spike/android-companion`, desde el tag aceptado `v0.6.2`.
 **Baseline aceptada V0.5.3.6A:** `168a468b26823df5dcfb5c2a32842463022bc77f`
 
 ## Visión
@@ -52,11 +52,11 @@ Atlas es un asistente personal de IA, principalmente por voz, con memoria contex
 | V0.5.3.6B | WhatsApp Consequential Actions | Escritura y envío seguro con autorizaciones separadas y protección de duplicados | B.2 PARTIAL / DEFERRED; B.3 y Send bloqueados |
 | V0.6.1 | Desktop Companion | Preview local Windows con Electron, Core supervisado, lifecycle, Tray y estabilidad | Completada; cierre documental preparado |
 | V0.6.2 | Windows Packaged Preview | Atlas.exe en win-unpacked, ASAR, credenciales cifradas y bootstrap privado | Cerrada como preview personal; NSIS diferido |
-| V0.6.3 | Local Wake Word | Wake word local con garantías de privacidad y ownership de micrófono | Planificada |
-| V0.6.4 | Always-on Companion | Companion residente y endurecido para uso prolongado | Planificada |
-| V0.7 | Productivity Integrations | Notion, Clockify, Instantly, Onabox, HubSpot, Lovable y otras | Alcance por definir |
-| V0.8 | Mobile & Headphones Companion | Hablar desde Android/auriculares sin la web delante | Planificada |
-| V0.9 — Mark 1 | Proactive Atlas | Briefings, alertas, seguimiento, recordatorios y automatizaciones | Planificada |
+| V0.6.3 | Wake word local | Rama de investigación aislada y conservación de las reglas de retención del PCM | Pausada |
+| V0.7 | Desktop Work Preview | Orbe manual, Google desde el paquete, aceptación Windows. Spike Android en paralelo | En desarrollo |
+| V0.8 | Work Partner | Correo → borrador → agenda. Un conector adicional de lectura | Propuesta |
+| V0.9 | Android Companion | Audio en primer plano, Bluetooth, Core personal autenticado | Condicionada a pruebas físicas y diseño de identidad |
+| V1.0 | Atlas personal multidispositivo | Memoria compartida, recuperación, revocación por dispositivo y ejecución trazable | Propuesta |
 | V0.10 | Smart Home & Media | Home Assistant, Spotify y dispositivos | Planificada |
 | V0.11 | Always-on Client | Terminal Raspberry Pi, micrófono, altavoz y wake word | Planificada |
 | V0.12 | Offline Atlas | STT/TTS, modelo y herramientas locales | Planificada |
@@ -126,24 +126,26 @@ este hito. Los diagnósticos publicados son herramientas de investigación, no a
 para mantenimiento. `desktop:installer:win` está bloqueado y `dir` es el único target
 Windows por defecto; la configuración NSIS residual no es un instalador aprobado.
 
-Sin updater, autostart, wake word, firma/distribución pública ni tag/GitHub Release.
+El tag anotado `v0.6.2` identifica el paquete aceptado. El updater, autostart, wake word y distribución pública siguen diferidos.
 No sobrescribir ni borrar archivos activos; salir mediante «Salir de Atlas» y conservar
 userData separado del paquete. Ver `docs/DESKTOP.md` y
 `docs/acceptance/atlas-v0.6.2-windows.md` para operación, evidencia y límites.
 
-### V0.7 — Productivity Integrations
-Plataformas candidatas, **sin alcance cerrado**:
-- **Alta:** Notion (proyectos/tareas/sprints), Clockify (tiempo), Instantly (campañas/leads), Onabox (prospectos/scoring/campañas), HubSpot (CRM).
-- **Media:** Lovable (proyectos/builds).
-- Otras según API/MCP y utilidad.
+### V0.7 — Desktop Work Preview
 
-Madurez por integración: READ → WRITE con confirmación → workflows compuestos. Reutilizar Tool Registry y Confirmation Engine.
+El criterio de salida es usar el orbe desde Atlas.exe, conectar Google con una cuenta de prueba, leer correo y agenda, aprobar y rechazar acciones, reiniciar y comprobar la conexión. La prueba física de Android y la evaluación vocal tienen sus propios resultados. El paquete personal se entrega como carpeta completa.
 
-### V0.8 — Mobile & Headphones
-Cliente Android, audio Bluetooth, continuidad de contexto, memoria y herramientas, autenticación y conexión con backend. Pendiente decidir disponibilidad cuando el PC esté apagado (backend remoto/híbrido). Validar límites de Android para wake word y micrófono en background. Las acciones en Chrome Windows dependen de que el host esté conectado/autorizado.
+### V0.8 — Work Partner
 
-### V0.9 — Proactive Atlas / Mark 1
-Briefings, revisiones de correo/calendario, seguimiento de compromisos, alertas, recordatorios y automatizaciones; relevancia, frecuencia, privacidad y confirmaciones para acciones externas.
+Priorizar el flujo de preparación del día. Consultar mensajes y agenda, presentar el contexto, preparar el borrador y ejecutar sólo la operación confirmada. Elegiría Notion READ para tareas y compromisos si el registro de uso personal confirma que se consulta a diario. Reutiliza el registry y las proyecciones acotadas. Drive tiene buena reutilización de OAuth pero añade permisos y decisiones sobre extracción de documentos. HubSpot exige resolver identidad de CRM y n8n puede disparar efectos encadenados. Incorporar uno tras revisar frecuencia y alcance.
+
+### V0.9 — Android Companion
+
+Aceptar voz en primer plano y auriculares en un teléfono real. Para funcionar con el PC apagado hacen falta un Core personal accesible por TLS y una identidad revocable por dispositivo. La pantalla bloqueada requiere una decisión separada tras medir foco, privacidad y batería.
+
+### V1.0 — Continuidad personal
+
+Medir recuperación entre Desktop y Android con estado de conversación explícito y memoria semántica acotada. Antes de habilitar escrituras remotas probar expiración, revocación, confirmación del contenido congelado y recuperación de resultados inciertos. Onabox multiusuario sigue siendo una línea futura.
 
 ### V0.10 — Smart Home & Media
 Home Assistant, Spotify, luces, escenas, música y dispositivos; permisos según sensibilidad.
@@ -175,4 +177,4 @@ Estas capacidades no tienen versión detallada ni compromiso de implementación 
 - **Definido:** Windows Desktop con backend local, lifecycle y System Tray; identidad visual oficial; futura evolución separada de empaquetado, wake word y always-on.
 - **Pendiente:** modelos concretos, alcance final de integraciones, backend remoto para móvil y recuperación futura de B.2. Send real continúa bloqueado.
 
-**Orden vigente:** V0.6.1 Desktop Companion completada → V0.6.2 Windows Packaged Preview cerrada → V0.6.3 wake word local → V0.6.4 always-on companion → V0.7 integraciones → V0.8 móvil → Mark 1 proactivo → hogar/offline/router → Mark 2. B.2 sigue diferida y su reapertura requiere una decisión explícita posterior.
+**Sprint 2 propuesto.** Primero cerrar la aceptación Google en Windows y voz/Bluetooth en Android. Después priorizar un solo flujo de trabajo sobre el Core existente. Evaluar pantalla bloqueada y un servicio remoto únicamente con decisiones explícitas sobre permisos, identidad y retención. Mantener los experimentos acústicos en su rama.

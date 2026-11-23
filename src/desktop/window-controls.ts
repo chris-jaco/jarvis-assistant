@@ -38,9 +38,10 @@ export function windowsLocalQuit(input:DesktopKeyboardInput):boolean{
   return input.type==='keyDown'&&input.key.toLowerCase()==='q'&&input.control&&!input.alt&&!input.shift&&!input.meta&&!input.isAutoRepeat;
 }
 
-export function desktopApplicationMenu(actions:DesktopWindowActions & {reconfigureCredentials?():unknown}):MenuItemConstructorOptions[]{
+export function desktopApplicationMenu(actions:DesktopWindowActions & {reconfigureCredentials?():unknown;manageGoogle?():unknown}):MenuItemConstructorOptions[]{
   return [{label:'Atlas',submenu:[
     ...(actions.reconfigureCredentials ? [{label:'Reconfigurar API key…',click:()=>{void actions.reconfigureCredentials!();}}] : []),
+    ...(actions.manageGoogle ? [{label:'Gmail y Calendar… (reiniciar Atlas)',click:()=>{void actions.manageGoogle!();}}] : []),
     {label:'Salir de Atlas',accelerator:'CommandOrControl+Q',click:()=>{void actions.quit();}}
   ]}];
 }

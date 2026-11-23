@@ -126,9 +126,9 @@ export class CalendarAdapter implements ToolAdapter {
           return { event, etag: event.etag, body, sendUpdates, summary: `¿Confirmas actualizar «${event.summary ?? '(sin título)'}» (${event.start.dateTime}, ${this.timezone}): ${changes.join('; ')}? Solo esta ocurrencia.${sendUpdates === 'all' ? attendeeSummary(attendees) : ''}` } satisfies Prepared;
         }),
       definition('calendar.deleteEvent', 'Elimina un único evento/ocurrencia. Siempre requiere confirmación explícita. Nunca borra una serie completa.', 'SENSITIVE', z.object({ target: targetSchema }).strict(),
-        async (raw, signal) => { const p = raw as Prepared; await this.api.request('DELETE', `${this.base}/events/${encodeURIComponent(p.event!.id)}?sendUpdates=none`, undefined, signal, p.etag); return { deleted: true }; },
+        async (raw, signal) => { const p = raw as Prepared; await this.api.request('DELETE', `${this.base}/events/${encodeURIComponent(p.event!.id)}?sendUpdates=none`, undefined, signal, p.etag); return { deleted: true, sendUpdates: 'none' }; },
         async (raw, signal) => { const event = await this.resolve((raw as { target: Target }).target, signal); if (event.recurrence?.length || !event.etag || (!event.start?.dateTime && !event.start?.date)) throw new ToolError('CONFLICT');
-          return { event, etag: event.etag, summary: `¿Confirmas eliminar «${event.summary ?? '(sin título)'}» (${event.start.dateTime ?? event.start.date}, ${this.timezone})? Solo este evento/ocurrencia.` } satisfies Prepared; })
+          return { event, etag: event.etag, summary: `¿Confirmas eliminar «${event.summary ?? '(sin título)'}» (${event.start.dateTime ?? event.start.date}, ${this.timezone})? Solo este evento/ocurrencia. Atlas no solicitará avisos de cancelación para los invitados.` } satisfies Prepared; })
     ];
   }
 }

@@ -39,6 +39,16 @@ export async function readTokens(path: string, security = new TokenFileSecurity(
     return JSON.parse(await handle.readFile('utf8')) as Credentials;
   } finally { await handle.close(); }
 }
+export class GoogleReauthorizationRequired extends ToolError {
+  constructor() { super('UNCONFIGURED'); }
+}
+
+export async function disconnectCalendarLocally(path: string): Promise<void> {
+  // Used while packaged Core is stopped. Validate ownership before unlinking.
+  await readTokens(path);
+  await unlink(path);
+}
+
 export class GoogleAuth {
   private loading?: Promise<OAuth2Client>;
   private writes: Promise<void> = Promise.resolve();
@@ -49,7 +59,12 @@ export class GoogleAuth {
       const token = await client.getAccessToken(); await this.writes;
       if (!token.token) throw new ToolError('UNCONFIGURED');
       return token.token;
-    } catch { this.loading = undefined; throw new ToolError('UNCONFIGURED'); }
+    } catch (error) {
+      this.loading = undefined;
+      const response = (error as { response?: { status?: number; data?: { error?: string } } } | null)?.response;
+      if (response?.status === 400 && response.data?.error === 'invalid_grant') throw new GoogleReauthorizationRequired();
+      throw new ToolError('UNCONFIGURED');
+    }
   }
   private async load(): Promise<OAuth2Client> {
     if (!this.config.clientId || !this.config.clientSecret) throw new ToolError('UNCONFIGURED');

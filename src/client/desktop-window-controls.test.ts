@@ -54,3 +54,13 @@ test('Tray availability gates hide fail-visible without allowing native close',(
   assert.equal(requestSafeDesktopHide({canHideSafely:()=>true,hide:()=>{hides++;return result;},unavailable:()=>{warnings++;}}),result);
   assert.deepEqual({hides,warnings},{hides:1,warnings:1});
 });
+
+test('Google settings is an explicit native menu action and carries no credential values', () => {
+  let requests = 0;
+  const menu = desktopApplicationMenu({ hide() {}, quit() {}, manageGoogle() { requests++; } });
+  const item = (menu[0]!.submenu as MenuItemConstructorOptions[]).find(entry => entry.label?.includes('Gmail'));
+  assert.ok(item);
+  assert.equal(requests, 0);
+  item.click?.(undefined as never, undefined as never, undefined as never);
+  assert.equal(requests, 1);
+});

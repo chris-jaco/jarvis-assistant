@@ -101,8 +101,8 @@ test('a Core exit after readiness but before health completion invalidates start
 
 test('Core receiver rejects invalid generations and duplicate requests and returns only a secret-free ack', () => {
   const generation = randomUUID(); const receiver = new CoreCredentialBootstrapReceiver(generation);
-  const wrong = receiver.accept(createCoreBootstrapRequest(randomUUID(), key)); assert.equal(wrong.ack.status, 'REJECTED'); assert.equal(wrong.credential, undefined);
-  const accepted = receiver.accept(createCoreBootstrapRequest(generation, key)); assert.equal(accepted.credential, key); assert.equal(accepted.ack.status, 'ACCEPTED'); assert.equal(JSON.stringify(accepted.ack).includes(key), false);
+  const wrong = receiver.accept(createCoreBootstrapRequest(randomUUID(), key)); assert.equal(wrong.ack.status, 'REJECTED'); assert.equal(wrong.credentials, undefined);
+  const accepted = receiver.accept(createCoreBootstrapRequest(generation, key)); assert.equal(accepted.credentials?.OPENAI_API_KEY, key); assert.equal(accepted.ack.status, 'ACCEPTED'); assert.equal(JSON.stringify(accepted.ack).includes(key), false);
   const duplicate = receiver.accept(createCoreBootstrapRequest(generation, key)); assert.deepEqual(duplicate.ack, { protocol: CORE_BOOTSTRAP_PROTOCOL, kind: 'ACK', generation, status: 'REJECTED', reason: 'DUPLICATE' });
   assert.equal(parseCoreBootstrapRequest({ ...createCoreBootstrapRequest(generation, key), extra: true }), undefined);
   assert.throws(() => createCoreBootstrapRequest(generation, 'x'.repeat(8_193)), /BOOTSTRAP_INVALID/);
@@ -132,4 +132,46 @@ test('development remains environment-based while packaged Core bootstrap preced
   const preload = readFileSync(resolve(import.meta.dirname, '../desktop/preload.ts'), 'utf8');
   const setupPreload = readFileSync(resolve(import.meta.dirname, '../desktop/credential-setup-preload.ts'), 'utf8');
   assert.doesNotMatch(`${preload}\n${setupPreload}`, /core-bootstrap|parentPort|OPENAI_API_KEY/);
+});
+
+test('Google bootstrap accepts only the complete pair and each Core restart needs its own ACK', async () => {
+  const google = { GOOGLE_CLIENT_ID: 'fixture-client.apps.googleusercontent.com', GOOGLE_CLIENT_SECRET: 'fixture-secret' };
+  const old = randomUUID();
+  for (const generation of [old, randomUUID()]) {
+    const request = createCoreBootstrapRequest(generation, key, google);
+    for (const invalid of [{ GOOGLE_CLIENT_ID: google.GOOGLE_CLIENT_ID }, { ...google, proxy: 'external' }, { ...google, GOOGLE_CLIENT_SECRET: '' }]) {
+      assert.equal(parseCoreBootstrapRequest({ ...request, credentials: { OPENAI_API_KEY: key, ...invalid } }), undefined);
+    }
+    const f = supervisorFixture();
+    const started = f.supervisor.start({ generation, openAIKey: key, google });
+    f.child.emit('spawn');
+    assert.deepEqual(f.child.sent, [request]);
+    const receiver = new CoreCredentialBootstrapReceiver(generation);
+    const accepted = receiver.accept(request);
+    assert.deepEqual(accepted.credentials, request.credentials);
+    assert.doesNotMatch(JSON.stringify(accepted.ack), /fixture/);
+    f.child.emit('message', { ...accepted.ack, generation: old });
+    if (generation !== old) {
+      await assert.rejects(started);
+    } else {
+      f.child.stdout.write('ATLAS_READY 43131\n');
+      await started;
+      await f.supervisor.stop();
+    }
+    assert.doesNotMatch(JSON.stringify(f.diagnostics), /fixture-secret|fixture-client/);
+    const env = backendEnvironment({ ...google, OPENAI_API_KEY: key }, 'a'.repeat(64), 'utility', generation);
+    assert.equal(env.GOOGLE_CLIENT_SECRET, undefined);
+    assert.equal(env.GOOGLE_CLIENT_ID, undefined);
+    assert.equal(env.OPENAI_API_KEY, undefined);
+  }
+});
+
+test('ACK before the credentials were sent cannot authorize readiness', async () => {
+  const f = supervisorFixture();
+  const generation = randomUUID();
+  const started = f.supervisor.start({ generation, openAIKey: key });
+  f.child.emit('message', { protocol: CORE_BOOTSTRAP_PROTOCOL, kind: 'ACK', generation, status: 'ACCEPTED' });
+  f.child.emit('spawn');
+  await assert.rejects(started, /BOOTSTRAP_REJECTED/);
+  assert.equal(f.child.sent.length, 0);
 });
