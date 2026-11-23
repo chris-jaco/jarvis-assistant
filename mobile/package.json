@@ -1,0 +1,25 @@
+{
+  "name": "atlas-android-spike",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "android": "expo run:android",
+    "start": "expo start --dev-client --localhost",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.mjs",
+    "bundle": "expo export --platform android"
+  },
+  "dependencies": {
+    "@config-plugins/react-native-webrtc": "15.0.2",
+    "expo": "56.0.24",
+    "expo-dev-client": "56.0.28",
+    "react": "19.2.3",
+    "react-native": "0.85.3",
+    "react-native-webrtc": "124.0.7"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "6.0.3"
+  }
+}

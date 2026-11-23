@@ -1,0 +1,9 @@
+/.expo/
+/android/
+/ios/
+/.gradle-cache/
+/.android-sdk/
+/.template/
+/modules/*/android/build/
+/modules/*/android/.cxx/
+/modules/*/android/.gradle/

@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "Atlas Companion",
+    "slug": "atlas-companion-dev",
+    "scheme": "atlas-companion-dev",
+    "platforms": ["android"],
+    "android": {
+      "package": "com.atlas.companion.dev",
+      "permissions": ["android.permission.BLUETOOTH_CONNECT"],
+      "blockedPermissions": ["android.permission.CAMERA", "android.permission.SYSTEM_ALERT_WINDOW", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE", "android.permission.RECORD_VIDEO", "android.permission.FOREGROUND_SERVICE_MICROPHONE", "android.permission.WAKE_LOCK"]
+    },
+    "plugins": ["expo-dev-client", "@config-plugins/react-native-webrtc", "./with-private-dev-network.cjs"]
+  }
+}
